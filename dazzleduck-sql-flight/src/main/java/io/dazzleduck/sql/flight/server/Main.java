@@ -27,6 +27,9 @@ public class Main {
             try {
                 flightServer.start();
                 System.out.println("S1: Server (Location): Listening on port " + flightServer.getPort());
+                String scheme = "grpc+tls";
+                boolean isSecure = "grpc+tls".equalsIgnoreCase(scheme);
+                System.out.printf("S1: Server (Location): Listening on port %d (%s mode)%n", flightServer.getPort(), isSecure ? "Secure" : "Insecure");
                 flightServer.awaitTermination();
             } catch (IOException | InterruptedException e) {
                 throw new RuntimeException(e);
