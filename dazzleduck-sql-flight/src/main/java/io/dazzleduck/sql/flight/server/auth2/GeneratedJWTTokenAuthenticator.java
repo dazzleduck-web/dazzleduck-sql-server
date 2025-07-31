@@ -19,6 +19,7 @@ import javax.crypto.SecretKey;
 import java.time.Duration;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -74,7 +75,8 @@ public class GeneratedJWTTokenAuthenticator extends BearerTokenAuthenticator {
         String jwt = Jwts.builder()
                 .subject(authResult.getPeerIdentity())
                 .expiration(expiration.getTime())
-                .claim("claims", Map.of("orgId", "1211")) // You can enrich this as needed
+                .claim("orgId", "1211") // this will be generated dynamically
+                .claim("clusterId", List.of("cc1", "cc2", "cc3")) // this will be generated dynamically
                 .signWith(key)
                 .compact();
 
