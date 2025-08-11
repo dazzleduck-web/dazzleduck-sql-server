@@ -49,7 +49,8 @@ public class LoginService implements HttpService {
             String jwt = Jwts.builder()
                     .subject(loginRequest.username())
                     .expiration(expiration.getTime())
-                    .claim("claims", loginRequest.claims())
+                    .claim("orgId", loginRequest.orgId())
+                    .claim("clusterId", loginRequest.clusterId())
                     .signWith(secretKey).compact();
             serverResponse.send(jwt.getBytes());
         } catch (Exception e ){

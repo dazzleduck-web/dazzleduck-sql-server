@@ -85,18 +85,19 @@ public class AuthUtils {
             passwords.put(name, password);
         });
         return config.getBoolean("httpLogin") ?
-                createHttpCredentialValidator(passwords, Map.of("orgId", "123"))
+                createHttpCredentialValidator(passwords, 123L, List.of("cc1", "cc2", "cc3"))
                 : createCredentialValidator(passwords);
     }
 
-    private static BasicCallHeaderAuthenticator.CredentialValidator createHttpCredentialValidator(Map<String, String> userPassword, Map<String, String> claims) {
+    private static BasicCallHeaderAuthenticator.CredentialValidator createHttpCredentialValidator(Map<String, String> userPassword, Long orgId, List<String> clusterId) {
         return new BasicCallHeaderAuthenticator.CredentialValidator() {
             @Override
             public CallHeaderAuthenticator.AuthResult validate(String username, String password) throws Exception {
                 String requestBody = objectMapper.writeValueAsString(Map.of(
                         "username", username,
                         "password", password,
-                        "claims", claims
+                        "orgId", orgId,
+                        "clusterId", clusterId
                 ));
 
                 HttpRequest request = HttpRequest.newBuilder()
