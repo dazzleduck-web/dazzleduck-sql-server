@@ -65,7 +65,6 @@ public class GeneratedJWTTokenAuthenticator extends BearerTokenAuthenticator {
         String bearerToken = AuthUtilities.getValueFromAuthHeader(dummyHeaders, Auth2Constants.BEARER_PREFIX);
 
         if (!Strings.isNullOrEmpty(bearerToken)) {
-            Token.token = bearerToken;
             return authResult; // Already has JWT from AuthUtils
         }
 
@@ -80,8 +79,6 @@ public class GeneratedJWTTokenAuthenticator extends BearerTokenAuthenticator {
                 .claim("clusterId", List.of("cc1", "cc2", "cc3")) // this will be generated dynamically
                 .signWith(key)
                 .compact();
-
-        Token.token = jwt;
 
         return new AuthResult() {
             @Override
