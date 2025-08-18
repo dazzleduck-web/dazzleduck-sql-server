@@ -5,11 +5,13 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import com.typesafe.config.ConfigObject;
 import io.dazzleduck.sql.common.auth.Validator;
+import io.jsonwebtoken.security.Keys;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.auth2.Auth2Constants;
 import org.apache.arrow.flight.auth2.BasicCallHeaderAuthenticator;
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator;
 
+import javax.crypto.SecretKey;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -31,8 +33,11 @@ public class AuthUtils {
     public static CallHeaderAuthenticator getAuthenticator(Config config) throws NoSuchAlgorithmException {
         BasicCallHeaderAuthenticator.CredentialValidator validator = createCredentialValidator(config);
         CallHeaderAuthenticator authenticator = new BasicCallHeaderAuthenticator(validator);
-        var secretKey = Validator.generateRandoSecretKey();
-        return new GeneratedJWTTokenAuthenticator( authenticator, secretKey, config);
+        String secretKeyStr = config.hasPath("secretKey")
+                ? config.getString("secretKey")
+                : "change_me";
+        SecretKey secretKey = Keys.hmacShaKeyFor(secretKeyStr.getBytes(StandardCharsets.UTF_8));
+        return new GeneratedJWTTokenAuthenticator(authenticator, secretKey, config);
     }
 
     public static CallHeaderAuthenticator getAuthenticator() throws NoSuchAlgorithmException {
@@ -77,26 +82,28 @@ public class AuthUtils {
     }
 
     public static BasicCallHeaderAuthenticator.CredentialValidator createCredentialValidator(Config config) {
-        List<? extends ConfigObject> users = config.getObjectList("users");
-        Map<String, String> passwords = new HashMap<>();
-        users.forEach(o -> {
-            String name = o.toConfig().getString("username");
-            String password = o.toConfig().getString("password");
-            passwords.put(name, password);
-        });
         return config.getBoolean("httpLogin") ?
-                createHttpCredentialValidator(passwords, Map.of("orgId", "123"))
-                : createCredentialValidator(passwords);
+                createHttpCredentialValidator()
+                : createCredentialValidator();
     }
 
-    private static BasicCallHeaderAuthenticator.CredentialValidator createHttpCredentialValidator(Map<String, String> userPassword, Map<String, String> claims) {
+    private static BasicCallHeaderAuthenticator.CredentialValidator createHttpCredentialValidator() {
         return new BasicCallHeaderAuthenticator.CredentialValidator() {
             @Override
             public CallHeaderAuthenticator.AuthResult validate(String username, String password) throws Exception {
+                String[] parts = username.split("\\|");
+                String actualUsername = parts[0];
+                String org = parts.length > 1 ? parts[1] : "0";
+                Long orgId;
+                try {
+                    orgId = Long.valueOf(org);
+                } catch (NumberFormatException e) {
+                    throw new RuntimeException("Invalid orgId: " + org, e);
+                }
                 String requestBody = objectMapper.writeValueAsString(Map.of(
-                        "username", username,
+                        "username", actualUsername,
                         "password", password,
-                        "claims", claims
+                        "orgId", orgId
                 ));
 
                 HttpRequest request = HttpRequest.newBuilder()
@@ -126,29 +133,48 @@ public class AuthUtils {
         };
     }
 
-    private static BasicCallHeaderAuthenticator.CredentialValidator createCredentialValidator(Map<String, String> userPassword) {
-        Map<String, byte[]> userHashMap = new HashMap<>();
-        userPassword.forEach((u, p) -> userHashMap.put(u, Validator.hash(p)));
+    private static BasicCallHeaderAuthenticator.CredentialValidator createCredentialValidator() {
         return new BasicCallHeaderAuthenticator.CredentialValidator() {
             @Override
             public CallHeaderAuthenticator.AuthResult validate(String username, String password) throws Exception {
-                var storePassword = userHashMap.get(username);
-                if (storePassword != null &&
-                        !password.isEmpty() &&
-                        Validator.passwordMatch(storePassword, Validator.hash(password))) {
+                String[] parts = username.split("\\|");
+                String actualUsername = parts[0];
+                String org = parts.length > 1 ? parts[1] : "0";
+                String requestBody = objectMapper.writeValueAsString(Map.of(
+                        "email", actualUsername,
+                        "password", password
+                ));
+                Long orgId;
+                try {
+                    orgId = Long.valueOf(org);
+                } catch (NumberFormatException e) {
+                    throw new RuntimeException("Invalid orgId: " + org, e);
+                }
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:8080/api/login/org/" + orgId))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                String jwt = response.body();
+
+                if (response.statusCode() == 200 && jwt != null) {
                     return new CallHeaderAuthenticator.AuthResult() {
                         @Override
                         public String getPeerIdentity() {
-                            return username;
+                            return actualUsername;
+                        }
+                        @Override
+                        public void appendToOutgoingHeaders(CallHeaders headers) {
+                            headers.insert(Auth2Constants.AUTHORIZATION_HEADER, "Bearer " + jwt);
                         }
                     };
                 } else {
-                    throw new RuntimeException("Authentication failure");
+                    throw new RuntimeException("Authentication failure: " + response.statusCode() + " - " + response.body());
                 }
             }
         };
     }
-
 
     private static final BasicCallHeaderAuthenticator.CredentialValidator NO_AUTH_CREDENTIAL_VALIDATOR = new BasicCallHeaderAuthenticator.CredentialValidator() {
         @Override

@@ -9,6 +9,9 @@ import io.helidon.logging.common.LogConfig;
 import io.helidon.webserver.WebServer;
 import org.apache.arrow.memory.RootAllocator;
 
+import javax.crypto.SecretKey;
+import io.jsonwebtoken.security.Keys;
+import java.util.Base64;
 import java.security.NoSuchAlgorithmException;
 
 
@@ -45,14 +48,18 @@ public class Main {
         var auth = appConfig.hasPath("auth") ? appConfig.getString("auth") : null;
         String warehousePath = appConfig.hasPath("warehousePath") ?
                 appConfig.getString("warehousePath") : System.getProperty("user.dir") + "/warehouse";
-        var secretKey = Validator.generateRandoSecretKey();
+        String secretKeyStr = appConfig.hasPath("secretKey")
+                ? appConfig.getString("secretKey")
+                : "change_me";  // fallback
+        byte[] decodedKey = Base64.getDecoder().decode(secretKeyStr);
+        SecretKey secretKey = Keys.hmacShaKeyFor(decodedKey);
         var allocator = new RootAllocator();
         String location = "http://localhost:" + port;
         WebServer server = WebServer.builder()
                 .config(helidonConfig.get("flight-sql"))
                 .routing(routing -> {
                     var b = routing.register("/query", new QueryService(allocator))
-                            .register("/login", new LoginService(appConfig, secretKey))
+                            .register("/login", new LoginService())
                             .register("/plan", new PlaningService(location, allocator))
                             .register("/ingest", new IngestionService(warehousePath, allocator));
                     if ("jwt".equals(auth)) {

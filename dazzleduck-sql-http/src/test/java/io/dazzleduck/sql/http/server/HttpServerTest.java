@@ -141,7 +141,7 @@ public class HttpServerTest {
     @Test
     public void testLogin() throws IOException, InterruptedException {
         var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/login"))
-                .POST(HttpRequest.BodyPublishers.ofByteArray(objectMapper.writeValueAsBytes(new LoginObject("admin", "admin", Map.of("org", "123")))))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(objectMapper.writeValueAsBytes(new LoginObject("admin", "admin", 123L))))
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, inputStreamResponse.statusCode());

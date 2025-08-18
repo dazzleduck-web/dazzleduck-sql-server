@@ -14,25 +14,18 @@ import org.slf4j.LoggerFactory;
 
 import javax.crypto.SecretKey;
 import java.io.IOException;
-import java.time.Duration;
-import java.util.Calendar;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.Map;
 
 public class LoginService implements HttpService {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final Logger logger = LoggerFactory.getLogger(LoginService.class);
-    private final Config config;
-    private final SecretKey secretKey;
-    private final Validator authenticator;
-    private final Duration expiration;
+    private static final HttpClient httpClient = HttpClient.newHttpClient();
 
-    public LoginService(Config config, SecretKey secretKey) {
-        this.config = config;
-        this.authenticator = Validator.load(config);
-        this.secretKey = secretKey;
-        this.expiration = config.getDuration("jwt.token.expiration");
-    }
     @Override
     public void routing(HttpRules rules) {
         rules.post("/", this::handleLogin);
@@ -42,19 +35,33 @@ public class LoginService implements HttpService {
         var inputStream = serverRequest.content().inputStream();
         var loginRequest = MAPPER.readValue(inputStream, LoginObject.class);
         try {
-            authenticator.validate(loginRequest.username(), loginRequest.password());
-            Calendar expiration = Calendar.getInstance();
-            expiration.add(Calendar.MINUTE,
-                    (int)this.expiration.toMinutes());
-            String jwt = Jwts.builder()
-                    .subject(loginRequest.username())
-                    .expiration(expiration.getTime())
-                    .claim("claims", loginRequest.claims())
-                    .signWith(secretKey).compact();
-            serverResponse.send(jwt.getBytes());
-        } catch (Exception e ){
+            String requestBody = MAPPER.writeValueAsString(Map.of(
+                    "email", loginRequest.username(),
+                    "password", loginRequest.password()
+            ));
+            Long orgId = loginRequest.orgId();
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:8080/api/login/org/" + orgId))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200 && response.body() != null) {
+                String jwt = response.body();
+                serverResponse.status(Status.OK_200);
+                serverResponse.send(jwt);
+            } else {
+                logger.warn("Login failed with status {}: {}", response.statusCode(), response.body());
+                serverResponse.status(Status.UNAUTHORIZED_401);
+                serverResponse.send("Invalid credentials");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // restore interrupt flag
             serverResponse.status(Status.UNAUTHORIZED_401);
-            serverResponse.send();
+            serverResponse.send("Authentication interrupted");
         }
     }
 }

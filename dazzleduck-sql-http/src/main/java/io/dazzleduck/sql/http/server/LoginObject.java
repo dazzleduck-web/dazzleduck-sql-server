@@ -1,16 +1,14 @@
 package io.dazzleduck.sql.http.server;
 
-import java.util.Map;
-
-public record LoginObject(String username, String password, Map<String, Object> claims) {
+public record LoginObject(String username, String password, Long orgId) {
 
     public LoginObject {
-        if (claims == null) {
-            claims = Map.of();
+        if (orgId == null) {
+            orgId = 0L;
         }
     }
 
     public LoginObject(String username, String password) {
-        this(username, password, Map.of());
+        this(username, password, 0L);
     }
 }

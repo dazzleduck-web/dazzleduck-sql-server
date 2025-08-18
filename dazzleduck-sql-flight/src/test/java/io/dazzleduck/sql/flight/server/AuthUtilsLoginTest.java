@@ -17,11 +17,11 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class AuthUtilsLoginTest {
-    private static final String USER = "admin";
-    private static final String PASSWORD = "admin"; // for httpLogin
+    private static final String USER = "tanejagagan@gmail.com|49";
+    private static final String PASSWORD = "secret123"; // for httpLogin
     private static final String LOCALHOST = "localhost";
     private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
-    private static final int HTTP_PORT = 8080;
+    private static final int HTTP_PORT = 8090;
     private static FlightSqlClient sqlClient;
     private static String warehousePath;
 
