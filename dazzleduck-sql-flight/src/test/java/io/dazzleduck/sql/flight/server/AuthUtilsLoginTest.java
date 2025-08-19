@@ -17,7 +17,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class AuthUtilsLoginTest {
-    private static final String USER = "tanejagagan@gmail.com|49";
+    private static final String USER = "tanejagagan@gmail.com@49";
     private static final String PASSWORD = "secret123"; // for httpLogin
     private static final String LOCALHOST = "localhost";
     private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
@@ -40,7 +40,7 @@ public class AuthUtilsLoginTest {
     }
 
     private static void setUpFlightServerAndClient() throws Exception {
-        io.dazzleduck.sql.flight.server.Main.main(new String[]{"--conf", "port=55556", "--conf", "httpLogin=true", "--conf", "useEncryption=false"});
+        io.dazzleduck.sql.flight.server.Main.main(new String[]{"--conf", "port=55556", "--conf", "httpLogin=false", "--conf", "useEncryption=false"});
         final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55556);
         sqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
                 .intercept(AuthUtils.createClientMiddlewareFactory(USER, PASSWORD, Map.of()))

@@ -91,9 +91,17 @@ public class AuthUtils {
         return new BasicCallHeaderAuthenticator.CredentialValidator() {
             @Override
             public CallHeaderAuthenticator.AuthResult validate(String username, String password) throws Exception {
-                String[] parts = username.split("\\|");
-                String actualUsername = parts[0];
-                String org = parts.length > 1 ? parts[1] : "0";
+                int index = username.lastIndexOf("@");
+                String actualUsername = username;
+                String org = "0";
+
+                if (index != -1) {
+                    actualUsername = username.substring(0, index);
+                    String orgPart = username.substring(index + 1);
+                    if (!orgPart.isEmpty()) {
+                        org = orgPart;
+                    }
+                }
                 Long orgId;
                 try {
                     orgId = Long.valueOf(org);
@@ -107,7 +115,7 @@ public class AuthUtils {
                 ));
 
                 HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create("http://localhost:8080/login"))
+                        .uri(URI.create("http://localhost:8090/login"))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
@@ -137,19 +145,29 @@ public class AuthUtils {
         return new BasicCallHeaderAuthenticator.CredentialValidator() {
             @Override
             public CallHeaderAuthenticator.AuthResult validate(String username, String password) throws Exception {
-                String[] parts = username.split("\\|");
-                String actualUsername = parts[0];
-                String org = parts.length > 1 ? parts[1] : "0";
-                String requestBody = objectMapper.writeValueAsString(Map.of(
-                        "email", actualUsername,
-                        "password", password
-                ));
+                int index = username.lastIndexOf("@");
+                String actualUsername;
+                String org = "0";
+                if (index != -1) {
+                    actualUsername = username.substring(0, index);
+                    String orgPart = username.substring(index + 1);
+                    if (!orgPart.isEmpty()) {
+                        org = orgPart;
+                    }
+                } else {
+                    actualUsername = username;
+                }
                 Long orgId;
                 try {
                     orgId = Long.valueOf(org);
                 } catch (NumberFormatException e) {
                     throw new RuntimeException("Invalid orgId: " + org, e);
                 }
+                String requestBody = objectMapper.writeValueAsString(Map.of(
+                        "email", actualUsername,
+                        "password", password
+                ));
+
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:8080/api/login/org/" + orgId))
                         .header("Content-Type", "application/json")
