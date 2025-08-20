@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.flight.server;
 
 
+import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.authorization.*;
@@ -64,6 +65,7 @@ public class DuckDBFlightSqlProducerTest {
     protected static FlightServer flightServer;
     protected static FlightSqlClient sqlClient;
     protected static String warehousePath;
+    private static final Config config = ConfigFactory.load("application.conf");
 
     @BeforeAll
     public static void beforeAll() throws Exception {
@@ -96,7 +98,7 @@ public class DuckDBFlightSqlProducerTest {
                                 "change me",
                                 serverAllocator, warehousePath, AccessMode.COMPLETE,
                                 new NOOPAuthorizer()))
-                .headerAuthenticator(AuthUtils.getAuthenticator())
+                .headerAuthenticator(AuthUtils.getAuthenticator(config))
                 .build()
                 .start();
         sqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
@@ -428,7 +430,7 @@ public class DuckDBFlightSqlProducerTest {
                                 UUID.randomUUID().toString(),
                                 "change me",
                                 serverAllocator, warehousePath, AccessMode.RESTRICTED, authorizer))
-                .headerAuthenticator(AuthUtils.getAuthenticator())
+                .headerAuthenticator(AuthUtils.getAuthenticator(config))
                 .build()
                 .start();
 

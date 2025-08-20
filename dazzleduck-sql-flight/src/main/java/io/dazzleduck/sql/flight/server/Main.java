@@ -51,7 +51,7 @@ public class Main {
         if(!checkWarehousePath(warehousePath)) {
             System.out.printf("Warehouse dir does not exist %s. Create the dir to proceed", warehousePath);
         }
-        AccessMode accessMode = config.hasPath("accessMode") ? AccessMode.valueOf(config.getString("accessNode")) : AccessMode.COMPLETE;
+        AccessMode accessMode = config.hasPath("accessMode") ? AccessMode.valueOf(config.getString("accessMode")) : AccessMode.COMPLETE;
         BufferAllocator allocator = new RootAllocator();
         var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, new NOOPAuthorizer());
         var certStream =  getInputStreamForResource(serverCertLocation);

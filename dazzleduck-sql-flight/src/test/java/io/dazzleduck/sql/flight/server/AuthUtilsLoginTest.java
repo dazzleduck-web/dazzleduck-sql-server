@@ -17,14 +17,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class AuthUtilsLoginTest {
-    private static final String USER = "admin";
-    private static final String PASSWORD = "admin"; // for httpLogin
+    private static final String USER = "tanejagagan@gmail.com";
+    private static final String PASSWORD = "secret123"; // for httpLogin
     private static final String LOCALHOST = "localhost";
 
-    private static final String CLUSTER_HEADER_KEY = "cluster_id";
-    private static final String TEST_CLUSTER = "TEST_CLUSTER";
+    private static final String ORG_HEADER_KEY = "orgId";
+    private static final String TEST_ORG = "49";
     private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
-    private static final int HTTP_PORT = 8080;
+    private static final int HTTP_PORT = 8090;
     private static FlightSqlClient sqlClient;
 
     private static final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55556);
@@ -46,10 +46,10 @@ public class AuthUtilsLoginTest {
     }
 
     private static void setUpFlightServerAndClient() throws Exception {
-        io.dazzleduck.sql.flight.server.Main.main(new String[]{"--conf", "port=55556", "--conf", "httpLogin=true", "--conf", "useEncryption=false", "--conf", "jwt.token.claims.headers=[%s]".formatted(CLUSTER_HEADER_KEY)});
+        io.dazzleduck.sql.flight.server.Main.main(new String[]{"--conf", "port=55556", "--conf", "httpLogin=true", "--conf", "useEncryption=false", "--conf", "jwt.token.claims.headers=[%s]".formatted(ORG_HEADER_KEY)});
 
         sqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
-                .intercept(AuthUtils.createClientMiddlewareFactory(USER, PASSWORD, Map.of(CLUSTER_HEADER_KEY, TEST_CLUSTER)))
+                .intercept(AuthUtils.createClientMiddlewareFactory(USER, PASSWORD, Map.of(ORG_HEADER_KEY, TEST_ORG)))
                 .build());
     }
 
@@ -68,12 +68,12 @@ public class AuthUtilsLoginTest {
                 .intercept(AuthUtils.createClientMiddlewareFactory(USER, PASSWORD, Map.of()))
                 .build());
         var callHeaders = new FlightCallHeaders();
-        callHeaders.insert(CLUSTER_HEADER_KEY, TEST_CLUSTER);
+        callHeaders.insert(ORG_HEADER_KEY, TEST_ORG);
         var headerCallOptions = new HeaderCallOption(callHeaders);
         var result = sqlClientWithoutHeader.execute("select 1", headerCallOptions);
         assertNotNull(result);
         var badCallHeaders = new FlightCallHeaders();
-        badCallHeaders.insert(CLUSTER_HEADER_KEY, "bad_cluster");
+        badCallHeaders.insert(ORG_HEADER_KEY, "bad_org");
         assertThrows(FlightRuntimeException.class, () -> sqlClientWithoutHeader.execute("select 1", new HeaderCallOption(badCallHeaders)));
     }
 

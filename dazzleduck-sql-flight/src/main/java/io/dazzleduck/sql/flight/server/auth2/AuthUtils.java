@@ -75,16 +75,9 @@ public class AuthUtils {
     }
 
     public static AdvanceBasicCallHeaderAuthenticator.AdvanceCredentialValidator createCredentialValidator(Config config) {
-        List<? extends ConfigObject> users = config.getObjectList("users");
-        Map<String, String> passwords = new HashMap<>();
-        users.forEach(o -> {
-            String name = o.toConfig().getString("username");
-            String password = o.toConfig().getString("password");
-            passwords.put(name, password);
-        });
         return config.getBoolean("httpLogin") ?
                 createHttpCredentialValidator(config.getStringList("jwt.token.claims.headers"))
-                : createCredentialValidator(passwords);
+                : createCredentialValidator();
     }
 
     private static AdvanceBasicCallHeaderAuthenticator.AdvanceCredentialValidator createHttpCredentialValidator(List<String> jwtClaims) {
@@ -101,7 +94,7 @@ public class AuthUtils {
             ));
 
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://localhost:8080/login"))
+                    .uri(URI.create("http://localhost:8090/login"))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
@@ -126,14 +119,20 @@ public class AuthUtils {
         };
     }
 
-    private static AdvanceBasicCallHeaderAuthenticator.AdvanceCredentialValidator createCredentialValidator(Map<String, String> userPassword) {
-        Map<String, byte[]> userHashMap = new HashMap<>();
-        userPassword.forEach((u, p) -> userHashMap.put(u, Validator.hash(p)));
+    private static AdvanceBasicCallHeaderAuthenticator.AdvanceCredentialValidator createCredentialValidator() {
         return (username, password, callHeaders) -> {
-            var storePassword = userHashMap.get(username);
-            if (storePassword != null &&
-                    !password.isEmpty() &&
-                    Validator.passwordMatch(storePassword, Validator.hash(password))) {
+            String requestBody = objectMapper.writeValueAsString(Map.of(
+                    "email", username,
+                    "password", password
+            ));
+            Long orgId = Long.valueOf(callHeaders.get("orgId"));
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:8080/api/login/org/" + orgId))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
                 return (CallHeaderAuthenticator.AuthResult) () -> username;
             } else {
                 throw new RuntimeException("Authentication failure");

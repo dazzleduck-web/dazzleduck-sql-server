@@ -2,7 +2,7 @@ package io.dazzleduck.sql.http.server;
 
 import java.util.Map;
 
-public record LoginObject(String username, String password, Map<String, Object> claims) {
+public record LoginObject(String username, String password, Map<String, String> claims) {
 
     public LoginObject {
         if (claims == null) {
