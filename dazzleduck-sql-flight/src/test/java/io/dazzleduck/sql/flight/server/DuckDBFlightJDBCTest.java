@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class DuckDBFlightJDBCTest {
 
+    private static final String startupQuery = "\"CREATE TABLE a  (key string); INSERT INTO a VALUES('k');\\n-- This is a single-line comment \\nINSERT INTO a VALUES('k2');/* this  is comment */\\n\\nINSERT INTO a VALUES('k3')\"";
     private static final String LONG_RUNNING_QUERY = "with t as " +
             "(select len(split(concat('abcdefghijklmnopqrstuvwxyz:', generate_series), ':')) as len  from generate_series(1, 1000000000) )" +
             " select count(*) from t where len = 10";
@@ -29,7 +30,7 @@ public class DuckDBFlightJDBCTest {
     static String url = String.format("jdbc:arrow-flight-sql://localhost:%s/?database=memory&useEncryption=0&user=admin&password=admin", port);
     @BeforeAll
     public static void beforeAll() throws IOException, NoSuchAlgorithmException {
-        String[] args = {"--conf", "port=" + port, "--conf", "useEncryption=false"};
+        String[] args = {"--conf", "port=" + port, "--conf", "useEncryption=false", "--conf", "startupFile=" + startupQuery};
         flightServer = Main.createServer(args);
         Thread severThread = new Thread(() -> {
             try {
@@ -52,6 +53,11 @@ public class DuckDBFlightJDBCTest {
 
     private static Connection getConnection() throws SQLException {
         return DriverManager.getConnection(url);
+    }
+
+    @Test
+    public void executeMulti() {
+        ConnectionPool.printResult("select * from a");
     }
 
     @Test

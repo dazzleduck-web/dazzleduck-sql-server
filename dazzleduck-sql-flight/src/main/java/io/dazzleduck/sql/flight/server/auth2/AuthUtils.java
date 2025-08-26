@@ -96,7 +96,7 @@ public class AuthUtils {
             }
 
             String requestBody = objectMapper.writeValueAsString(Map.of(
-                    "username", username,
+                    "email", username,
                     "password", password,
                     "claims", claimMap
             ));
