@@ -378,13 +378,10 @@ public class DuckDBFlightSqlProducerTest {
 
     @Test
     public void httpStartUpTest() throws Exception {
-        HttpStartupConfigProvider provider = new HttpStartupConfigProvider();
-        String startUpFileLocation = provider.getHttpStartupScript();
         var classConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PROVIDER_CLASS_KEY, HttpStartupConfigProvider.class.getName());
-        var locationConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, SCRIPT_LOCATION_KEY, startUpFileLocation);
         Map<String, String> claims = Map.of("orgId", "1", "cluster", "cc1");
         String claimsJson = new ObjectMapper().writeValueAsString(claims);
-        Main.main(new String[]{"--conf", classConfig, "--conf", locationConfig, "--conf", "claims=" + claimsJson});
+        Main.main(new String[]{"--conf", classConfig, "--conf", "claims=" + claimsJson});
     }
 
 
