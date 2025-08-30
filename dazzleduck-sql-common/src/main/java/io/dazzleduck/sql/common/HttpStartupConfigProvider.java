@@ -13,17 +13,18 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
 
-public class HttpStartupConfigProvider {
+public class HttpStartupConfigProvider implements StartupScriptProvider {
     private static final HttpClient httpClient = HttpClient.newHttpClient();
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     Config config;
     public String getHttpStartupScript() throws IOException, InterruptedException {
-        String requestBody = objectMapper.writeValueAsString(Map.of(
-                "username", config.getString("username"),
+        Map<String, Object> body = Map.of(
+                "email", config.getString("username"),
                 "password", config.getString("password"),
-                "claims", config.hasPath("claims") ? config.getString("claims") : ""
-        ));
+                "claims", config.hasPath("claims") ? objectMapper.readValue(config.getString("claims"), Map.class) : Map.of()
+        );
+        String requestBody = objectMapper.writeValueAsString(body);
         String baseUrl = "http://localhost:8080/api/orgs";
         String uri = config.hasPath("orgId") ? baseUrl + "/" + config.getString("orgId") : baseUrl;
         HttpRequest request = HttpRequest.newBuilder()
@@ -42,5 +43,15 @@ public class HttpStartupConfigProvider {
         } else {
             throw new IOException("Unexpected response: " + response.statusCode() + " - " + response.body());
         }
+    }
+
+    @Override
+    public void loadInner(Config config) {
+        this.config = config;
+    }
+
+    @Override
+    public String getStartupScript() throws IOException {
+        return "";
     }
 }

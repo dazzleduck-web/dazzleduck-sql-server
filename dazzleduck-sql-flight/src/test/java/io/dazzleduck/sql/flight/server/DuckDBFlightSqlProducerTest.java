@@ -1,8 +1,10 @@
 package io.dazzleduck.sql.flight.server;
 
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.Headers;
+import io.dazzleduck.sql.common.HttpStartupConfigProvider;
 import io.dazzleduck.sql.common.LocalStartupConfigProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.authorization.*;
@@ -34,10 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 import static io.dazzleduck.sql.common.LocalStartupConfigProvider.SCRIPT_LOCATION_KEY;
 import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
@@ -376,6 +375,18 @@ public class DuckDBFlightSqlProducerTest {
             stmt.execute("DROP TABLE a");
         }
     }
+
+    @Test
+    public void httpStartUpTest() throws Exception {
+        HttpStartupConfigProvider provider = new HttpStartupConfigProvider();
+        String startUpFileLocation = provider.getHttpStartupScript();
+        var classConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PROVIDER_CLASS_KEY, HttpStartupConfigProvider.class.getName());
+        var locationConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, SCRIPT_LOCATION_KEY, startUpFileLocation);
+        Map<String, String> claims = Map.of("orgId", "1", "cluster", "cc1");
+        String claimsJson = new ObjectMapper().writeValueAsString(claims);
+        Main.main(new String[]{"--conf", classConfig, "--conf", locationConfig, "--conf", "claims=" + claimsJson});
+    }
+
 
     record ServerClient(FlightServer flightServer, FlightSqlClient flightSqlClient, RootAllocator clientAllocator) implements Closeable {
         @Override
