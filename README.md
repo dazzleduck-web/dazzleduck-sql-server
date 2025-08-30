@@ -20,7 +20,7 @@ JDK  21
   `./mvnw clean package -DskipTests jib:dockerBuild`
 - Start the container with `example/data` mounted to the container
   ``` 
-  docker run -ti -v "$PWD/example/data":/local-data -p 59307:59307 -p 8080:8080 flight-sql-duckdb --conf useEncryption=false --conf warehouse=/data/warehouse
+  docker run -ti -v "$PWD/example/data":/local-data -p 59307:59307 -p 8080:8080 dazzleduck-sql --conf useEncryption=false --conf warehouse=/data/warehouse
   Warehouse Path :/data/warehouse
   Http Server is up: Listening on URL: http://localhost:8080
   Flight Server is up: Listening on URI: grpc+tcp://0.0.0.0:59307
