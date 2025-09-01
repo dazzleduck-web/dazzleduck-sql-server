@@ -31,8 +31,8 @@ public interface SplitPlanner {
         if (catalogSchemaAndTables.size() != 1) {
             throw new SQLException("unsupported number of tables or path in the query");
         }
-        var path = catalogSchemaAndTables.getFirst().tableOrPath();
-        var tableFunction =  catalogSchemaAndTables.getFirst().functionName();
+        var path = catalogSchemaAndTables.get(0).tableOrPath();
+        var tableFunction =  catalogSchemaAndTables.get(0).functionName();
         List<FileStatus> fileStatuses;
         switch (tableFunction) {
             case "read_parquet" -> {

@@ -70,7 +70,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     public static final String  DEFAULT_DATABASE = "memory";
     private final AccessMode accessMode;
     private final Set<Integer> supportedSqlInfo;
-    private final ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
     private final static Logger logger = LoggerFactory.getLogger(DuckDBFlightSqlProducer.class);
     private final Location location;
     private final String producerId;
@@ -708,8 +708,10 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
 
     @Override
-    public void close() throws Exception {
-        AutoCloseables.close(this.allocator, this.executorService);
+    public void close()  {
+        executorService.shutdown();
+        allocator.close();
+
     }
 
 

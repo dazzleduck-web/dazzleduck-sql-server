@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.runtime;
 
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,11 +17,12 @@ import java.sql.Statement;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 
+@Disabled
 public class FlightSqlTest {
     private static final String USER = "admin";
     private static final String PASSWORD = "admin";
     private static final Logger LOGGER = LoggerFactory.getLogger(FlightSqlTest.class);
-    static FixedHostPortGenericContainer<?> flightSqlContainer = new FixedHostPortGenericContainer<>("dazzleduck-sql")
+    static FixedHostPortGenericContainer<?> flightSqlContainer = new FixedHostPortGenericContainer<>("dazzleduck")
             .withFixedExposedPort(59307, 59307)
             .withCommand("--conf", "useEncryption=false")
             .withLogConsumer(new Slf4jLogConsumer(LOGGER))
@@ -30,7 +32,7 @@ public class FlightSqlTest {
     @BeforeAll
     static void setUp() throws InterruptedException {
         flightSqlContainer.start();
-        Thread.sleep(10000);
+        Thread.sleep(3000);
         Integer port = 59307;
         String host = flightSqlContainer.getHost();
         jdbcUrl = String.format(

@@ -17,98 +17,100 @@ public class ErrorHandling {
 
     private final static Logger logger = LoggerFactory.getLogger(ErrorHandling.class);
     public static void handleThrowable(Throwable t) {
-        switch (t) {
-            case NoSuchCatalogSchemaError e -> handleNoSuchDBSchema(e);
-            case SQLSyntaxErrorException e -> handleSQLSyntaxErrorException( e);
-            case SQLException s -> handleSqlException(s);
-            case IOException io -> handleIOException(io);
-            case Exception e -> {
-                var exception = CallStatus.INTERNAL
-                        .withDescription(e.getMessage())
-                        .toRuntimeException();
-                logger.atError().setCause(e).log("Error processing");
-                throw exception;
-            }
-            case Throwable e -> {
-                var exception = CallStatus.INTERNAL
-                        .withDescription(e.getMessage())
-                        .toRuntimeException();
-                logger.atError().setCause(e).log("Error processing");
-                throw exception;
-            }
+        if (t instanceof NoSuchCatalogSchemaError e) {
+            handleNoSuchDBSchema(e);
+        } else if (t instanceof SQLSyntaxErrorException e) {
+            handleSQLSyntaxErrorException(e);
+        } else if (t instanceof SQLException s) {
+            handleSqlException(s);
+        } else if (t instanceof IOException io) {
+            handleIOException(io);
+        } else if (t instanceof Exception e) {
+            var exception = CallStatus.INTERNAL
+                    .withDescription(e.getMessage())
+                    .toRuntimeException();
+            logger.atError().setCause(e).log("Error processing");
+            throw exception;
+        } else  {
+            var exception = CallStatus.INTERNAL
+                    .withDescription(t.getMessage())
+                    .toRuntimeException();
+            logger.atError().setCause(t).log("Error processing");
+            throw exception;
         }
     }
 
     public static void handleThrowable(FlightProducer.ServerStreamListener listener, Throwable t) {
-        switch (t) {
-            case NoRegisterExecutorException e -> handleNoRegisterExecutor(listener, e);
-            case NotImplemented e -> handleUnimplemented(listener, e);
-            case InvalidProtocolBufferException e -> {
-                var ex = FlightRuntimeExceptionFactory.of(new CallStatus(CallStatus.INTERNAL.code(), null, e.getMessage(), null));
-                listener.error(ex);
-            }
-            case  URISyntaxException e ->
-                    listener.error(
-                            CallStatus.INTERNAL
-                                    .withDescription(e.getMessage())
-                                    .withCause(e)
-                                    .toRuntimeException());
-
-
-            case NoSuchCatalogSchemaError e -> handleNoSuchDBSchema(listener, e);
-            case SQLSyntaxErrorException e -> handleSQLSyntaxErrorException(listener, e);
-            case SQLException s -> handleSqlException(listener, s);
-            case IOException io -> handleIOException(listener, io);
-            case Exception e -> handleException(listener, e);
-            case Throwable e -> {
-                var exception = CallStatus.INTERNAL
-                        .withDescription(e.getMessage())
-                        .toRuntimeException();
-                logger.atError().setCause(e).log("Error processing");
-                listener.error(exception);
-            }
+        if (t instanceof NoRegisterExecutorException e) {
+            handleNoRegisterExecutor(listener, e);
+        } else if (t instanceof NotImplemented e) {
+            handleUnimplemented(listener, e);
+        } else if (t instanceof InvalidProtocolBufferException e) {
+            var ex = FlightRuntimeExceptionFactory.of(new CallStatus(CallStatus.INTERNAL.code(), null, e.getMessage(), null));
+            listener.error(ex);
+        } else if (t instanceof URISyntaxException e) {
+            listener.error(
+                    CallStatus.INTERNAL
+                            .withDescription(e.getMessage())
+                            .withCause(e)
+                            .toRuntimeException());
+        } else if (t instanceof NoSuchCatalogSchemaError e) {
+            handleNoSuchDBSchema(listener, e);
+        } else if (t instanceof SQLSyntaxErrorException e) {
+            handleSQLSyntaxErrorException(listener, e);
+        } else if (t instanceof SQLException s) {
+            handleSqlException(listener, s);
+        } else if (t instanceof IOException io) {
+            handleIOException(listener, io);
+        } else if (t instanceof Exception e) {
+            handleException(listener, e);
+        } else {
+            var exception = CallStatus.INTERNAL
+                    .withDescription(t.getMessage())
+                    .toRuntimeException();
+            logger.atError().setCause(t).log("Error processing");
+            listener.error(exception);
         }
     }
 
     public static  <T> void handleThrowable(FlightProducer.StreamListener<T> listener, Throwable t) {
-        switch (t) {
-            case NoRegisterExecutorException e -> handleNoRegisterExecutor(listener, e);
-            case NotImplemented e -> handleUnimplemented(listener, e);
-            case InvalidProtocolBufferException e -> {
-                var ex = FlightRuntimeExceptionFactory.of(new CallStatus(CallStatus.INTERNAL.code(), null, e.getMessage(), null));
-                listener.onError(ex);
-            }
-            case IOException e ->
-                    listener.onError(
-                            CallStatus.INTERNAL
-                                    .withDescription(e.getMessage())
-                                    .withCause(e)
-                                    .toRuntimeException());
-
-            case  URISyntaxException e ->
-                    listener.onError(
-                            CallStatus.INTERNAL
-                                    .withDescription(e.getMessage())
-                                    .withCause(e)
-                                    .toRuntimeException());
-
-            case NoSuchCatalogSchemaError e -> handleNoSuchDBSchema(listener, e);
-            case SQLSyntaxErrorException e -> handleSQLSyntaxErrorException(listener, e);
-            case SQLException s -> handleSqlException(listener, s);
-            case Exception e -> {
-                var exception = CallStatus.INTERNAL
-                        .withDescription(e.getMessage())
-                        .toRuntimeException();
-                logger.atError().setCause(e).log("Error processing");
-                listener.onError(exception);
-            }
-            case Throwable e -> {
-                var exception = CallStatus.INTERNAL
-                        .withDescription(e.getMessage())
-                        .toRuntimeException();
-                logger.atError().setCause(e).log("Error processing");
-                listener.onError(exception);
-            }
+        if (t instanceof NoRegisterExecutorException e) {
+            handleNoRegisterExecutor(listener, e);
+        } else if (t instanceof NotImplemented e) {
+            handleUnimplemented(listener, e);
+        } else if (t instanceof InvalidProtocolBufferException e) {
+            var ex = FlightRuntimeExceptionFactory.of(new CallStatus(CallStatus.INTERNAL.code(), null, e.getMessage(), null));
+            listener.onError(ex);
+        } else if (t instanceof IOException e) {
+            listener.onError(
+                    CallStatus.INTERNAL
+                            .withDescription(e.getMessage())
+                            .withCause(e)
+                            .toRuntimeException());
+        } else if (t instanceof URISyntaxException e) {
+            listener.onError(
+                    CallStatus.INTERNAL
+                            .withDescription(e.getMessage())
+                            .withCause(e)
+                            .toRuntimeException());
+        } else if (t instanceof NoSuchCatalogSchemaError e) {
+            handleNoSuchDBSchema(listener, e);
+        } else if (t instanceof SQLSyntaxErrorException e) {
+            handleSQLSyntaxErrorException(listener, e);
+        } else if (t instanceof SQLException s) {
+            handleSqlException(listener, s);
+        } else if (t instanceof Exception e) {
+            var exception = CallStatus.INTERNAL
+                    .withDescription(e.getMessage())
+                    .toRuntimeException();
+            logger.atError().setCause(e).log("Error processing");
+            listener.onError(exception);
+        } else {
+            var exception = CallStatus.INTERNAL
+                    .withDescription(t.getMessage())
+                    .toRuntimeException();
+            logger.atError().setCause(t).log("Error processing");
+            listener.onError(exception);
         }
     }
 

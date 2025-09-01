@@ -135,7 +135,7 @@ public class SimpleAuthorizer implements SqlAuthorizer {
         if (catalogSchemaTables.size() != 1) {
             throw new UnauthorizedException("%s TableOrPath/Path found: Only one table or path is supported".formatted(catalogSchemaTables.size()));
         }
-        var catalogSchemaTable = catalogSchemaTables.getFirst();
+        var catalogSchemaTable = catalogSchemaTables.get(0);
 
         var key = new AccessKey(user, catalogSchemaTable);
         var a = accessMap.get(key);

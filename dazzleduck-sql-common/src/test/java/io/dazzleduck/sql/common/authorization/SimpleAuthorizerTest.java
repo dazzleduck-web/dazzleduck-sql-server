@@ -128,7 +128,7 @@ public class SimpleAuthorizerTest {
         Transformations.getAllTablesOrPathsFromSelect(Transformations.getFirstStatementNode(tree), "c", "s");
         assertEquals(1, tableOrPaths.size());
         assertEquals(new Transformations.CatalogSchemaTable(null, null, expectedTablePath, tableType, functionName),
-                tableOrPaths.getFirst());
+                tableOrPaths.get(0));
     }
 
     @ParameterizedTest
@@ -139,7 +139,7 @@ public class SimpleAuthorizerTest {
         Transformations.getAllTablesOrPathsFromSelect(Transformations.getFirstStatementNode(tree), "c", "s");
         assertEquals(1, tableOrPaths.size());
         assertEquals(new CatalogSchemaTable("c", "s", expectedPath, tableType),
-                tableOrPaths.getFirst());
+                tableOrPaths.get(0));
     }
 
     @Test
