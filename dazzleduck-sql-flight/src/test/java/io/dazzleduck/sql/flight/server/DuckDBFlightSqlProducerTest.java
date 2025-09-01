@@ -38,7 +38,9 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.util.*;
 
+import static io.dazzleduck.sql.common.HttpStartupConfigProvider.*;
 import static io.dazzleduck.sql.common.LocalStartupConfigProvider.SCRIPT_LOCATION_KEY;
+import static io.dazzleduck.sql.common.StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX;
 import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_DELTA_PATH_QUERY;
 import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY;
@@ -378,10 +380,16 @@ public class DuckDBFlightSqlProducerTest {
 
     @Test
     public void httpStartUpTest() throws Exception {
+        var loginUrl = "\"http://localhost:8080/api/login\"";
+        var startUpUrl = "\"http://localhost:8080/api/orgs/\"";
+        var claims = Map.of("orgId", "1", "cluster", "1");
         var classConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PROVIDER_CLASS_KEY, HttpStartupConfigProvider.class.getName());
-        Map<String, String> claims = Map.of("orgId", "1", "cluster", "cc1");
-        String claimsJson = new ObjectMapper().writeValueAsString(claims);
-        Main.main(new String[]{"--conf", classConfig, "--conf", "claims=" + claimsJson});
+        var scriptUrlConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, SCRIPT_URL_KEY, startUpUrl);
+        var loginUrlConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, LOGIN_URL_KEY, loginUrl);
+        var claimsConfig = "%s.%s=%s".formatted(STARTUP_SCRIPT_CONFIG_PREFIX, STRING_CLAIMS_KEY, claims);
+        var usernameConfig = "%s.%s=\"%s\"".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, STARTUP_USER_KEY, "tanejagagan@gmail.com");
+        var passwordConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, STARTUP_PASS_KEY, "secret123");
+        Main.main(new String[]{"--conf", classConfig, "--conf", scriptUrlConfig, "--conf", loginUrlConfig, "--conf", claimsConfig, "--conf", usernameConfig, "--conf", passwordConfig});
     }
 
 
