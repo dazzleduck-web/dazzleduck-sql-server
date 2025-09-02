@@ -67,6 +67,7 @@ public class SimpleAuthorizer implements SqlAuthorizer {
     public static SqlAuthorizer load(Config config) throws IOException {
         var userGroupMapping = loadUsrGroupMapping(config);
         var accessRows = loadAccessRows();
+        // we can add an http implementation here and get the access group and access users and return that into SimpleAuthorizer
         return new SimpleAuthorizer(userGroupMapping, accessRows);
     }
 
