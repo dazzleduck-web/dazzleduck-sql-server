@@ -1,20 +1,21 @@
 package io.dazzleduck.sql.flight.server;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.auth.UnauthorizedException;
-import io.dazzleduck.sql.common.authorization.AccessRow;
-import io.dazzleduck.sql.common.authorization.SimpleAuthorizer;
-import io.dazzleduck.sql.common.authorization.SqlAuthorizer;
+import io.dazzleduck.sql.common.authorization.*;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.commons.util.TestConstants;
 import org.junit.jupiter.api.Test;
 
-import java.sql.Date;
-import java.sql.SQLException;
+import java.sql.*;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+
+import static io.dazzleduck.sql.common.authorization.LocalAuthorizationConfigProvider.AUTHORIZATION_KEY;
+import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 
 public class AccessControlTest {
 
@@ -70,5 +71,14 @@ public class AccessControlTest {
         var query = Transformations.parseToTree(aggregateSql);
         var authorizedQuery = sqlAuthorizer.authorize("test_user", "test_db", "test_schema", query);
         Transformations.parseToSql(authorizedQuery);
+    }
+
+    @Test
+    public void authorizationTest() throws Exception {
+        var conf = ConfigFactory.load();
+        var serverConf = conf.getConfig(CONFIG_PATH);
+        var classConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, AuthorizationProvider.AUTHORIZATION_CONFIG_PROVIDER_CLASS_KEY, LocalAuthorizationConfigProvider.class.getName());
+        var accessConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, AUTHORIZATION_KEY, serverConf);
+        Main.main(new String[]{"--conf", classConfig, "--conf", accessConfig});
     }
 }

@@ -13,7 +13,7 @@ public class LocalAuthorizationConfigProvider implements AuthorizationProvider {
         if (conf != null) {
             return SimpleAuthorizer.load(config);
         }
-        return new NOOPAuthorizer();
+        return null;
     }
 
     @Override
