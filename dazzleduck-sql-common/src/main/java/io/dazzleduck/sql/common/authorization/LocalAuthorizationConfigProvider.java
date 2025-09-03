@@ -9,7 +9,7 @@ public class LocalAuthorizationConfigProvider implements AuthorizationProvider {
     public static final String AUTHORIZATION_KEY = "access";
     Config config;
     public SqlAuthorizer getAuthorization() throws IOException {
-        var conf = config.hasPathOrNull(AUTHORIZATION_KEY) ? config.getString(AUTHORIZATION_KEY) : null;
+        var conf = config.hasPathOrNull(AUTHORIZATION_KEY) ? config.getConfig(AUTHORIZATION_KEY) : null;
         if (conf != null) {
             return SimpleAuthorizer.load(config);
         }
