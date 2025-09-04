@@ -12,6 +12,7 @@
         <module>dazzleduck-sql-http</module>
         <module>dazzleduck-sql-flight</module>
         <module>dazzleduck-sql-commons</module>
+        <module>dazzleduck-sql-search</module>
         <module>dazzleduck-sql-runtime</module>
     </modules>
     <properties>
@@ -25,7 +26,6 @@
         <slf4j.version>2.0.16</slf4j.version>
     </properties>
     <dependencies>
-
         <dependency>
             <groupId>org.jcommander</groupId>
             <artifactId>jcommander</artifactId>
@@ -61,6 +61,27 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.commonjava.maven.plugins</groupId>
+                <artifactId>directory-maven-plugin</artifactId>
+                <version>0.3.1</version>
+                <executions>
+                    <execution>
+                        <id>directories</id>
+                        <goals>
+                            <goal>directory-of</goal>
+                        </goals>
+                        <phase>initialize</phase>
+                        <configuration>
+                            <property>maven-parent.basedir</property>
+                            <project>
+                                <groupId>io.dazzleduck.sql</groupId>
+                                <artifactId>dazzleduck-parent</artifactId>
+                            </project>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
@@ -77,7 +98,11 @@
                         <image>eclipse-temurin:21-jre-jammy</image>
                     </from>
                     <to>
-                        <image>dazzleduck</image>
+                        <image>docker.io/dazzleduck/dazzleduck</image>
+                        <tags>
+                            <tag>${project.version}</tag> <!-- Tags the image with your project version -->
+                            <tag>latest</tag> <!-- Adds a 'latest' tag -->
+                        </tags>
                     </to>
                     <container>
                         <mainClass>io.dazzleduck.sql.runtime.Main</mainClass>
@@ -92,6 +117,14 @@
                             <jvmFlag>--add-opens=java.base/sun.util.calendar=ALL-UNNAMED</jvmFlag>
                         </jvmFlags>
                     </container>
+                    <extraDirectories>
+                        <paths>
+                            <path>
+                                <from>${maven-parent.basedir}/example</from>
+                                <into>/data</into>
+                            </path>
+                        </paths>
+                    </extraDirectories>
                 </configuration>
             </plugin>
             <plugin>

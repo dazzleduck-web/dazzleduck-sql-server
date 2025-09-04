@@ -7,8 +7,6 @@ import io.dazzleduck.sql.commons.util.TestConstants;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import io.helidon.http.HeaderNames;
 import io.helidon.http.HeaderValues;
-import org.apache.arrow.c.ArrowArrayStream;
-import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.ipc.ArrowReader;
@@ -17,6 +15,8 @@ import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.duckdb.DuckDBConnection;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.*;
 import java.net.URI;
@@ -30,7 +30,9 @@ import java.sql.SQLException;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.dazzleduck.sql.common.Headers.HEADER_SPLIT_SIZE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class HttpServerTest {
     static HttpClient client;
@@ -162,15 +164,57 @@ public class HttpServerTest {
         System.out.println(inputStreamResponse.body());
     }
 
-    @Test
-    public void testPlanning() throws IOException, InterruptedException {
-        var body = objectMapper.writeValueAsBytes(new QueryObject(TestConstants.SUPPORTED_HIVE_PATH_QUERY));
+    @ParameterizedTest
+    @ValueSource(strings = { TestConstants.SUPPORTED_HIVE_PATH_QUERY, TestConstants.SUPPORTED_AGGREGATED_HIVE_PATH_QUERY})
+    public void testPlanning(String query) throws IOException, InterruptedException {
+        System.out.println(query);
+        var body = objectMapper.writeValueAsBytes(new QueryObject(query));
         var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/plan"))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
         var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
         assertEquals(1, res.length);
+    }
+
+
+    @ParameterizedTest
+    @ValueSource(strings = { TestConstants.SUPPORTED_HIVE_PATH_QUERY, TestConstants.SUPPORTED_AGGREGATED_HIVE_PATH_QUERY})
+    public void testPlanningWithSmallPartition(String query) throws IOException, InterruptedException {
+        var body = objectMapper.writeValueAsBytes(new QueryObject(query));
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/plan"))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .header(HEADER_SPLIT_SIZE, "1")
+                .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
+        var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
+        var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
+        assertEquals(3, res.length);
+    }
+
+    @Test
+    public void testPlanningWithFilter() throws IOException, InterruptedException {
+        var filter = "WHERE dt = '2025-01-01'";
+        var body = objectMapper.writeValueAsBytes(new QueryObject(TestConstants.SUPPORTED_HIVE_PATH_QUERY + filter));
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/plan"))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .header(HEADER_SPLIT_SIZE, "1")
+                .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
+        var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
+        var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
+        assertEquals(2, res.length);
+    }
+
+    @Test
+    public void testPlanningWithError() throws IOException, InterruptedException {
+        var errorFilter = "WHEREdt = '2025-01-01'";
+        var body = objectMapper.writeValueAsBytes(new QueryObject(TestConstants.SUPPORTED_HIVE_PATH_QUERY + errorFilter));
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/plan"))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .header(HEADER_SPLIT_SIZE, "1")
+                .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
+        var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
+        assertEquals(500, inputStreamResponse.statusCode());
+        assertNotNull(inputStreamResponse.body());
     }
 
     @Test
@@ -216,7 +260,7 @@ public class HttpServerTest {
     }
 
     @Test
-    public void writeIPC() throws IOException, InterruptedException, SQLException {
+    public void writeIPC() throws IOException, SQLException {
         String filename = "/tmp/" + UUID.randomUUID() + ".arrow";
         String query = "select * from generate_series(10)";
         try(BufferAllocator allocator = new RootAllocator();
@@ -230,11 +274,8 @@ public class HttpServerTest {
                 }
                 streamWrite.end();
             }
-            try (var reader = new ArrowStreamReader(new FileInputStream(filename), allocator);
-                 final ArrowArrayStream arrow_array_stream = ArrowArrayStream.allocateNew(allocator)) {
-                Data.exportArrayStream(allocator, reader, arrow_array_stream);
-                connection.registerArrowStream("test", arrow_array_stream);
-                ConnectionPool.printResult(connection, allocator, "select * from test");
+            try (var reader = new ArrowStreamReader(new FileInputStream(filename), allocator)) {
+                TestUtils.isEqual(query, allocator, reader);
             }
         }
     }

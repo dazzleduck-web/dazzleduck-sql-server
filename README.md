@@ -20,8 +20,8 @@ JDK  21
   `./mvnw clean package -DskipTests jib:dockerBuild`
 - Start the container with `example/data` mounted to the container
   ``` 
-  docker run -ti -v "$PWD/example/data":/local-data -p 59307:59307 -p 8080:8080 dazzleduck-sql --conf useEncryption=false --conf warehouse=/data/warehouse
-  Warehouse Path :/data/warehouse
+  docker run -ti -p 59307:59307 -p 8080:8080 dazzleduck/dazzleduck:latest --conf warehouse=/data
+  Warehouse Path :/data
   Http Server is up: Listening on URL: http://localhost:8080
   Flight Server is up: Listening on URI: grpc+tcp://0.0.0.0:59307
   ```
@@ -44,6 +44,25 @@ The return data can itself be queried with duckdb
   curl -s "$URL" | duckdb -c "$SQL"
   ```
 - Using http post
+- 
+- Using http POST for split planning
+  ```
+  SCHEMA_QUERY="FROM (VALUES(NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR)) t( dt, p, key, value) WHERE false UNION ALL BY NAME FROM read_parquet('/data/hive_table/*/*/*.parquet', hive_partitioning = true, hive_types = {'dt': DATE, 'p': VARCHAR})"
+  URL="http://localhost:8080/plan"
+  QUERY="SELECT count(*) FROM ($SCHEMA_QUERY) GROUP BY key"
+  curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"query\" : \"$QUERY\"}" \
+  "$URL"
+  ```
+- For smaller split sizes
+   ```
+  curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "split_size: 1" \
+  -d "{\"query\" : \"$QUERY\"}" \
+  "$URL"
+  ```
 
 - Writing to Server using post <br>
 ```

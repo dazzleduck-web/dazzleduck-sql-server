@@ -28,6 +28,13 @@ public class PlaningService extends AbstractQueryBasedService {
     protected void handleInternal(ServerRequest request, ServerResponse response, String query) {
         try (var connection = ConnectionPool.getConnection()) {
             var tree = Transformations.parseToTree(connection, query);
+            if (tree.get("error").asBoolean()) {
+               response.status(500);
+               try(var outputStream = response.outputStream()) {
+                   outputStream.write(tree.get("error_message").asText().getBytes());
+               }
+               return;
+            }
             long splitSize = getSplitSize(request.headers());
             var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize);
             var result = new ArrayList<Split>();

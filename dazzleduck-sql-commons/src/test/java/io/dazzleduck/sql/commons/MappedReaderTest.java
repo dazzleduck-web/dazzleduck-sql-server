@@ -2,6 +2,7 @@ package io.dazzleduck.sql.commons;
 
 
 import io.dazzleduck.sql.commons.hive.HivePartitionPruning;
+import io.dazzleduck.sql.commons.util.TestUtils;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
@@ -46,7 +47,7 @@ public class MappedReaderTest {
             }
         };
         Field f = new Field("count_p", FieldType.notNullable(new ArrowType.Int(32, true)), null);
-        DuckDBTestUtil.testMappedReader(sql, function, List.of("count"), f,
+        TestUtils.testMappedReader(sql, function, List.of("count"), f,
                 "asdf", "select * from asdf", "select 1 as count, 2 as count_p");
     }
 
@@ -62,7 +63,7 @@ public class MappedReaderTest {
         };
         String temptableName = "tt";
         String testSql = HivePartitionPruning.getPartitionSql(partitions, temptableName, "true");
-        DuckDBTestUtil.testMappedReader(sql, HivePartitionPruning.UNESCAPE_FN, sourceCol, targetField, temptableName,
+        TestUtils.testMappedReader(sql, HivePartitionPruning.UNESCAPE_FN, sourceCol, targetField, temptableName,
                 testSql, "select 'abc' as filename, 10 as size,  99 as last_modified, 'a x' as a, 'b' as b");
     }
 
@@ -85,7 +86,7 @@ public class MappedReaderTest {
         String tempTableName = "temp_mapped_reader";
         createTable(tableName);
         addDataToTable(tableName, 0, 10000);
-        DuckDBTestUtil.testMappedReader(String.format("select * from %s", tableName),
+        TestUtils.testMappedReader(String.format("select * from %s", tableName),
                 function, sourceColumns, targetField, tempTableName,
                 String.format("select * from %s", tempTableName),
                 String.format("select x, y, s, x*7 as x_x_7 from %s", tableName));
