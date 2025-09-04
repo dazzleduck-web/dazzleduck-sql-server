@@ -9,13 +9,12 @@ import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.commons.util.TestConstants;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
+import java.io.FileWriter;
 import java.sql.*;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-
-import static io.dazzleduck.sql.common.authorization.LocalAuthorizationConfigProvider.AUTHORIZATION_KEY;
-import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 
 public class AccessControlTest {
 
@@ -75,10 +74,29 @@ public class AccessControlTest {
 
     @Test
     public void authorizationTest() throws Exception {
-        var conf = ConfigFactory.load();
-        var serverConf = conf.getConfig(CONFIG_PATH);
+        File authorizationFile = File.createTempFile("authorization", ".json");
+        authorizationFile.deleteOnExit();
+        String authFileContent = """
+                {
+                  "role": "admin",
+                  "database": null,
+                  "schema": null,
+                  "path": "example/hive_table/*/*/*.parquet",
+                  "tableType": "TABLE_FUNCTION",
+                  "columns": [],
+                  "condition": "p = '1'",
+                  "metadata": null,
+                  "function": "read_parquet"
+                }
+                """;
+        try (var writer = new FileWriter(authorizationFile)) {
+            writer.write(authFileContent);
+        }
+        String authFileLocation = authorizationFile.getAbsolutePath();
+        var accessConf = ConfigFactory.parseResources("access.conf");
         var classConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, AuthorizationProvider.AUTHORIZATION_CONFIG_PROVIDER_CLASS_KEY, LocalAuthorizationConfigProvider.class.getName());
-        var accessConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, AUTHORIZATION_KEY, serverConf);
-        Main.main(new String[]{"--conf", classConfig, "--conf", accessConfig});
+        var accessGroupConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, LocalAuthorizationConfigProvider.AUTHORIZATION_KEY, accessConf.root().render());
+        var accessRowConfig = "%s.%s=%s".formatted(AuthorizationProvider.AUTHORIZATION_CONFIG_PREFIX, LocalAuthorizationConfigProvider.AUTHORIZATION_FILE_KEY, authFileLocation);
+        Main.main(new String[]{"--conf", classConfig, "--conf", accessGroupConfig, "--conf", accessRowConfig});
     }
 }

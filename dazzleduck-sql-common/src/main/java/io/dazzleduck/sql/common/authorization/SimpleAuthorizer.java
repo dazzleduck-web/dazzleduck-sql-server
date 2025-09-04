@@ -11,10 +11,7 @@ import io.dazzleduck.sql.commons.ExpressionFactory;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.common.auth.UnauthorizedException;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.sql.SQLException;
 import java.util.*;
 
@@ -66,13 +63,17 @@ public class SimpleAuthorizer implements SqlAuthorizer {
 
     public static SqlAuthorizer load(Config config) throws IOException {
         var userGroupMapping = loadUsrGroupMapping(config);
-        var accessRows = loadAccessRows();
+        var accessRows = loadAccessRows(config);
         return new SimpleAuthorizer(userGroupMapping, accessRows);
     }
 
-    public static List<AccessRow> loadAccessRows() throws IOException {
+    public static List<AccessRow> loadAccessRows(Config config) throws IOException {
         var result = new ArrayList<AccessRow>();
-        try (InputStream inputStream = SimpleAuthorizer.class.getResourceAsStream("/" + ACCESS_FILE);
+        if (!config.hasPath("access-row-file")) {
+            throw new IllegalArgumentException("Missing 'access-row-file' in config");
+        }
+        String path = config.getString("access-row-file");
+        try (InputStream inputStream = new FileInputStream(path);
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
             ObjectMapper mapper = new ObjectMapper();
             var line = reader.readLine();
