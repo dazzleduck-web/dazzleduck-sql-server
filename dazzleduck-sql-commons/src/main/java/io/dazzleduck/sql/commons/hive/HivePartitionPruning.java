@@ -245,11 +245,11 @@ public class HivePartitionPruning extends PartitionPruning {
         var firstStatement = (ObjectNode)Transformations.getFirstStatementNode(t);
         firstStatement.set("where_clause", filter);
         var newSql = Transformations.parseToSql(t);
-        var index = newSql.indexOf("where");
+        var index = newSql.indexOf("WHERE");
         if(index < 0) {
             return "";
         } else {
-            return newSql.substring(index);
+            return newSql.substring(index + "WHERE".length());
         }
     }
 }

@@ -155,7 +155,7 @@ public class DuckDBFlightSqlProducerTest {
         final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55559);
         try ( var serverClient = createRestrictedServerClient(new NOOPAuthorizer(), serverLocation, "admin" )) {
 
-            try (var splittableClient = splittableAdminClient(serverLocation, serverClient.clientAllocator)) {
+            try (var splittableClient = splittableAdminClient(serverLocation, serverClient.clientAllocator())) {
                 var flightCallHeaders = new FlightCallHeaders();
                 flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
                 var flightInfo = splittableClient.execute(SUPPORTED_HIVE_PATH_QUERY, new HeaderCallOption(flightCallHeaders));
@@ -178,7 +178,7 @@ public class DuckDBFlightSqlProducerTest {
         var serverLocation = Location.forGrpcInsecure(LOCALHOST, 55577);
         try(var clientServer = createRestrictedServerClient(new NOOPAuthorizer(), serverLocation, "admin")) {
 
-            try (var splittableClient = splittableAdminClient(serverLocation, clientServer.clientAllocator)) {
+            try (var splittableClient = splittableAdminClient(serverLocation, clientServer.clientAllocator())) {
                 var flightCallHeaders = new FlightCallHeaders();
                 flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
                 var flightInfo = splittableClient.execute(SUPPORTED_DELTA_PATH_QUERY, new HeaderCallOption(flightCallHeaders));
@@ -333,7 +333,7 @@ public class DuckDBFlightSqlProducerTest {
         try (var serverClient = createRestrictedServerClient(authorizer, newServerLocation, restrictedUser)) {
             String expectedSql = "%s where p = '1'".formatted(SUPPORTED_HIVE_PATH_QUERY);
             ConnectionPool.printResult(expectedSql);
-            var clientAllocator = serverClient.clientAllocator;
+            var clientAllocator = serverClient.clientAllocator();
             try (var client = splittableClient( newServerLocation, clientAllocator, restrictedUser)) {
                 var newFlightInfo = client.execute(SUPPORTED_HIVE_PATH_QUERY);
                 try (final FlightStream stream =
@@ -341,7 +341,7 @@ public class DuckDBFlightSqlProducerTest {
                     TestUtils.isEqual(expectedSql, clientAllocator, FlightStreamReader.of(stream, clientAllocator));
                 }
             }
-            var restrictSqlClient = serverClient.flightSqlClient;
+            var restrictSqlClient = serverClient.flightSqlClient();
             final FlightInfo flightInfo = restrictSqlClient.execute(SUPPORTED_HIVE_PATH_QUERY);
             try (final FlightStream stream =
                          restrictSqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
@@ -405,7 +405,7 @@ public class DuckDBFlightSqlProducerTest {
             }
         }
     }
-
+  
     private ServerClient createRestrictedServerClient(SqlAuthorizer authorizer,
                                                       Location serverLocation,
                                                       String user) throws IOException, NoSuchAlgorithmException {
@@ -422,14 +422,13 @@ public class DuckDBFlightSqlProducerTest {
                 .build()
                 .start();
 
-
         var restrictSqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
                 .intercept(AuthUtils.createClientMiddlewareFactory(user,
                         PASSWORD,
                         Map.of(Headers.HEADER_DATABASE, TEST_CATALOG,
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA)))
                 .build());
-        return new ServerClient(restrictFlightServer, restrictSqlClient, clientAllocator);
+        return new ServerClient(restrictFlightServer, restrictSqlClient, clientAllocator, warehousePath);
     }
 
     private void testPutStream(String filename) throws SQLException, IOException {

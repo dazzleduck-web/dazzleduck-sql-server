@@ -64,7 +64,7 @@ public class Main {
 
         BufferAllocator allocator = new RootAllocator();
         var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, new NOOPAuthorizer());
-        var certStream =  getInputStreamForResource(serverCertLocation);
+        var certStream = getInputStreamForResource(serverCertLocation);
         var keyStream = getInputStreamForResource(keystoreLocation);
 
 

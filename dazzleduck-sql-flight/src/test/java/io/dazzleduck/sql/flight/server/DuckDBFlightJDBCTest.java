@@ -2,6 +2,7 @@ package io.dazzleduck.sql.flight.server;
 
 
 import io.dazzleduck.sql.commons.ConnectionPool;
+import io.dazzleduck.sql.commons.util.TestUtils;
 import org.apache.arrow.driver.jdbc.ArrowFlightConnection;
 import org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver;
 import org.apache.arrow.driver.jdbc.client.ArrowFlightSqlClientHandler;
@@ -15,6 +16,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
+import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -24,28 +26,17 @@ public class DuckDBFlightJDBCTest {
     private static final String LONG_RUNNING_QUERY = "with t as " +
             "(select len(split(concat('abcdefghijklmnopqrstuvwxyz:', generate_series), ':')) as len  from generate_series(1, 1000000000) )" +
             " select count(*) from t where len = 10";
-    private static FlightServer flightServer ;
     private static final int port = 55556;
     static String url = String.format("jdbc:arrow-flight-sql://localhost:%s/?database=memory&useEncryption=0&user=admin&password=admin", port);
     @BeforeAll
     public static void beforeAll() throws Exception {
         String[] args = {"--conf", "flight-sql.port=" + port, "--conf", "useEncryption=false"};
-        flightServer = Main.createServer(args);
-        Thread severThread = new Thread(() -> {
-            try {
-                flightServer.start();
-                System.out.println("S1: Server (Location): Listening on port " + flightServer.getPort());
-                flightServer.awaitTermination();
-            } catch (IOException | InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-        });
-        severThread.start();
+        FlightTestUtils.setUpFlightServerAndClient(args, "admin", "admin", Map.of());
     }
 
     @AfterAll
     public static void afterAll() throws InterruptedException {
-        flightServer.close();
+
     }
 
 
