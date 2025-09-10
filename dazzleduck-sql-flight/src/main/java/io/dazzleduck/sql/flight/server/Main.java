@@ -65,7 +65,8 @@ public class Main {
 
         BufferAllocator allocator = new RootAllocator();
         var authorizer = AuthorizationProvider.load(config).getAuthorization();
-        var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, authorizer);        var certStream = getInputStreamForResource(serverCertLocation);
+        var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, authorizer);
+        var certStream = getInputStreamForResource(serverCertLocation);
         var keyStream = getInputStreamForResource(keystoreLocation);
 
 
