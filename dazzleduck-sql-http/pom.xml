@@ -6,10 +6,10 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.4</version>
+        <version>0.0.5</version>
     </parent>
     <artifactId>dazzleduck-sql-http</artifactId>
-
+    <name>DazzleDuck Project Http Sql</name>
     <properties>
         <helidon.version>4.2.3</helidon.version>
     </properties>
@@ -17,7 +17,7 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-common</artifactId>
-            <version>0.0.4</version>
+            <version>0.0.5</version>
         </dependency>
         <dependency>
             <groupId>io.helidon.webserver</groupId>

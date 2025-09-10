@@ -26,14 +26,13 @@ public class AuthUtilsLoginTest {
     private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
     private static final int HTTP_PORT = 8080;
     private static FlightSqlClient sqlClient;
+    private static Location serverLocation;
 
-    private static final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55556);
-
-    private static String warehousePath;
+    private static ServerClient serverClient;
 
     @BeforeAll
     public static void setup() throws Exception {
-        warehousePath = Files.createTempDirectory("duckdb_warehouse_" + AuthUtilsLoginTest.class.getSimpleName()).toString();
+        String warehousePath = Files.createTempDirectory("duckdb_warehouse_" + AuthUtilsLoginTest.class.getSimpleName()).toString();
         // Fix path escaping for Windows
         String escapedWarehousePath = warehousePath.replace("\\", "\\\\");
         // Start the HTTP login service
@@ -41,17 +40,12 @@ public class AuthUtilsLoginTest {
                 "--conf", "http.port: " + HTTP_PORT,
                 "--conf", "warehousePath: \"" + escapedWarehousePath + "\""
         });
-
-        setUpFlightServerAndClient();
+        var confOverload = new String[]{"--conf", "flight-sql.port=55559", "--conf", "httpLogin=true", "--conf", "useEncryption=false", "--conf", "jwt.token.claims.headers=[%s]".formatted(CLUSTER_HEADER_KEY)};
+        serverClient = FlightTestUtils.setUpFlightServerAndClient(confOverload, USER, PASSWORD, Map.of(CLUSTER_HEADER_KEY, TEST_CLUSTER));
+        sqlClient = serverClient.flightSqlClient();
+        serverLocation = serverClient.flightServer().getLocation();
     }
 
-    private static void setUpFlightServerAndClient() throws Exception {
-        io.dazzleduck.sql.flight.server.Main.main(new String[]{"--conf", "flight-sql.port=55556", "--conf", "httpLogin=true", "--conf", "useEncryption=false", "--conf", "jwt.token.claims.headers=[%s]".formatted(CLUSTER_HEADER_KEY)});
-
-        sqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
-                .intercept(AuthUtils.createClientMiddlewareFactory(USER, PASSWORD, Map.of(CLUSTER_HEADER_KEY, TEST_CLUSTER)))
-                .build());
-    }
 
     @Test
     public void testLoginWithHttp() {
@@ -79,8 +73,7 @@ public class AuthUtilsLoginTest {
 
 
     @AfterAll
-    public static void cleanup() throws Exception {
-        if (sqlClient != null) sqlClient.close();
-        clientAllocator.close();
+    public static void cleanup() {
+        serverClient.close();
     }
 }

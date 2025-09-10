@@ -172,4 +172,8 @@ CREATE SECRET http_auth (
 SELECT * FROM read_arrow(concat('http://localhost:8080/query?q=', url_encode('select 1, 2, 3')));
 ```
 
+### Publishing the project 
+- export GPG_TTY=$(tty)
+- ./mvnw -P release-sign-artifacts -DskipTests clean verify
+- ./mvnw -P release-sign-artifacts -DskipTests deploy
 
