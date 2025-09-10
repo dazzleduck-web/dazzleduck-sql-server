@@ -4,7 +4,7 @@ import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.authorization.AccessMode;
 import io.dazzleduck.sql.common.authorization.AuthorizationProvider;
-import io.dazzleduck.sql.common.authorization.SimpleAuthorizer;
+import io.dazzleduck.sql.common.authorization.NOOPAuthorizer;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
@@ -16,7 +16,11 @@ import org.apache.arrow.memory.RootAllocator;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.NoSuchAlgorithmException;
+import java.util.UUID;
 
 import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 
@@ -61,8 +65,7 @@ public class Main {
 
         BufferAllocator allocator = new RootAllocator();
         var authorizer = AuthorizationProvider.load(config).getAuthorization();
-        var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, authorizer);
-        var certStream =  getInputStreamForResource(serverCertLocation);
+        var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, authorizer);        var certStream = getInputStreamForResource(serverCertLocation);
         var keyStream = getInputStreamForResource(keystoreLocation);
 
 
