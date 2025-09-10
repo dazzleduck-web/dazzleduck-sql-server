@@ -10,7 +10,7 @@ public interface StartupScriptProvider {
     String STARTUP_SCRIPT_CONFIG_PREFIX = "startup-script";
     void loadInner(Config config);
 
-    String getStartupScript()  throws IOException;
+    String getStartupScript() throws IOException, InterruptedException;
 
     static StartupScriptProvider load(Config config) throws Exception {
         if( config.hasPath(STARTUP_SCRIPT_CONFIG_PREFIX)) {
