@@ -30,7 +30,7 @@ import java.sql.SQLException;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.dazzleduck.sql.common.Headers.HEADER_SPLIT_SIZE;
+import static io.dazzleduck.sql.common.Headers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -167,7 +167,6 @@ public class HttpServerTest {
     @ParameterizedTest
     @ValueSource(strings = { TestConstants.SUPPORTED_HIVE_PATH_QUERY, TestConstants.SUPPORTED_AGGREGATED_HIVE_PATH_QUERY})
     public void testPlanning(String query) throws IOException, InterruptedException {
-        System.out.println(query);
         var body = objectMapper.writeValueAsBytes(new QueryObject(query));
         var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/plan"))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
@@ -175,6 +174,15 @@ public class HttpServerTest {
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
         var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
         assertEquals(1, res.length);
+    }
+
+    @Test
+    public void testPrintPlaning() throws SQLException {
+        var query = "%s where p='1'".formatted(TestConstants.SUPPORTED_HIVE_PATH_QUERY);
+        var request = "http://localhost:8080/plan?%s=1&q=".formatted(HEADER_SPLIT_SIZE);
+        var toExecute = "SELECT size FROM read_json(concat('%s', url_encode('%s')))".formatted(request, query.replaceAll("'", "''"));
+        ConnectionPool.printResult(toExecute);
+        assertEquals(254, ConnectionPool.collectFirst(toExecute, Long.class));
     }
 
 
@@ -217,33 +225,66 @@ public class HttpServerTest {
         assertNotNull(inputStreamResponse.body());
     }
 
-    @Test
-    public void testIngestion() throws IOException, InterruptedException, SQLException {
+    @ParameterizedTest
+    @ValueSource(strings = {"parquet", "arrow"})
+    public void testIngestionPostNoPartition(String format) throws IOException, InterruptedException, SQLException {
         String query = "select * from generate_series(10)";
-        try(BufferAllocator allocator = new RootAllocator();
-            DuckDBConnection connection = ConnectionPool.getConnection();
-            var reader = ConnectionPool.getReader( connection, allocator, query, 1000 );
-            var byteArrayOutputStream = new ByteArrayOutputStream();
-            var streamWrite = new ArrowStreamWriter(reader.getVectorSchemaRoot(), null, byteArrayOutputStream)) {
+        try (BufferAllocator allocator = new RootAllocator();
+             DuckDBConnection connection = ConnectionPool.getConnection();
+             var reader = ConnectionPool.getReader(connection, allocator, query, 1000);
+             var byteArrayOutputStream = new ByteArrayOutputStream();
+             var streamWrite = new ArrowStreamWriter(reader.getVectorSchemaRoot(), null, byteArrayOutputStream)) {
             streamWrite.start();
             while (reader.loadNextBatch()) {
                 streamWrite.writeBatch();
             }
             streamWrite.end();
-            var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/ingest?path=abc.parquet"))
+            var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/ingest?path=abc.%s".formatted(format)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
-                    .header("Content-Type", ContentTypes.APPLICATION_ARROW).build();
+                    .header("Content-Type", ContentTypes.APPLICATION_ARROW)
+                    .header(HEADER_DATA_FORMAT, format)
+                    .build();
+
             var res = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, res.statusCode());
-            var testSql = String.format("select count(*) from read_parquet('%s/abc.parquet')", warehousePath);
+            var testSql = String.format("select count(*) from read_%s('%s/abc.%s')", format, warehousePath, format);
             var lines = ConnectionPool.collectFirst(testSql, Long.class);
             assertEquals(11, lines);
         }
     }
 
     @Test
-    public void testIngestionFromFile() throws SQLException, IOException, InterruptedException {
+    public void testIngestionPost() throws IOException, InterruptedException, SQLException {
+        String query = "select generate_series, generate_series a from generate_series(10)";
+        try (BufferAllocator allocator = new RootAllocator();
+             DuckDBConnection connection = ConnectionPool.getConnection();
+             var reader = ConnectionPool.getReader(connection, allocator, query, 1000);
+             var byteArrayOutputStream = new ByteArrayOutputStream();
+             var streamWrite = new ArrowStreamWriter(reader.getVectorSchemaRoot(), null, byteArrayOutputStream)) {
+            streamWrite.start();
+            while (reader.loadNextBatch()) {
+                streamWrite.writeBatch();
+            }
+            streamWrite.end();
+            var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/ingest?path=table"))
+                    .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
+                            new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
+                    .header("Content-Type", ContentTypes.APPLICATION_ARROW)
+                    .header(HEADER_DATA_PARTITION, "a")
+                    .headers(HEADER_DATA_TRANSFORMATION, "(a + 1) as b")
+                    .build();
+            var res = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, res.statusCode());
+            var testSql = String.format("select generate_series, a, b from read_parquet('%s/table/*/*.parquet')", warehousePath);
+            var expected = "select generate_series, generate_series a, (a+1) as b from generate_series(10)";
+            TestUtils.isEqual(expected, testSql);
+        }
+    }
+
+
+    @Test
+    public void testIngestionPostFromFile() throws SQLException, IOException, InterruptedException {
         var request = HttpRequest.newBuilder(URI.create("http://localhost:8080/ingest?path=file1.parquet"))
                 .POST(HttpRequest.BodyPublishers.ofInputStream(() -> {
                     try {

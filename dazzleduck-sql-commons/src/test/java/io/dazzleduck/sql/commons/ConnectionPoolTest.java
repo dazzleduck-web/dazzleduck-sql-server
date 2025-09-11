@@ -77,11 +77,14 @@ public class ConnectionPoolTest {
     public void testBulkIngestionWithPartition() throws IOException, SQLException {
         String tempDir = newTempDir();
         String sql = "select generate_series, generate_series a from generate_series(10)";
-        try(DuckDBConnection connection = ConnectionPool.getConnection();
-            BufferAllocator allocator = new RootAllocator();
-            ArrowReader reader = ConnectionPool.getReader(connection, allocator, sql, 1000)){
-            ConnectionPool.bulkIngestToFile(reader, allocator, tempDir + "/bulk", List.of("a"), "parquet");
+        var filename = tempDir + "/bulk";
+        try (DuckDBConnection connection = ConnectionPool.getConnection();
+             BufferAllocator allocator = new RootAllocator();
+             ArrowReader reader = ConnectionPool.getReader(connection, allocator, sql, 1000)) {
+            ConnectionPool.bulkIngestToFile(reader, allocator, filename, List.of("a"), "parquet", "generate_series + 1 as p1");
         }
+        TestUtils.isEqual("select generate_series, generate_series a, generate_series + 1 as p1 from generate_series(10) order by generate_series",
+                "select generate_series, a, p1 from read_parquet('%s/*/*.parquet') order by generate_series".formatted(filename));
     }
 
     @Test
@@ -91,7 +94,7 @@ public class ConnectionPoolTest {
         try(DuckDBConnection connection = ConnectionPool.getConnection();
             BufferAllocator allocator = new RootAllocator();
             ArrowReader reader = ConnectionPool.getReader(connection, allocator, sql, 1000)){
-            ConnectionPool.bulkIngestToFile(reader, allocator, tempDir + "/bulk", List.of(), "parquet");
+            ConnectionPool.bulkIngestToFile(reader, allocator, tempDir + "/bulk", List.of(), "parquet", null);
         }
     }
 

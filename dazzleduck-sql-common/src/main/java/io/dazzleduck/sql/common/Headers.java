@@ -18,5 +18,10 @@ public class Headers {
     public static final String HEADER_SCHEMA = "schema";
     public static final String HEADER_SPLIT_SIZE = "split_size";
     public static final String HEADER_PARALLELIZE = "parallelize";
+    public static final String HEADER_DATA_PARTITION = "partition";
+    public static final String HEADER_DATA_FORMAT = "format";
+
+    public static final String HEADER_DATA_TRANSFORMATION ="transformation";
+    public static final String HEADER_APP_DATA_TRANSFORMATION ="app_transformation";
 
 }

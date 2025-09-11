@@ -1,7 +1,5 @@
 package io.dazzleduck.sql.http.server;
 
-import com.typesafe.config.Config;
-import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.helidon.common.uri.UriQuery;
 import io.helidon.http.HeaderNames;
@@ -17,7 +15,9 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 
-public class IngestionService implements HttpService {
+import static io.dazzleduck.sql.common.Headers.*;
+
+public class IngestionService implements HttpService, ParameterUtils{
     private final String warehousePath;
     private final BufferAllocator allocator;
 
@@ -33,7 +33,7 @@ public class IngestionService implements HttpService {
 
     private void handlePost(ServerRequest serverRequest, ServerResponse serverResponse) throws SQLException {
         var contentType = serverRequest.headers().value(HeaderNames.CONTENT_TYPE);
-        if(contentType.isEmpty() || !contentType.get().equals(ContentTypes.APPLICATION_ARROW)) {
+        if (contentType.isEmpty() || !contentType.get().equals(ContentTypes.APPLICATION_ARROW)) {
             serverResponse.status(Status.UNSUPPORTED_MEDIA_TYPE_415);
             serverResponse.send();
             return;
@@ -41,16 +41,12 @@ public class IngestionService implements HttpService {
         UriQuery query = serverRequest.query();
         var path = query.get("path");
         final String completePath = warehousePath + "/" + path;
-        String format = query.contains("format") ? query.get("format") : "parquet";
-
-        List<String> partitionColumns;
-        if (query.contains("partition")) {
-            partitionColumns = Arrays.stream(query.get("partition").split(",")).toList();
-        } else {
-            partitionColumns = List.of();
-        }
+        String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
+        var partitions = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
+        var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);
+        List<String> partitionList = partitions == null ? List.of() : Arrays.asList(partitions.split(","));
         var reader = new ArrowStreamReader(serverRequest.content().inputStream(), allocator);
-        ConnectionPool.bulkIngestToFile(reader, allocator, completePath, partitionColumns, format);
+        ConnectionPool.bulkIngestToFile(reader, allocator, completePath, partitionList, format, tranformationString);
         serverResponse.status(Status.OK_200);
         serverResponse.send();
     }

@@ -4,9 +4,7 @@ import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.commons.planner.SplitPlanner;
-import io.helidon.http.HeaderNames;
 import io.helidon.http.HeaderValues;
-import io.helidon.http.ServerRequestHeaders;
 import io.helidon.webserver.http.ServerRequest;
 import io.helidon.webserver.http.ServerResponse;
 import org.apache.arrow.memory.BufferAllocator;
@@ -14,9 +12,8 @@ import org.apache.arrow.memory.BufferAllocator;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Optional;
 
-public class PlaningService extends AbstractQueryBasedService {
+public class PlaningService extends AbstractQueryBasedService implements ParameterUtils {
     BufferAllocator allocator;
     String location;
 
@@ -35,7 +32,7 @@ public class PlaningService extends AbstractQueryBasedService {
                }
                return;
             }
-            long splitSize = getSplitSize(request.headers());
+            long splitSize = ParameterUtils.getParameterValue(Headers.HEADER_SPLIT_SIZE, request, Headers.DEFAULT_SPLIT_SIZE, Long.class);
             var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize);
             var result = new ArrayList<Split>();
             for (var treeAndSize : splits) {
@@ -51,16 +48,5 @@ public class PlaningService extends AbstractQueryBasedService {
         } catch (IOException e) {
             throw new InternalErrorException(500, e.getMessage());
         }
-    }
-
-    private long getSplitSize(ServerRequestHeaders headers) {
-        return headers.value(HeaderNames.create(Headers.HEADER_SPLIT_SIZE))
-                .flatMap(v -> {
-                    try {
-                        return Optional.of(Long.parseLong(v));
-                    } catch (Exception e) {
-                        return Optional.of(Headers.DEFAULT_SPLIT_SIZE);
-                    }
-                }).orElse(Headers.DEFAULT_SPLIT_SIZE);
     }
 }

@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import java.util.stream.Collectors;
 
 public enum ConnectionPool {
     INSTANCE;
@@ -351,19 +352,39 @@ public enum ConnectionPool {
      * @param format
      * @throws SQLException
      */
-    public static void bulkIngestToFile( ArrowReader reader, BufferAllocator allocator, String path,
+    public static void bulkIngestToFile(ArrowReader reader, BufferAllocator allocator, String path,
                                         List<String> partitionColumns, String format) throws SQLException {
+        bulkIngestToFile(reader, allocator, path, partitionColumns, format, null);
+    }
+
+    /**
+     *
+     * @param reader
+     * @param allocator
+     * @param path
+     * @param partitionColumns
+     * @param format
+     * @throws SQLException
+     */
+    public static void bulkIngestToFile(ArrowReader reader, BufferAllocator allocator, String path,
+                                        List<String> partitionColumns, String format, String transformations) throws SQLException {
         try (var conn = getConnection();
              final ArrowArrayStream arrow_array_stream = ArrowArrayStream.allocateNew(allocator)) {
             Data.exportArrayStream(allocator, reader, arrow_array_stream);
             String partitionByQuery;
-            if(!partitionColumns.isEmpty()){
+            if (!partitionColumns.isEmpty()) {
                 partitionByQuery = String.format(", PARTITION_BY (%s)", String.join(",", partitionColumns));
             } else {
                 partitionByQuery = "";
             }
             String tempTableName = "_tmp_" + System.currentTimeMillis();
-            String sql = String.format("COPY %s TO '%s' (FORMAT %s %s)", tempTableName, path, format, partitionByQuery);
+            String innerSql;
+            if(transformations == null) {
+                innerSql =  "%s".formatted(tempTableName);
+            } else {
+                innerSql = "( FROM %s SELECT *, %s)".formatted(tempTableName, transformations);
+            }
+            String sql = String.format("COPY %s TO '%s' (FORMAT %s %s)", innerSql, path, format, partitionByQuery);
             conn.registerArrowStream(tempTableName, arrow_array_stream);
             ConnectionPool.execute(conn, sql);
         }
