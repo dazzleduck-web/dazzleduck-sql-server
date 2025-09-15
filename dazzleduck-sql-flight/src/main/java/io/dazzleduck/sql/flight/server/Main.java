@@ -4,6 +4,7 @@ import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.AuthorizerProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.authorization.AccessMode;
+import io.dazzleduck.sql.common.authorization.NOOPAuthorizer;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
@@ -15,6 +16,10 @@ import org.apache.arrow.memory.RootAllocator;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.NoSuchAlgorithmException;
 import java.util.UUID;
 
 import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
