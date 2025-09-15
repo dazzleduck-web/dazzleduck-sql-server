@@ -12,8 +12,6 @@ import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.common.auth.UnauthorizedException;
 
 import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.sql.SQLException;
 import java.util.*;
 
@@ -22,8 +20,6 @@ public class SimpleAuthorizer implements SqlAuthorizer {
     private record AccessValue(JsonNode filter, List<String> columns) { }
     Map<AccessKey, AccessValue> accessMap = new HashMap<>();
     Set<String> superUsers = new HashSet<>();
-
-    public static final String ACCESS_FILE = "simple-access.json";
 
     public SimpleAuthorizer(Map<String, List<String>> userGroupMapping,
                             List<AccessRow> accessRows) {
