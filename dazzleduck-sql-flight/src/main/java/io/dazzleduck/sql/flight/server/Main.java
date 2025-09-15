@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.ConfigFactory;
+import io.dazzleduck.sql.common.AuthorizerProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.authorization.AccessMode;
 import io.dazzleduck.sql.common.authorization.AuthorizationProvider;
@@ -58,11 +59,11 @@ public class Main {
             System.out.printf("Warehouse dir does not exist %s. Create the dir to proceed", warehousePath);
         }
         AccessMode accessMode = config.hasPath("accessMode") ? AccessMode.valueOf(config.getString("accessMode").toUpperCase()) : AccessMode.COMPLETE;
+        var authorizer = AuthorizerProvider.load(config);
         var startupContent = StartupScriptProvider.load(config).getStartupScript();
         if (startupContent != null) {
             ConnectionPool.execute(startupContent);
         }
-
         BufferAllocator allocator = new RootAllocator();
         var authorizer = AuthorizationProvider.load(config).getAuthorization();
         var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, authorizer);

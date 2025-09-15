@@ -2,6 +2,7 @@ package io.dazzleduck.sql.flight.server;
 
 
 import com.typesafe.config.ConfigFactory;
+import io.dazzleduck.sql.common.ConfigBasedProvider;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.LocalStartupConfigProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
@@ -358,7 +359,7 @@ public class DuckDBFlightSqlProducerTest {
             writer.write(startUpFileContent);
         }
         String startUpFileLocation = startUpFile.getAbsolutePath();
-        var classConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PROVIDER_CLASS_KEY, LocalStartupConfigProvider.class.getName());
+        var classConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, ConfigBasedProvider.CLASS_KEY, LocalStartupConfigProvider.class.getName());
         var locationConfig = "%s.%s=%s".formatted(StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, SCRIPT_LOCATION_KEY, startUpFileLocation);
 
         Main.main(new String[]{"--conf", classConfig, "--conf", locationConfig});

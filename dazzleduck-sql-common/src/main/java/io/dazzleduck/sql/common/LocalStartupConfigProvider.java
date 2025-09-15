@@ -23,7 +23,7 @@ public class LocalStartupConfigProvider implements StartupScriptProvider {
     }
 
     @Override
-    public void loadInner(Config config) {
+    public void setConfig(Config config) {
         this.config = config;
     }
 }
