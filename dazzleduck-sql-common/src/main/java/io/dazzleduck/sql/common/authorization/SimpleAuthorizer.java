@@ -11,10 +11,7 @@ import io.dazzleduck.sql.commons.ExpressionFactory;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.common.auth.UnauthorizedException;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.sql.SQLException;
 import java.util.*;
 
@@ -23,8 +20,6 @@ public class SimpleAuthorizer implements SqlAuthorizer {
     private record AccessValue(JsonNode filter, List<String> columns) { }
     Map<AccessKey, AccessValue> accessMap = new HashMap<>();
     Set<String> superUsers = new HashSet<>();
-
-    public static final String ACCESS_FILE = "simple-access.json";
 
     public SimpleAuthorizer(Map<String, List<String>> userGroupMapping,
                             List<AccessRow> accessRows) {
@@ -66,18 +61,27 @@ public class SimpleAuthorizer implements SqlAuthorizer {
 
     public static SqlAuthorizer load(Config config) throws IOException {
         var userGroupMapping = loadUsrGroupMapping(config);
-        var accessRows = loadAccessRows();
+        var accessRows = loadAccessRows(config);
         return new SimpleAuthorizer(userGroupMapping, accessRows);
     }
 
-    public static List<AccessRow> loadAccessRows() throws IOException {
+    public static List<AccessRow> loadAccessRows(Config config) throws IOException {
         var result = new ArrayList<AccessRow>();
-        try (InputStream inputStream = SimpleAuthorizer.class.getResourceAsStream("/" + ACCESS_FILE);
+        if (!config.hasPath("access-row-file")) {
+            throw new IllegalArgumentException("Missing 'access-row-file' in config");
+        }
+        String path = config.getString("access-row-file");
+        ObjectMapper mapper = new ObjectMapper();
+        try (InputStream inputStream = new FileInputStream(path);
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-            ObjectMapper mapper = new ObjectMapper();
-            var line = reader.readLine();
-            var accessRow = mapper.readValue(line, AccessRow.class);
-            result.add(accessRow);
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (!line.isEmpty()) {
+                    AccessRow accessRow = mapper.readValue(line, AccessRow.class);
+                    result.add(accessRow);
+                }
+            }
         }
         return result;
     }
