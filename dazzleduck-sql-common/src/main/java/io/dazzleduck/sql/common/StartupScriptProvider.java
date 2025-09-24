@@ -9,7 +9,7 @@ public interface StartupScriptProvider extends ConfigBasedProvider {
     String STARTUP_SCRIPT_CONFIG_PREFIX = "startup-script";
     void setConfig(Config config);
 
-    String getStartupScript()  throws IOException;
+    String getStartupScript() throws IOException, InterruptedException;
 
     static StartupScriptProvider load(Config config) throws Exception {
         return ConfigBasedProvider.load(config, STARTUP_SCRIPT_CONFIG_PREFIX,
