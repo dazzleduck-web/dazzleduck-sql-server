@@ -51,6 +51,7 @@ public class Main {
         var allocator = new RootAllocator();
         String location = "http://%s:%s".formatted(host, port);
         WebServer server = WebServer.builder()
+                .config(helidonConfig.get("dazzleduck-server"))
                 .config(helidonConfig.get("flight-sql"))
                 .routing(routing -> {
                     var b = routing.register("/query", new QueryService(allocator))
@@ -62,6 +63,7 @@ public class Main {
                     }
                 })
                 .port(port)
+                .host(host)
                 .build()
                 .start();
         String url = "http://localhost:" + server.port();
