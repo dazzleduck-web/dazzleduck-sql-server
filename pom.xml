@@ -35,6 +35,7 @@
         <module>dazzleduck-sql-commons</module>
         <module>dazzleduck-sql-search</module>
         <module>dazzleduck-sql-runtime</module>
+        <module>dazzleduck-sql-micrometer</module>
     </modules>
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
