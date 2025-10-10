@@ -1,9 +1,7 @@
 package io.dazzleduck.sql.http.server;
 
 import io.dazzleduck.sql.common.Headers;
-import io.dazzleduck.sql.common.authorization.AccessMode;
-import io.dazzleduck.sql.common.authorization.NOOPAuthorizer;
-import io.dazzleduck.sql.common.authorization.SqlAuthorizer;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.commons.planner.SplitPlanner;

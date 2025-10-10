@@ -1,4 +1,4 @@
-package io.dazzleduck.sql.common.authorization;
+package io.dazzleduck.sql.commons.authorization;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;

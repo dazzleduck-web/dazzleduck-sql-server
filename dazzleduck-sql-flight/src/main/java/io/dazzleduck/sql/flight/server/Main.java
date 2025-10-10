@@ -2,7 +2,7 @@ package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.StartupScriptProvider;
-import io.dazzleduck.sql.common.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceJWTTokenAuthenticator;

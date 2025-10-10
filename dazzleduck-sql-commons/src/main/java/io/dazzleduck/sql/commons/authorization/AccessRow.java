@@ -1,4 +1,4 @@
-package io.dazzleduck.sql.common.authorization;
+package io.dazzleduck.sql.commons.authorization;
 
 import io.dazzleduck.sql.commons.Transformations;
 

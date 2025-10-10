@@ -5,7 +5,7 @@ import io.dazzleduck.sql.common.ConfigBasedProvider;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.LocalStartupConfigProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
-import io.dazzleduck.sql.common.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import io.dazzleduck.sql.flight.FlightStreamReader;

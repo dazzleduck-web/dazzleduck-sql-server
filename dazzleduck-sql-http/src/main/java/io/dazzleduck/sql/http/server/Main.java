@@ -4,7 +4,7 @@ package io.dazzleduck.sql.http.server;
 
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.auth.Validator;
-import io.dazzleduck.sql.common.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.helidon.config.Config;
 import io.helidon.logging.common.LogConfig;

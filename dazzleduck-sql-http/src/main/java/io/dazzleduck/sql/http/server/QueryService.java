@@ -1,7 +1,7 @@
 package io.dazzleduck.sql.http.server;
 
 import io.dazzleduck.sql.common.Headers;
-import io.dazzleduck.sql.common.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.helidon.http.HeaderNames;
 import io.helidon.http.Status;
