@@ -5,7 +5,10 @@ import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.impl.UnionListWriter;
 import org.apache.arrow.vector.complex.impl.UnionMapWriter;
+import org.apache.arrow.vector.holders.Decimal256Holder;
+import org.apache.arrow.vector.holders.DecimalHolder;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +23,7 @@ public interface VectorWriter<V> {
         public void write(VarCharVector varCharVector, int index, Object value) {
             if (value == null) {
                 varCharVector.setNull(index);
+                return;
             }
             var v = (String) value;
             varCharVector.set(index, v.getBytes(StandardCharsets.UTF_8));
@@ -31,6 +35,7 @@ public interface VectorWriter<V> {
         public void write(IntVector intVector, int index, Object value) {
             if (value == null) {
                 intVector.setNull(index);
+                return;
             }
             var v = (Integer) value;
             intVector.set(index, v);
@@ -42,6 +47,7 @@ public interface VectorWriter<V> {
         public void write(BigIntVector bigIntVector, int index, Object value) {
             if (value == null) {
                 bigIntVector.setNull(index);
+                return;
             }
             var v = (Long) value;
             bigIntVector.set(index, v);
@@ -53,9 +59,70 @@ public interface VectorWriter<V> {
         public void write(Float8Vector float8Vector, int index, Object value) {
             if (value == null) {
                 float8Vector.setNull(index);
+                return;
             }
             var v = (Double) value;
             float8Vector.set(index, v);
+        }
+    }
+
+    class TimeStampMilliTZVectorWriter implements VectorWriter<TimeStampMilliTZVector> {
+        @Override
+        public void write(TimeStampMilliTZVector timeStampMilliTZVector, int index, Object value) {
+            if (value == null) {
+                timeStampMilliTZVector.setNull(index);
+                return;
+            }
+            var v = (Long) value;
+            timeStampMilliTZVector.set(index, v);
+        }
+    }
+
+    class DecimalVectorWriter implements VectorWriter<DecimalVector> {
+        @Override
+        public void write(DecimalVector decimalVector, int index, Object value) {
+            if (value == null) {
+                decimalVector.setNull(index);
+                return;
+            }
+            var v = (BigDecimal) value;
+            decimalVector.set(index, v);
+        }
+    }
+
+    class Decimal256VectorWriter implements VectorWriter<Decimal256Vector> {
+        @Override
+        public void write(Decimal256Vector decimal256Vector, int index, Object value) {
+            if (value == null) {
+                decimal256Vector.setNull(index);
+                return;
+            }
+            var v = (BigDecimal) value;
+            decimal256Vector.set(index, v);
+        }
+    }
+
+    class DateMilliVectorVectorWriter implements VectorWriter<DateMilliVector> {
+        @Override
+        public void write(DateMilliVector dateMilliVector, int index, Object value) {
+            if (value == null) {
+                dateMilliVector.setNull(index);
+                return;
+            }
+            var v = (Long) value;
+            dateMilliVector.set(index, v);
+        }
+    }
+
+    class DateDayVectorWriter implements VectorWriter<DateDayVector> {
+        @Override
+        public void write(DateDayVector dateDayVector, int index, Object value) {
+            if (value == null) {
+                dateDayVector.setNull(index);
+                return;
+            }
+            var v = (Integer) value;
+            dateDayVector.set(index, v);
         }
     }
 

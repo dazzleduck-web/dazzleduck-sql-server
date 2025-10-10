@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.types;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -35,7 +36,6 @@ public class VectorSchemaRootWriter {
         return root;
     }
 
-    //TODO
     public static VectorSchemaRootWriter of(Schema schema) {
         List<VectorWriter<?>> listOfFunctions = new ArrayList<>();
         for (var field : schema.getFields()) {
@@ -55,6 +55,15 @@ public class VectorSchemaRootWriter {
             return new VectorWriter.FloatVectorWriter();
         } else if (type instanceof ArrowType.Utf8) {
             return new VectorWriter.VarCharVectorWriter();
+        } else if (type instanceof ArrowType.Timestamp) {
+            return new VectorWriter.TimeStampMilliTZVectorWriter();
+        } else if (type instanceof ArrowType.Date dateType) {
+            if (dateType.getUnit() == DateUnit.DAY) return new VectorWriter.DateDayVectorWriter();
+            else return new VectorWriter.DateMilliVectorVectorWriter();
+        }  else if (type instanceof ArrowType.Decimal decimalType) {
+            if (decimalType.getBitWidth() == 128) return new VectorWriter.DecimalVectorWriter();
+            else if (decimalType.getBitWidth() == 256) return new VectorWriter.Decimal256VectorWriter();
+            else throw new UnsupportedOperationException("Unsupported decimal bit width: " + decimalType.getBitWidth());
         }
         // ---------- List type ----------
         else if (type instanceof ArrowType.List) {
