@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.Config;
 import io.dazzleduck.sql.common.auth.Validator;
 import io.dazzleduck.sql.common.util.ConfigUtils;
+import io.jsonwebtoken.io.Decoders;
+import io.jsonwebtoken.security.Keys;
 import org.apache.arrow.flight.CallHeaders;
 import org.apache.arrow.flight.CallInfo;
 import org.apache.arrow.flight.CallStatus;
@@ -30,7 +32,8 @@ public class AuthUtils {
     public static AdvanceJWTTokenAuthenticator getAuthenticator(Config config) throws NoSuchAlgorithmException {
         var validator = createCredentialValidator(config);
         var authenticator = new AdvanceBasicCallHeaderAuthenticator(validator);
-        var secretKey = Validator.fromString(config.getString(ConfigUtils.SECRET_KEY_KEY));
+        var base64Key = config.getString(ConfigUtils.SECRET_KEY_KEY);
+        var secretKey = Keys.hmacShaKeyFor(Decoders.BASE64.decode(base64Key));
         return new AdvanceJWTTokenAuthenticator(authenticator, secretKey, config);
     }
 
