@@ -10,6 +10,8 @@ import io.helidon.config.Config;
 import io.helidon.logging.common.LogConfig;
 import io.helidon.webserver.WebServer;
 import org.apache.arrow.memory.RootAllocator;
+import io.helidon.cors.CrossOriginConfig;
+import io.helidon.webserver.cors.CorsSupport;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,10 +59,18 @@ public class Main {
         if (Files.exists(tempWriteDir)) {
             Files.createDirectories(tempWriteDir);
         }
+        var cors = CorsSupport.builder()
+                .addCrossOrigin(CrossOriginConfig.builder()
+                        .allowOrigins("http://localhost:5173")
+                        .allowMethods("GET", "POST")
+                        .allowHeaders("Content-Type", "Authorization")
+                        .build())
+                .build();
         WebServer server = WebServer.builder()
                 .config(helidonConfig.get("dazzleduck-server"))
                 .config(helidonConfig.get("flight-sql"))
                 .routing(routing -> {
+                    routing.register(cors);
                     var b = routing.register("/query", new QueryService(allocator, accessMode))
                             .register("/login", new LoginService(appConfig, secretKey))
                             .register("/plan", new PlaningService(location, allocator, accessMode))
