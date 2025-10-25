@@ -1,8 +1,9 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import "../App.css";
 import { useLogging } from "../context/LoggingContext";
 import { v4 as uuidv4 } from "uuid";
 import DisplayCharts from "../components/DisplayCharts";
+import { useForm } from 'react-hook-form';
 import {
     HiOutlineChevronDoubleUp,
     HiOutlineChevronDoubleDown,
@@ -10,17 +11,39 @@ import {
     HiOutlineChevronDoubleLeft,
     HiOutlineX,
 } from "react-icons/hi";
+
 const Logging = () => {
     const DEFAULT_VIEW = "table";
-    const { executeQuery } = useLogging();
+    const { executeQuery, login } = useLogging();
 
-    // connection config
+    // react-hook-form with defaultValues
+    const {
+        register,
+        handleSubmit,
+        watch,
+        formState: { errors, isSubmitted, isSubmitting }
+    } = useForm({
+        defaultValues: {
+            url: "",
+            username: "",
+            password: "",
+            splitSize: 0,
+        },
+    });
+    // watch all fields
+    const watchedFields = watch();
+
+    // connection config stored for executeQuery usage
     const [connection, setConnection] = useState({
         url: "",
         username: "",
         password: "",
         splitSize: 0,
     });
+
+    // whether we successfully connected
+    const [isConnected, setIsConnected] = useState(false);
+    const [loginError, setLoginError] = useState(null);
 
     const [showConnection, setShowConnection] = useState(true);
 
@@ -57,9 +80,19 @@ const Logging = () => {
     };
 
     const handleRunQuery = async (row) => {
-        const { url, username, password, splitSize } = connection;
         const id = row.id;
         const query = row.query;
+        // If user isn't connected, show message and don't call executeQuery
+        if (!isConnected) {
+            setResults((prev) => ({
+                ...prev,
+                [id]: { logs: [], loading: false, error: "Not connected — click Connect" },
+            }));
+            return;
+        }
+
+        // use connection state which was set on successful connect
+        const { url, username, password, splitSize } = connection;
 
         setResults((prev) => ({
             ...prev,
@@ -67,13 +100,7 @@ const Logging = () => {
         }));
 
         try {
-            const logsData = await executeQuery(
-                url,
-                username,
-                password,
-                query,
-                splitSize
-            );
+            const logsData = await executeQuery(url, username, password, query, splitSize);
 
             // Normalize into array of objects
             let normalized = [];
@@ -110,65 +137,141 @@ const Logging = () => {
         }));
     };
 
+    // Handle form submission (Connect)
+    const onSubmit = async (data) => {
+        // clear previous login error
+        setLoginError(null);
+        // set connection state (so UI has it)
+        setConnection({
+            url: data.url,
+            username: data.username,
+            password: data.password,
+            splitSize: data.splitSize ?? 0,
+        });
+
+        try {
+            await login(data.url, data.username, data.password);
+            setIsConnected(true);
+            setLoginError(null);
+        } catch (err) {
+            setIsConnected(false);
+            setLoginError(err?.message || "Login failed");
+        }
+    };
+
+    // whenever any field changes in connection settings we will disconnect.
+    useEffect(() => {
+        setIsConnected(false);
+    }, [watchedFields.url, watchedFields.username, watchedFields.password, watchedFields.splitSize]);
+
     return (
         <div className="relative min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 p-8 space-y-10">
             {/* === Connection Panel Toggle === */}
             <button
                 onClick={() => setShowConnection(!showConnection)}
-                className="fixed top-30.5 left-[1.5px] z-30 text-xl bg-gray-600 text-white p-1 rounded-full shadow hover:bg-gray-700 transition cursor-pointer">
+                className="fixed top-30.5 left-[1.5px] z-30 text-xl bg-gray-600 text-white p-1 rounded-full shadow hover:bg-gray-700 transition cursor-pointer"
+            >
                 {showConnection ? <HiOutlineX /> : <HiOutlineChevronDoubleRight />}
             </button>
 
             {/* === Connection Panel === */}
             <div
                 className={`fixed top-30 left-8 w-80 bg-white shadow-2xl rounded-2xl border border-gray-600 transform transition-transform duration-300 ease-in-out p-6 z-20 ${showConnection ? "translate-x-0" : "-translate-x-full"
-                    }`}>
+                    }`}
+            >
                 <h2 className="text-2xl font-semibold text-gray-800 mb-4">
                     Connection Settings
                 </h2>
-                <div className="space-y-4">
-                    {["url", "username", "password"].map((field) => (
-                        <div key={field}>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                {field === "url"
-                                    ? "Server URL"
-                                    : field.charAt(0).toUpperCase() + field.slice(1)}
-                            </label>
-                            <input
-                                type={field === "password" ? "password" : "text"}
-                                value={connection[field]}
-                                onChange={(e) =>
-                                    setConnection({ ...connection, [field]: e.target.value })
-                                }
-                                placeholder={
-                                    field === "url" ? "http://localhost:8080" : `Enter ${field}`
-                                }
-                                className="w-full border border-gray-400 rounded-lg p-2"
-                            />
-                        </div>
-                    ))}
+
+                {/* show a tiny status */}
+                <div className="mb-2">
+                    {isConnected ? (
+                        <p className="text-sm text-green-700">Connected</p>
+                    ) : (
+                        <p className="text-sm text-gray-600">Not connected</p>
+                    )}
+                </div>
+
+                <form className="space-y-4" onSubmit={handleSubmit(onSubmit)}>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Server URL
+                        </label>
+                        <input
+                            type="text"
+                            {...register("url", { required: "Server URL is required" })}
+                            placeholder="http://localhost:8080"
+                            className="w-full border border-gray-400 rounded-lg p-2"
+                        />
+                        {/* show error only after submit attempt */}
+                        {isSubmitted && errors.url && (
+                            <p className="text-red-500 text-sm">{errors.url.message}</p>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Username
+                        </label>
+                        <input
+                            type="text"
+                            {...register("username", { required: "Username is required" })}
+                            placeholder="Enter username"
+                            className="w-full border border-gray-400 rounded-lg p-2"
+                        />
+                        {isSubmitted && errors.username && (
+                            <p className="text-red-500 text-sm">{errors.username.message}</p>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Password
+                        </label>
+                        <input
+                            type="password"
+                            {...register("password", { required: "Password is required" })}
+                            placeholder="Enter password"
+                            className="w-full border border-gray-400 rounded-lg p-2"
+                        />
+                        {isSubmitted && errors.password && (
+                            <p className="text-red-500 text-sm">{errors.password.message}</p>
+                        )}
+                    </div>
 
                     <div>
                         <label className="text-sm font-medium text-gray-600 mb-1 mr-2">
                             Split Size:
                         </label>
+                        {/* remove any direct value binding; use RHF default value */}
                         <input
                             type="number"
                             min="0"
-                            value={connection.splitSize}
-                            onChange={(e) => {
-                                const value = Number(e.target.value);
-                                if (value >= 0 || e.target.value === "") {
-                                    setConnection({ ...connection, splitSize: e.target.value });
-                                }
-                            }}
+                            {...register("splitSize", {
+                                valueAsNumber: true,
+                                validate: (v) => (v >= 0) || "Split size must be 0 or greater",
+                            })}
                             className="w-40 border border-gray-400 rounded-lg p-1"
                         />
-                        <p className="text-xs text-gray-500 mt-1">
-                            0 = /query; &gt;0 = plan/split
-                        </p>
+                        {isSubmitted && errors.splitSize && (
+                            <p className="text-red-500 text-xs mt-1">{errors.splitSize.message}</p>
+                        )}
+                        <p className="text-xs text-gray-500 mt-1">0 = /query; &gt;0 = plan/split</p>
                     </div>
-                </div>
+
+                    {/* show login error if any */}
+                    {loginError && (
+                        <p className="text-red-600 text-sm">{loginError}</p>
+                    )}
+
+                    <button
+                        type="submit"
+                        className={`w-full ${isConnected? "bg-blue-300 hover:bg-blue-400" : "bg-blue-600 hover:bg-blue-700 cursor-pointer"} text-white font-medium py-2 rounded-lg mt-4 transition`}
+                        disabled={(isSubmitting, isConnected)}
+                    >
+                        {isSubmitting ? "Connecting..." : "Connect"}
+                    </button>
+                </form>
             </div>
 
             {/* === Query Rows === */}
@@ -183,17 +286,19 @@ const Logging = () => {
                 return (
                     <div
                         key={row.id}
-                        className={`relative max-w-[85dvw] mx-auto bg-white rounded-2xl shadow-2xl p-8 border border-gray-300 flex flex-col overflow-hidden`}>
+                        className={`relative max-w-[85dvw] mx-auto bg-white rounded-2xl shadow-2xl p-8 border border-gray-300 flex flex-col overflow-hidden`}
+                    >
                         {/* Collapse toggle */}
-                        <div
-                            className={`absolute top-0 left-0 w-full h-2.5 bg-gray-800 z-10`}>
+                        <div className={`absolute top-0 left-0 w-full h-2.5 bg-gray-800 z-10`}>
                             <div
                                 className={`absolute -bottom-3.5 ${row.showPanel ? "-bottom-4.5" : ""
                                     } left-1/2 -translate-x-1/2 w-50 h-13 bg-gray-800 cursor-pointer rounded-b-full z-10 transition-all duration-300`}
-                                onClick={() => updateRow(row.id, "showPanel", !row.showPanel)}>
+                                onClick={() => updateRow(row.id, "showPanel", !row.showPanel)}
+                            >
                                 <button
                                     onClick={() => updateRow(row.id, "showPanel", !row.showPanel)}
-                                    className="absolute top-7 left-1/2 -translate-x-1/2 z-20 rounded-full text-white h-6 cursor-pointer">
+                                    className="absolute top-7 left-1/2 -translate-x-1/2 z-20 rounded-full text-white h-6 cursor-pointer"
+                                >
                                     {row.showPanel ? (
                                         <HiOutlineChevronDoubleUp className="text-lg" />
                                     ) : (
@@ -207,7 +312,8 @@ const Logging = () => {
                         <button
                             onClick={() => removeRow(row.id)}
                             disabled={rows.length === 1}
-                            className="absolute -right-5 hover:right-0 top-4 w-12 border p-1 rounded-full rounded-r-lg text-sm font-medium hover:bg-red-500 hover:text-white transition-all duration-300 disabled:opacity-50 cursor-pointer">
+                            className="absolute -right-5 hover:right-0 top-4 w-12 border p-1 rounded-full rounded-r-lg text-sm font-medium hover:bg-red-500 hover:text-white transition-all duration-300 disabled:opacity-50 cursor-pointer"
+                        >
                             <HiOutlineX className="text-xl" />
                         </button>
 
@@ -216,7 +322,8 @@ const Logging = () => {
                             className={`overflow-hidden mt-5 shadow-lg rounded-xl transition-all duration-500 ease-in-out ${row.showPanel
                                 ? "max-h-[600px] opacity-100"
                                 : "max-h-0 opacity-0"
-                                }`}>
+                                }`}
+                        >
                             <div className="flex flex-col flex-1 bg-gray-50 rounded-xl border border-gray-300 p-6">
                                 <h2 className="text-2xl font-semibold text-gray-800 mb-2">
                                     SQL Query #{row.id.split("-")[0]}
@@ -232,13 +339,15 @@ const Logging = () => {
                                     <button
                                         onClick={() => clearRowLogs(row.id)}
                                         disabled={loading || logs.length === 0}
-                                        className="bg-gray-400 hover:bg-gray-500 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer">
+                                        className="bg-gray-400 hover:bg-gray-500 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
+                                    >
                                         Clear
                                     </button>
                                     <button
                                         onClick={() => handleRunQuery(row)}
-                                        disabled={loading}
-                                        className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer">
+                                        disabled={loading || !isConnected}
+                                        className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
+                                    >
                                         {loading ? "Running..." : "Run Query"}
                                     </button>
                                 </div>
@@ -248,17 +357,20 @@ const Logging = () => {
                         {/* === Results === */}
                         <div
                             className={`flex flex-col flex-1 transition-all duration-500 ease-in-out ${row.showPanel ? "mt-6" : "mt-0"
-                                }`}>
+                                }`}
+                        >
                             <div className="flex justify-between items-center mb-2">
                                 <h2 className="text-2xl font-semibold text-gray-800">
                                     Results
                                 </h2>
+
                                 {/* View selection radio buttons */}
                                 <div className="flex items-center gap-5">
                                     {["table", "line", "area", "bar", "pie"].map((v) => (
                                         <label
                                             key={v}
-                                            className="flex items-center text-sm cursor-pointer">
+                                            className="flex items-center text-sm cursor-pointer"
+                                        >
                                             <input
                                                 type="radio"
                                                 name={`view-${row.id}`}
@@ -283,9 +395,16 @@ const Logging = () => {
                                         {error}
                                     </p>
                                 ) : logs.length === 0 ? (
-                                    <p className="text-gray-500 text-center p-10">
-                                        No results yet. Run a query to view log data.
-                                    </p>
+                                    // if not connected, show Connect-first message
+                                    !isConnected ? (
+                                        <p className="text-gray-700 text-center p-10">
+                                            Connect first to run queries. Click <b>Connect</b> in the Connection Settings.
+                                        </p>
+                                    ) : (
+                                        <p className="text-gray-500 text-center p-10">
+                                            No results yet. Run a query to view log data.
+                                        </p>
+                                    )
                                 ) : row.view === "table" ? (
                                     <table className="w-full text-sm text-left border-separate border-spacing-0">
                                         <thead className="sticky top-0 z-10 shadow-md custom-font">
@@ -293,37 +412,34 @@ const Logging = () => {
                                                 {Object.keys(logs[0]).map((key) => (
                                                     <th
                                                         key={key}
-                                                        className="p-2 border border-gray-400 capitalize text-center">
+                                                        className="p-2 border border-gray-400 capitalize text-center"
+                                                    >
                                                         {key}
                                                     </th>
                                                 ))}
                                             </tr>
                                         </thead>
                                         <tbody>
-                                          {logs.map((r, i) => (
-                                            <tr
-                                              key={i}
-                                              className="hover:bg-gray-100 transition duration-300"
-                                            >
-                                              {Object.entries(r).map(([key, val], j) => (
-                                                <td
-                                                  key={j}
-                                                  className="p-2 border border-gray-300 text-center"
+                                            {logs.map((r, i) => (
+                                                <tr
+                                                    key={i}
+                                                    className="hover:bg-gray-100 transition duration-300"
                                                 >
-                                                  {key === "dt" ? new Date(val).toLocaleString() : String(val)}
-                                                </td>
-                                              ))}
-                                            </tr>
-                                          ))}
+                                                    {Object.entries(r).map(([key, val], j) => (
+                                                        <td
+                                                            key={j}
+                                                            className="p-2 border border-gray-300 text-center"
+                                                        >
+                                                            {key === "dt" ? new Date(val).toLocaleString() : String(val)}
+                                                        </td>
+                                                    ))}
+                                                </tr>
+                                            ))}
                                         </tbody>
-
                                     </table>
                                 ) : (
                                     <div className="p-2">
-                                        <DisplayCharts
-                                            logs={logs}
-                                            view={row.view}
-                                        />
+                                        <DisplayCharts logs={logs} view={row.view} />
                                     </div>
                                 )}
                             </div>
@@ -336,7 +452,8 @@ const Logging = () => {
             <div className="flex justify-center mt-10">
                 <button
                     onClick={addRow}
-                    className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-md transition duration-300 cursor-pointer">
+                    className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-md transition duration-300 cursor-pointer"
+                >
                     Add New Query Row
                 </button>
             </div>

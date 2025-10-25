@@ -63,7 +63,7 @@ public class Main {
         var jwtExpiration = appConfig.getDuration("jwt.token.expiration");
         var cors = CorsSupport.builder()
                 .addCrossOrigin(CrossOriginConfig.builder()
-                        .allowOrigins("http://localhost:5173")
+                        .allowOrigins(appConfig.hasPath("allow-origin") ? appConfig.getString("allow-origin") : "*")
                         .allowMethods("GET", "POST")
                         .allowHeaders("Content-Type", "Authorization")
                         .build())

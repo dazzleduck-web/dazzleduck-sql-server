@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useCallback } from "react";
 import axios from "axios";
 import { tableFromIPC } from "apache-arrow";
+import Cookies from "js-cookie";
 
 const LoggingContext = createContext();
 
@@ -33,9 +34,31 @@ export const LoggingProvider = ({ children }) => {
                 tableData = [data];
             }
         } catch (e) {
-            console.error("Error decoding response:", e);
+            throw new Error("Error decoding response:", e);
         }
         return tableData;
+    };
+
+    const login = async (serverUrl, username, password) => {
+        try {
+            const response = await axios.post(`${serverUrl}/login`, {
+                username,
+                password,
+                claims: {
+                    "org": "123"
+                }
+            });
+            const jwt = response.data;
+            Cookies.set("jwtToken", jwt, { path: "/", secure: true });
+            return response.data;
+        } catch (err) {
+            if (err.response) {
+                const code = err.response.status;
+                const text = err.response.statusText || "Upstream server error";
+                throw new Error(`Faild with responded ${code} ${text}`);
+            }
+            throw err;
+        }
     };
 
     /**
@@ -46,6 +69,9 @@ export const LoggingProvider = ({ children }) => {
             throw new Error("Server URL must start with http:// or https://");
         }
 
+        // Get token from cookies
+        const token = Cookies.get("jwtToken");
+
         try {
             const response = await axios.post(
                 serverUrl,
@@ -55,6 +81,7 @@ export const LoggingProvider = ({ children }) => {
                     headers: {
                         "Content-Type": "application/json",
                         Accept: "application/json, application/vnd.apache.arrow.stream",
+                        Authorization: `Bearer ${token}`,
                     },
                     auth: {
                         username,
@@ -167,17 +194,17 @@ export const LoggingProvider = ({ children }) => {
                     }
                 }
             } catch (err) {
-                console.error("Query execution failed:", err);
-                throw err;
+                throw new Error("Query execution failed:", err);
             }
 
             return finalResults;
-        },[]);
+        }, []);
 
     return (
         <LoggingContext.Provider
             value={{
                 executeQuery,
+                login,
             }}>
             {children}
         </LoggingContext.Provider>
