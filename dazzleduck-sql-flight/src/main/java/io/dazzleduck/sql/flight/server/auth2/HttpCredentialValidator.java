@@ -35,7 +35,7 @@ public class HttpCredentialValidator implements AdvanceBasicCallHeaderAuthentica
         }
 
         String requestBody = MAPPER.writeValueAsString(Map.of(
-                "username", username,
+                "emailOrUserName", username,
                 "password", password,
                 "claims", claimMap
         ));
@@ -51,7 +51,8 @@ public class HttpCredentialValidator implements AdvanceBasicCallHeaderAuthentica
         if (response.statusCode() != 200) {
             throw new RuntimeException("Failed to fetch token: " + response.body());
         }
-
+        Map<String, String> responseMap = MAPPER.readValue(response.body(), Map.class);
+        String token = responseMap.get("token");
         return new CallHeaderAuthenticator.AuthResult() {
             @Override
             public String getPeerIdentity() {
@@ -60,7 +61,7 @@ public class HttpCredentialValidator implements AdvanceBasicCallHeaderAuthentica
 
             @Override
             public void appendToOutgoingHeaders(CallHeaders headers) {
-                headers.insert(Auth2Constants.AUTHORIZATION_HEADER, "Bearer " + response.body());
+                headers.insert(Auth2Constants.AUTHORIZATION_HEADER, token);
             }
         };
     }
