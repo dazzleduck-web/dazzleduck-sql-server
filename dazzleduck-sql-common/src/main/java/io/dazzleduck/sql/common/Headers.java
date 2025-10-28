@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.common;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 public class Headers {
@@ -17,14 +18,15 @@ public class Headers {
     public static final String HEADER_DATABASE = "database";
     public static final String HEADER_SCHEMA = "schema";
     public static final String HEADER_SPLIT_SIZE = "split_size";
-    public static final String HEADER_PARALLELIZE = "parallelize";
     public static final String HEADER_DATA_PARTITION = "partition";
     public static final String HEADER_DATA_FORMAT = "format";
     public static final String HEADER_PRODUCER_ID = "producer_id";
     public static final String HEADER_PRODUCER_BATCH_ID = "producer_batch_id";
     public static final String HEADER_SORT_ORDER = "sort_order";
-
     public static final String HEADER_DATA_TRANSFORMATION ="transformation";
     public static final String HEADER_APP_DATA_TRANSFORMATION ="udf_transformation";
+
+    public static final Set<String> SUPPORTED_HEADERS = Set.of(HEADER_FETCH_SIZE, HEADER_DATABASE, HEADER_SCHEMA,  HEADER_SPLIT_SIZE,
+            HEADER_DATA_PARTITION, HEADER_DATA_FORMAT, HEADER_PRODUCER_ID, HEADER_PRODUCER_BATCH_ID, HEADER_SORT_ORDER, HEADER_DATA_TRANSFORMATION, HEADER_APP_DATA_TRANSFORMATION);
 
 }

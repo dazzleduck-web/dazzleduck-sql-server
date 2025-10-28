@@ -2,6 +2,8 @@ package io.dazzleduck.sql.common.auth;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigObject;
+import io.dazzleduck.sql.common.util.ConfigUtils;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 
 import javax.crypto.SecretKey;
@@ -44,8 +46,8 @@ public interface Validator {
         return Keys.hmacShaKeyFor(secureRandomBytes);
     }
 
-    static SecretKey fromString(String input) {
-        return Keys.hmacShaKeyFor(input.getBytes());
+    static SecretKey fromBase64String(String base64Key) {
+        return Keys.hmacShaKeyFor(Decoders.BASE64.decode(base64Key));
     }
 
     static boolean validatePassword(String username, String password, Map<String, byte[]> userHashMap) {

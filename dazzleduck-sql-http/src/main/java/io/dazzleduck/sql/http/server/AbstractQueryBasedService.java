@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
-public abstract class AbstractQueryBasedService implements HttpService {
+public abstract class AbstractQueryBasedService implements HttpService, ControllerService {
 
     protected static final ObjectMapper MAPPER = new ObjectMapper();
 

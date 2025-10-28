@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.dazzleduck.sql</groupId>
     <artifactId>dazzleduck-parent</artifactId>
-    <version>0.0.10</version>
+    <version>0.0.12-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>DazzleDuck Project Parent POM</name>
     <url>https://github.com/dazzleduck-web/dazzleduck-sql-server</url>
@@ -35,6 +35,9 @@
         <module>dazzleduck-sql-commons</module>
         <module>dazzleduck-sql-search</module>
         <module>dazzleduck-sql-runtime</module>
+        <module>dazzleduck-sql-micrometer</module>
+        <module>dazzleduck-sql-logger</module>
+        <module>dazzleduck-sql-login</module>
     </modules>
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -44,7 +47,7 @@
         <duckdb.version>1.3.2.0</duckdb.version>
         <typesafe-config.version>1.4.3</typesafe-config.version>
         <calcite.version>1.25.0</calcite.version>
-
+        <helidon.version>4.2.3</helidon.version>
         <junit.version>5.10.0</junit.version>
         <slf4j.version>2.0.16</slf4j.version>
 	    <gpg.keyname>BC7688F69A9CF5D5</gpg.keyname>

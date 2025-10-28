@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.10</version>
+        <version>0.0.12-SNAPSHOT</version>
     </parent>
     <artifactId>dazzleduck-sql-http</artifactId>
     <name>DazzleDuck Project Http Sql</name>
@@ -16,12 +16,22 @@
     <dependencies>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.10</version>
+            <artifactId>dazzleduck-sql-login</artifactId>
+            <version>0.0.12-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>io.dazzleduck.sql</groupId>
+            <artifactId>dazzleduck-sql-flight</artifactId>
+            <version>0.0.12-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.helidon.webserver</groupId>
             <artifactId>helidon-webserver</artifactId>
+            <version>${helidon.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.helidon.webserver</groupId>
+            <artifactId>helidon-webserver-cors</artifactId>
             <version>${helidon.version}</version>
         </dependency>
         <dependency>

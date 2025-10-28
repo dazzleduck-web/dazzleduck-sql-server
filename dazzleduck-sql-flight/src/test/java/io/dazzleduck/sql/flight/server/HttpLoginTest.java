@@ -1,7 +1,6 @@
 package io.dazzleduck.sql.flight.server;
 
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
-import io.dazzleduck.sql.http.server.Main;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.BufferAllocator;
@@ -34,11 +33,10 @@ public class HttpLoginTest {
         // Fix path escaping for Windows
         String escapedWarehousePath = warehousePath.replace("\\", "\\\\");
         // Start the HTTP login service
-        Main.main(new String[]{
-                "--conf", "http.port: " + HTTP_PORT,
-                "--conf", "warehousePath: \"" + escapedWarehousePath + "\""
+        io.dazzleduck.sql.login.Main.main(new String[]{
+                "--conf", "dazzleduck-login-service.http.port: " + HTTP_PORT,
         });
-        var confOverload = new String[]{"--conf", "flight-sql.port=55559",
+        var confOverload = new String[]{"--conf", "flight-sql.port=55569",
                 "--conf", "login.url=\"http://localhost:8080/login\"",
                 "--conf", "useEncryption=false",
                 "--conf", "jwt.token.generation=false",

@@ -8,17 +8,14 @@ import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.util.TestUtils;
-import io.dazzleduck.sql.flight.FlightStreamReader;
+import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
+import io.dazzleduck.sql.flight.stream.ArrowStreamReaderWrapper;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowReader;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.duckdb.DuckDBConnection;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -71,7 +68,9 @@ public class DuckDBFlightSqlProducerTest {
                 String.format("CREATE SCHEMA %s", TEST_SCHEMA),
                 String.format("USE %s.%s", TEST_CATALOG, TEST_SCHEMA),
                 String.format("CREATE TABLE %s (key string, value string)", TEST_TABLE),
-                String.format("INSERT INTO %s VALUES ('k1', 'v1'), ('k2', 'v2')", TEST_TABLE)
+                String.format("INSERT INTO %s VALUES ('k1', 'v1'), ('k2', 'v2')", TEST_TABLE),
+                "INSTALL arrow FROM community",
+                "LOAD arrow"
         };
         ConnectionPool.executeBatch(sqls);
         setUpClientServer();
@@ -90,7 +89,8 @@ public class DuckDBFlightSqlProducerTest {
                         new DuckDBFlightSqlProducer(serverLocation,
                                 UUID.randomUUID().toString(),
                                 "change me",
-                                serverAllocator, warehousePath, AccessMode.COMPLETE))
+                                serverAllocator, warehousePath, AccessMode.COMPLETE,
+                                DuckDBFlightSqlProducer.newTempDir()))
                 .headerAuthenticator(AuthUtils.getTestAuthenticator())
                 .build()
                 .start();
@@ -386,7 +386,7 @@ public class DuckDBFlightSqlProducerTest {
         String query = "select * from generate_series(10)";
         try(DuckDBConnection connection = ConnectionPool.getConnection();
             var reader = ConnectionPool.getReader( connection, clientAllocator, query, 1000 )) {
-            var streamReader = new ArrowReaderWrapper(reader, clientAllocator);
+            var streamReader = new ArrowStreamReaderWrapper(reader, clientAllocator);
             var executeIngestOption = new FlightSqlClient.ExecuteIngestOptions("",
                     FlightSql.CommandStatementIngest.TableDefinitionOptions.newBuilder().build(),
                     false, "", "", Map.of("path", filename));
@@ -399,35 +399,12 @@ public class DuckDBFlightSqlProducerTest {
         return DriverManager.getConnection(url);
     }
 
-    static class ArrowReaderWrapper extends ArrowStreamReader {
-        ArrowReader arrowReader;
-        public ArrowReaderWrapper(ArrowReader reader, BufferAllocator allocator){
-            super((InputStream) new ByteArrayInputStream(new byte[0]), allocator);
-            this.arrowReader = reader;
-        }
-
-        @Override
-        protected Schema readSchema() throws IOException {
-            return arrowReader.getVectorSchemaRoot().getSchema();
-        }
-        @Override
-        public VectorSchemaRoot getVectorSchemaRoot() throws IOException {
-            return arrowReader.getVectorSchemaRoot();
-        }
-
-        @Override
-        public boolean loadNextBatch() throws IOException {
-            return arrowReader.loadNextBatch();
-        }
-    }
-
     private FlightSqlClient splittableAdminClientForPath( Location location, BufferAllocator allocator, String path) {
         return new FlightSqlClient(FlightClient.builder(allocator, location)
                 .intercept(AuthUtils.createClientMiddlewareFactory(USER,
                         PASSWORD,
                         Map.of(Headers.HEADER_DATABASE, TEST_CATALOG,
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA,
-                                Headers.HEADER_PARALLELIZE, "true",
                                 "path", path)))
                 .build());
     }
@@ -438,7 +415,6 @@ public class DuckDBFlightSqlProducerTest {
                         PASSWORD,
                         Map.of(Headers.HEADER_DATABASE, TEST_CATALOG,
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA,
-                                Headers.HEADER_PARALLELIZE, "true",
                         "path", path, "filter", filter)))
                 .build());
     }

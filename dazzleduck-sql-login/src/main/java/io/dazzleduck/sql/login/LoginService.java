@@ -1,4 +1,4 @@
-package io.dazzleduck.sql.http.server;
+package io.dazzleduck.sql.login;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.Config;
@@ -16,7 +16,6 @@ import javax.crypto.SecretKey;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Calendar;
-import java.util.Map;
 
 public class LoginService implements HttpService {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -24,14 +23,14 @@ public class LoginService implements HttpService {
     private static final Logger logger = LoggerFactory.getLogger(LoginService.class);
     private final Config config;
     private final SecretKey secretKey;
-    private final Validator authenticator;
-    private final Duration expiration;
+    private final Validator validator;
+    private final Duration jwtExpiration;
 
-    public LoginService(Config config, SecretKey secretKey) {
-        this.config = config;
-        this.authenticator = Validator.load(config);
+    public LoginService(Config validatorConfig, SecretKey secretKey, Duration jwtExpiration) {
+        this.config = validatorConfig;
+        this.validator = Validator.load(validatorConfig);
         this.secretKey = secretKey;
-        this.expiration = config.getDuration("jwt.token.expiration");
+        this.jwtExpiration = jwtExpiration;
     }
     @Override
     public void routing(HttpRules rules) {
@@ -42,10 +41,10 @@ public class LoginService implements HttpService {
         var inputStream = serverRequest.content().inputStream();
         var loginRequest = MAPPER.readValue(inputStream, LoginObject.class);
         try {
-            authenticator.validate(loginRequest.username(), loginRequest.password());
+            validator.validate(loginRequest.username(), loginRequest.password());
             Calendar expiration = Calendar.getInstance();
             expiration.add(Calendar.MINUTE,
-                    (int)this.expiration.toMinutes());
+                    (int)this.jwtExpiration.toMinutes());
             String jwt = Jwts.builder()
                     .subject(loginRequest.username())
                     .expiration(expiration.getTime())

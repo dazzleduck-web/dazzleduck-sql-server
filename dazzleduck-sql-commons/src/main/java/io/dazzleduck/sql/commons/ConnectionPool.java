@@ -66,7 +66,11 @@ public enum ConnectionPool {
             statement.execute(sql);
             try (ResultSet resultSet = statement.getResultSet()) {
                 resultSet.next();
-                return resultSet.getObject(1, tClass);
+                if(tClass.isArray()) {
+                    return (T) resultSet.getArray(1).getArray();
+                } else {
+                    return resultSet.getObject(1, tClass);
+                }
             }
             catch (SQLException e ){
                 throw new RuntimeException("Error collecting result set for sql " + sql, e);
@@ -77,7 +81,12 @@ public enum ConnectionPool {
     }
 
     public static <T> Iterable<T> collectFirstColumn(Connection connection, String sql, Class<T> tClass) {
-        return collectAll(connection, sql, rs -> rs.getObject(1, tClass), tClass);
+        if (tClass.isArray()) {
+            return collectAll(connection, sql,
+                    rs -> (T) rs.getArray(1).getArray(), tClass);
+        } else {
+            return collectAll(connection, sql, rs -> rs.getObject(1, tClass), tClass);
+        }
     }
 
     public static <T> Iterable<T> collectAll(Connection connection, String sql, Extractor<T> extractor, Class<T> tClass) {

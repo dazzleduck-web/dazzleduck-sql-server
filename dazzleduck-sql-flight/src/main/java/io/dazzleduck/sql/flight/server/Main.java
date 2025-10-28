@@ -15,6 +15,7 @@ import org.apache.arrow.memory.RootAllocator;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.UUID;
 
 import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
@@ -58,7 +59,7 @@ public class Main {
             ConnectionPool.execute(startupContent);
         }
         BufferAllocator allocator = new RootAllocator();
-        var producer = new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode);
+        var producer = createProducer(location, producerId, secretKey, allocator, warehousePath, accessMode);
         var certStream = getInputStreamForResource(serverCertLocation);
         var keyStream = getInputStreamForResource(keystoreLocation);
 
@@ -70,6 +71,15 @@ public class Main {
             builder.useTls(certStream, keyStream);
         }
         return builder.build();
+    }
+
+    public static DuckDBFlightSqlProducer createProducer(Location location,
+                                                          String producerId,
+                                                          String secretKey,
+                                                          BufferAllocator allocator,
+                                                          String warehousePath,
+                                                          AccessMode accessMode) {
+        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, Path.of(System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString()));
     }
 
     private static InputStream getInputStreamForResource(String filename) {

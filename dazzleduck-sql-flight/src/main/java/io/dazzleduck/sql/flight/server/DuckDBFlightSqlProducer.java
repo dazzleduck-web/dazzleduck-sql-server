@@ -9,13 +9,15 @@ import com.google.common.cache.RemovalNotification;
 import com.google.protobuf.*;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.auth.UnauthorizedException;
-import io.dazzleduck.sql.commons.authorization.AccessMode;
-import io.dazzleduck.sql.commons.authorization.SqlAuthorizer;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.SqlAuthorizer;
+import io.dazzleduck.sql.commons.ingestion.*;
 import io.dazzleduck.sql.commons.planner.SplitPlanner;
-import io.dazzleduck.sql.flight.FlightStreamReader;
+import io.dazzleduck.sql.flight.ingestion.IngestionParameters;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
+import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import org.apache.arrow.adapter.jdbc.JdbcParameterBinder;
 import org.apache.arrow.adapter.jdbc.JdbcToArrowUtils;
 import org.apache.arrow.flight.*;
@@ -42,8 +44,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.*;
+import java.time.Clock;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -62,7 +68,7 @@ import static org.duckdb.DuckDBConnection.DEFAULT_SCHEMA;
  * and available in the header. More options will be supported in the future version.
  * Future implementation note for statement we check if its SET or RESET statement and based on that use cookies to set unset the values
  */
-public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable {
+public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable, SimpleBulkIngestConsumer {
     record DatabaseSchema ( String database, String schema) {}
 
     protected static final Calendar DEFAULT_CALENDAR = JdbcToArrowUtils.getUtcCalendar();
@@ -82,14 +88,40 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     private final SqlAuthorizer sqlAuthorizer;
 
     private final SqlInfoBuilder sqlInfoBuilder;
+    private final ConcurrentHashMap<String, BulkIngestQueue<String, IngestionResult>> ingestionQueueMap =
+            new ConcurrentHashMap<>();
 
+    private final PostIngestionTaskFactory postIngestionTaskFactory;
+
+    private final Path tempDir;
+
+    public static DuckDBFlightSqlProducer createProducer(Location location,
+                                                          String producerId,
+                                                          String secretKey,
+                                                          BufferAllocator allocator,
+                                                          String warehousePath,
+                                                          AccessMode accessMode) {
+        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, newTempDir());
+    }
+
+    public static Path newTempDir() {
+        var dir = Path.of(System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString());
+        if (!Files.exists(dir)) {
+            try {
+                Files.createDirectories(dir);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return dir;
+    }
 
     public DuckDBFlightSqlProducer(Location location){
         this(location, UUID.randomUUID().toString());
     }
 
     public DuckDBFlightSqlProducer(Location location, String producerId) {
-        this(location, producerId, "change me", new RootAllocator(),  System.getProperty("user.dir") + "/warehouse", AccessMode.COMPLETE);
+        this(location, producerId, "change me", new RootAllocator(),  System.getProperty("user.dir") + "/warehouse", AccessMode.COMPLETE, newTempDir());
     }
 
     public DuckDBFlightSqlProducer(Location location,
@@ -97,17 +129,21 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                    String secretKey,
                                    BufferAllocator allocator,
                                    String warehousePath,
-                                   AccessMode accessMode) {
+                                   AccessMode accessMode,
+                                   Path tempDir) {
         this.location = location;
         this.producerId = producerId;
         this.allocator = allocator;
         this.secretKey = secretKey;
         this.accessMode = accessMode;
+        this.tempDir = tempDir;
         if(AccessMode.RESTRICTED ==  accessMode) {
             this.sqlAuthorizer = SqlAuthorizer.JWT_AUTHORIZER;
         } else {
             this.sqlAuthorizer = SqlAuthorizer.NOOP_AUTHORIZER;
         }
+
+        this.postIngestionTaskFactory = connectionResult -> (PostIngestionTask) () -> {/*do nothing*/};
 
 
         preparedStatementLoadingCache =
@@ -274,52 +310,52 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     }
 
 
+    public FlightInfo getFlightInfoStatementFromQuery(final String query, final CallContext context, final FlightDescriptor descriptor){
+        var parallelize = parallelize(context);
+        if (!parallelize && AccessMode.COMPLETE == accessMode) {
+            return getFlightInfoStatement(query, context, descriptor);
+        }
+
+        JsonNode tree = null;
+        try {
+            tree = Transformations.parseToTree(query);
+            if (tree.get("error").asBoolean()) {
+                ErrorHandling.handleQueryCompilationError(tree);
+            }
+        } catch (Throwable s) {
+            ErrorHandling.handleThrowable(s);
+        }
+
+        if (AccessMode.RESTRICTED == accessMode) {
+            JsonNode restrictedTree = null;
+            try {
+                restrictedTree = authorize(context, tree);
+            } catch (UnauthorizedException e) {
+                ErrorHandling.handleUnauthorized(e);
+            } catch (Throwable e) {
+                ErrorHandling.handleThrowable(e);
+            }
+            tree = restrictedTree;
+        }
+
+        if (parallelize) {
+            return getFlightInfoStatementSplittable(tree, context, descriptor);
+        } else {
+            try {
+                var newSql = Transformations.parseToSql(tree);
+                return getFlightInfoStatement(newSql, context, descriptor);
+            } catch (SQLException e) {
+                throw ErrorHandling.handleSqlException(e);
+            }
+        }
+    }
     @Override
     public FlightInfo getFlightInfoStatement(
             final FlightSql.CommandStatementQuery request,
             final CallContext context,
             final FlightDescriptor descriptor) {
         String query = request.getQuery();
-        JsonNode tree = null;
-        if( parallelize(context) && AccessMode.RESTRICTED != accessMode ) {
-            throw handleInconsistentRequest("parallelization only supported in restricted mode");
-        }
-
-        if (AccessMode.RESTRICTED == accessMode) {
-            try {
-                tree = Transformations.parseToTree(query);
-                if (tree.get("error").asBoolean()) {
-                    ErrorHandling.handleQueryCompilationError(tree);
-                }
-            } catch (Throwable s) {
-                ErrorHandling.handleThrowable(s);
-            }
-        }
-
-        if (AccessMode.RESTRICTED == accessMode) {
-            JsonNode newTree = null;
-            try {
-                newTree = authorize(context, tree);
-            } catch (UnauthorizedException e) {
-                ErrorHandling.handleUnauthorized(e);
-            } catch (Throwable e) {
-                ErrorHandling.handleThrowable(e);
-            }
-
-
-            if (parallelize(context)) {
-                return getFlightInfoStatementSplittable(newTree, context, descriptor);
-            } else {
-                try {
-                    var newSql = Transformations.parseToSql(newTree);
-                    return getFlightInfoStatement(newSql, context, descriptor);
-                } catch (SQLException e) {
-                    throw ErrorHandling.handleSqlException(e);
-                }
-            }
-        } else {
-            return getFlightInfoStatement(query, context, descriptor);
-        }
+        return getFlightInfoStatementFromQuery(query,  context, descriptor);
     }
 
 
@@ -363,6 +399,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             ErrorHandling.handleSignatureMismatch(listener);
             return;
         }
+        getStreamStatement(statementHandle, context, listener);
+    }
+
+    public void getStreamStatement(
+            StatementHandle statementHandle,
+            final CallContext context,
+            final ServerStreamListener listener) {
         try {
             var connection = getConnection(context, accessMode);
             Statement statement = connection.createStatement();
@@ -480,28 +523,50 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         if (checkAccessModeAndRespond(ackStream)) {
            return null;
         }
-        Map<String, String > optionMap = command.getOptionsMap();
-        String path = optionMap.get("path");
-        final String completePath = warehousePath + "/" + path;
-        String format = optionMap.getOrDefault("format", "parquet");
-        String partitionColumnString = optionMap.get("partitions");
-        List<String> partitionColumns;
-        if(partitionColumnString != null) {
-            partitionColumns = Arrays.stream(partitionColumnString.split(",")).toList();
-        } else {
-            partitionColumns = List.of();
-        }
+        IngestionParameters ingestionParameters = getIngestionParameters(command, warehousePath);
+        FlightStreamReader reader = FlightStreamReader.of(flightStream, allocator);
+        return acceptPutStatementBulkIngest(context, ingestionParameters, reader, ackStream);
+    }
 
+    @Override
+    public Runnable acceptPutStatementBulkIngest(
+            CallContext context,
+            IngestionParameters ingestionParameters,
+            ArrowReader inputReader,
+            StreamListener<PutResult> ackStream) {
         return () -> {
-            FlightStreamReader reader = FlightStreamReader.of(flightStream, allocator);
-            try {
-                ConnectionPool.bulkIngestToFile(reader, allocator, completePath, partitionColumns, format);
+            Path tempFile;
+            try (inputReader) {
+                tempFile = BulkIngestQueue.writeAndValidateTempFile(tempDir, inputReader);
+                var batch = ingestionParameters.constructBatch(Files.size(tempFile), tempFile.toAbsolutePath().toString());
+                var ingestionQueue = ingestionQueueMap.computeIfAbsent(ingestionParameters.completePath(), p -> {
+                    return new ParquetIngestionQueue(p, p, IngestionParameters.DEFAULT_MAX_BUCKET_SIZE,
+                            IngestionParameters.DEFAULT_MAX_DELAY,
+                            postIngestionTaskFactory,
+                            Executors.newSingleThreadScheduledExecutor(),
+                            Clock.systemDefaultZone());
+                });
+                var result = ingestionQueue.addToQueue(batch);
+                result.get();
                 ackStream.onNext(PutResult.empty());
                 ackStream.onCompleted();
             } catch (Throwable throwable) {
                 ErrorHandling.handleThrowable(ackStream, throwable);
             }
         };
+    }
+
+    private static IngestionParameters getIngestionParameters(FlightSql.CommandStatementIngest command, String warehousePath){
+        Map<String, String > optionMap = command.getOptionsMap();
+        String path = optionMap.get("path");
+        final String completePath = warehousePath + "/" + path;
+        String format = optionMap.getOrDefault("format", "parquet");
+        String partitionColumnString = optionMap.get("partitions");
+        String[] partitionColumns = new String[0];
+        if(partitionColumnString != null) {
+            partitionColumns = partitionColumnString.split(",");
+        }
+        return new IngestionParameters(completePath, format, partitionColumns, new String[0], new String[0], "", 0L, Map.of());
     }
 
 
@@ -964,13 +1029,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             final CallContext context,
             final FlightDescriptor descriptor) {
         try {
-            var splitSize = getSplitSize(tree, context);
+            var splitSize = getSplitSize(context);
             var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize);
 
             var list = splits.stream().map(split -> {
                 try {
                     var sql = Transformations.parseToSql(split.tree());
-                    StatementHandle handle = newStatementHandle(sql);
+                    StatementHandle handle = newStatementHandle(sql, split.size());
                     final ByteString serializedHandle =
                             copyFrom(handle.serialize());
                     return FlightSql.TicketStatementQuery.newBuilder().setStatementHandle(serializedHandle).build();
@@ -996,12 +1061,12 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     }
 
     private boolean parallelize(CallContext context) {
-        return ContextUtils.getValue(context, Headers.HEADER_PARALLELIZE, false, Boolean.class);
+        return getSplitSize(context) > 0;
     }
 
 
-    private static long getSplitSize(JsonNode jsonNode, CallContext callContext) {
-        return ContextUtils.getValue(callContext, Headers.HEADER_SPLIT_SIZE, Headers.DEFAULT_SPLIT_SIZE, Long.class);
+    private static long getSplitSize(CallContext callContext) {
+        return ContextUtils.getValue(callContext, Headers.HEADER_SPLIT_SIZE, 0L, Long.class);
     }
 
     private JsonNode authorize(CallContext callContext, JsonNode sql) throws UnauthorizedException {
@@ -1011,10 +1076,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         return sqlAuthorizer.authorize(peerIdentity, databaseSchema.database, databaseSchema.schema, sql, verifiedClaims);
     }
 
-    protected StatementHandle newStatementHandle(String query) {
-        return new StatementHandle(query, sqlIdCounter.incrementAndGet(), producerId).signed(secretKey);
+    protected StatementHandle newStatementHandle(String query, long splitSize) {
+        return new StatementHandle(query, sqlIdCounter.incrementAndGet(), producerId, splitSize).signed(secretKey);
     }
 
+    protected StatementHandle newStatementHandle(String query) {
+        return newStatementHandle(query, -1);
+    }
 
     private FlightRuntimeException handleInconsistentRequest(String s) {
         return CallStatus.INTERNAL.withDescription(s).toRuntimeException();

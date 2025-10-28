@@ -9,11 +9,11 @@ import org.apache.arrow.flight.FlightDescriptor;
 import javax.annotation.Nullable;
 import java.io.IOException;
 
-public record StatementHandle(String query, long queryId, String producerId,
+public record StatementHandle(String query, long queryId, String producerId, long splitSize,
                               @Nullable String queryChecksum) {
 
-    public StatementHandle(String query, long queryId, String producerId){
-        this(query, queryId, producerId, null);
+    public StatementHandle(String query, long queryId, String producerId, long splitSize){
+        this(query, queryId, producerId, splitSize, null);
     }
 
 
@@ -33,7 +33,7 @@ public record StatementHandle(String query, long queryId, String producerId,
 
     public StatementHandle signed(String key) {
         String checksum = CryptoUtils.generateHMACSHA1(key, queryId + ":" + query);
-        return new StatementHandle(this.query, this.queryId, this.producerId(), checksum);
+        return new StatementHandle(this.query, this.queryId, this.producerId(), this.splitSize, checksum);
     }
     public static StatementHandle deserialize(byte[] bytes) {
         try {

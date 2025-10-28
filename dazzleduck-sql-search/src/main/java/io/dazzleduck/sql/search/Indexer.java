@@ -64,16 +64,18 @@ public interface Indexer {
 
 
     static String constructWriteSql(List<String> fieldsForIndexing,
+                                    String timeField,
                                     String inputStructName,
                                     String inputTable) {
         var fs = fieldsForIndexing.stream().map(f -> String.format("%s.%s as %s", inputStructName, f, f)).collect(Collectors.joining(", "));
-        var inner = "SELECT prefix, filename, row_num, time, %s FROM %s".formatted(fs, inputTable);
+        var inner = "SELECT prefix, filename, row_num, %s, %s FROM %s".formatted(timeField, fs, inputTable);
         var fieldList = String.join(",", fieldsForIndexing);
         return "WITH inner0 AS (%s),\n ".formatted(inner) +
                 "inner1 AS (UNPIVOT inner0 ON %s INTO NAME field VALUE tokens),\n".formatted(fieldList) +
-                "inner2 AS (SELECT prefix, filename, field, row_num, time, UNNEST(tokens) as token FROM inner1), \n" +
-                "inner3 AS (SELECT prefix, filename, field, token, list(row_num) as row_nums, min(time) as start_time, max(time) as end_time FROM inner2 GROUP BY token, prefix, filename, field)\n" +
-                "SELECT * FROM inner3 ORDER by  token, field, filename";
+                "inner2 AS (SELECT prefix, filename, field, row_num, %s, UNNEST(tokens) as token FROM inner1), \n".formatted(timeField) +
+                "inner3 AS (SELECT prefix, filename, field, token, list(row_num) as row_nums, count(row_num) as count, min(%s) as start_time, max(%s) as end_time FROM inner2 GROUP BY token, prefix, filename, field),\n".formatted(timeField, timeField) +
+                "inner4 AS (SELECT prefix, filename, field, token, CASE WHEN count > 1000 THEN NULL ELSE row_nums END AS row_nums, count, start_time, end_time FROM inner3)\n" +
+                "SELECT * FROM inner4 ORDER BY token, field, filename";
     }
 
     private static void readTransformExecute(String inputSql, MappedReader.Function function, List<String> sourceCol, Field targetField, String tempTableName, String outputSql, int batchSize) throws SQLException, IOException {
@@ -98,7 +100,7 @@ public interface Indexer {
         var outputStructName = "tokens";
         var structFieldType = new Field(outputStructName, FieldType.notNullable(new ArrowType.Struct()), childArrays);
         var temp_table = "__temp_create_index" + System.currentTimeMillis();
-        var outputSql = Indexer.constructWriteSql(sourceFields, outputStructName, temp_table);
+        var outputSql = Indexer.constructWriteSql(sourceFields, timeField, outputStructName, temp_table);
         var writeSql = "COPY (%s) TO '%s' (FORMAT parquet)".formatted(outputSql, indexFile);
         Indexer.readTransformExecute(inputSql, mapper, sourceFields, structFieldType, temp_table, writeSql, 5000);
     }

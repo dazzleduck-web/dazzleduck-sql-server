@@ -1,60 +1,53 @@
 package io.dazzleduck.sql.http.server;
 
-import io.dazzleduck.sql.common.Headers;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.ByteString;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
-import io.dazzleduck.sql.commons.ConnectionPool;
-import io.helidon.http.HeaderNames;
+import io.dazzleduck.sql.flight.server.StatementHandle;
 import io.helidon.http.Status;
 import io.helidon.webserver.http.ServerRequest;
 import io.helidon.webserver.http.ServerResponse;
+import org.apache.arrow.flight.FlightProducer;
+import org.apache.arrow.flight.Ticket;
+import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.ipc.ArrowReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
-import org.duckdb.DuckDBResultSet;
 
-import java.nio.channels.Channels;
-import java.sql.SQLException;
+import static com.google.protobuf.Any.pack;
 
 public class QueryService extends AbstractQueryBasedService {
 
-    private final BufferAllocator allocator;
+    private final FlightProducer flightProducer;
+    private final String secretKey;
 
-    public QueryService(BufferAllocator allocator, AccessMode accessMode) {
+    public QueryService(FlightProducer flightProducer, AccessMode accessMode, String secretKey) {
         super(accessMode);
-        this.allocator = allocator;
+        this.flightProducer = flightProducer;
+        this.secretKey = secretKey;
     }
 
+
     protected void handleInternal(ServerRequest request,
-                                ServerResponse response, String query) {
-        var fetchSizeHeader = request.headers().value(HeaderNames.create(Headers.HEADER_FETCH_SIZE));
-        int fetchSize = fetchSizeHeader.map(Integer::parseInt).orElse(Headers.DEFAULT_ARROW_FETCH_SIZE);
-        try (var connection = ConnectionPool.getConnection();
-             var statement =  connection.createStatement()) {
-            var hssResultSet = statement.execute(query);
-            var os = response.outputStream();
-            if (hssResultSet) {
-                try (DuckDBResultSet resultSet = (DuckDBResultSet) statement.getResultSet();
-                     ArrowReader reader = (ArrowReader) resultSet.arrowExportStream(allocator, fetchSize)) {
-                    var vsr = reader.getVectorSchemaRoot();
-                    try (ArrowStreamWriter writer = new ArrowStreamWriter(vsr, null, Channels.newChannel(os))) {
-                        var respHeaders = response.headers();
-                        respHeaders.set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_ARROW);
-                        response.status(Status.OK_200);
-                        writer.start();
-                        while (reader.loadNextBatch()) {
-                            writer.writeBatch();
-                        }
-                        writer.end();
-                    }
-                }
-            } else {
-                response.status(Status.OK_200);
-                os.close();
-            }
-        } catch (SQLException e) {
-            throw new BadRequestException(400, e.getMessage());
+                                  ServerResponse response,
+                                  String query) {
+        var context = ControllerService.createContext(request);
+        try {
+            var ticket = createTicket(query);
+            var listener = new OutputStreamServerStreamListener(response);
+            flightProducer.getStream(context, ticket, listener);
+            listener.waitForEnd();
         } catch (Exception e) {
-            throw new InternalErrorException(500, e.getMessage());
+            response.send(e.getMessage().getBytes());
+            response.status(Status.INTERNAL_SERVER_ERROR_500);
         }
+    }
+
+    private Ticket createTicket(String query) throws JsonProcessingException {
+        var builder = FlightSql.TicketStatementQuery.newBuilder();
+        var handle = new StatementHandle(query, -1, "http_producer", -1);
+        var statementHandle  = handle.signed(secretKey);
+        builder.setStatementHandle(ByteString.copyFrom(MAPPER.writeValueAsBytes(statementHandle)));
+        var request = builder.build();
+        return new Ticket(pack(request).toByteArray());
     }
 }

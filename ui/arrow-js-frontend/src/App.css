@@ -1,0 +1,22 @@
+body {
+  overflow: scroll;
+}
+
+body::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  height: 100px;
+}
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-custom {
+  scrollbar-width: thin;
+  scrollbar-color: #c5c5c5 transparent; 
+}

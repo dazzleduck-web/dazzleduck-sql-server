@@ -1,55 +1,49 @@
 package io.dazzleduck.sql.http.server;
 
-import io.dazzleduck.sql.common.Headers;
+import com.google.protobuf.Any;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
-import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.commons.Transformations;
-import io.dazzleduck.sql.commons.planner.SplitPlanner;
-import io.helidon.http.HeaderValues;
+import io.dazzleduck.sql.flight.server.StatementHandle;
 import io.helidon.webserver.http.ServerRequest;
 import io.helidon.webserver.http.ServerResponse;
+import org.apache.arrow.flight.FlightDescriptor;
+import org.apache.arrow.flight.FlightProducer;
+import org.apache.arrow.flight.sql.FlightSqlUtils;
+import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
 
 import java.io.IOException;
-import java.sql.SQLException;
 import java.util.ArrayList;
 
 public class PlaningService extends AbstractQueryBasedService implements ParameterUtils {
     BufferAllocator allocator;
     String location;
+    private final FlightProducer flightProducer;
 
-    public PlaningService(String location, BufferAllocator allocator, AccessMode accessMode) {
+    public PlaningService(FlightProducer flightProducer, String location, BufferAllocator allocator, AccessMode accessMode) {
         super(accessMode);
         this.allocator = allocator;
         this.location = location;
-
+        this.flightProducer = flightProducer;
     }
     @Override
     protected void handleInternal(ServerRequest request, ServerResponse response, String query) {
-        try (var connection = ConnectionPool.getConnection()) {
-            var tree = Transformations.parseToTree(connection, query);
-            if (tree.get("error").asBoolean()) {
-               response.status(500);
-               try(var outputStream = response.outputStream()) {
-                   outputStream.write(tree.get("error_message").asText().getBytes());
-               }
-               return;
+        try {
+            var command = FlightSql.CommandStatementQuery.newBuilder().setQuery(query).build();
+            var info = flightProducer.getFlightInfo(ControllerService.createContext(request),
+                    FlightDescriptor.command(Any.pack(command).toByteArray()));
+            var result = new ArrayList<StatementHandle>();
+            for ( var endpoint : info.getEndpoints()) {
+                var any = FlightSqlUtils.parseOrThrow(endpoint.getTicket().getBytes());
+                var statementQuery = FlightSqlUtils.unpackOrThrow(any, FlightSql.TicketStatementQuery.class);
+                var statementHandle = MAPPER.readValue(statementQuery.getStatementHandle().toByteArray(), StatementHandle.class);
+                result.add(statementHandle);
             }
-            long splitSize = ParameterUtils.getParameterValue(Headers.HEADER_SPLIT_SIZE, request, Headers.DEFAULT_SPLIT_SIZE, Long.class);
-            var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize);
-            var result = new ArrayList<Split>();
-            for (var treeAndSize : splits) {
-                var sql = Transformations.parseToSql(treeAndSize.tree());
-                result.add(new Split(location, sql, treeAndSize.size()));
-            }
-            response.headers().set(HeaderValues.CONTENT_TYPE_JSON);
             var outputStream = response.outputStream();
             MAPPER.writeValue(outputStream, result);
             outputStream.close();
-        } catch (SQLException sqlException) {
-            throw new BadRequestException(400, sqlException.getMessage());
         } catch (IOException e) {
             throw new InternalErrorException(500, e.getMessage());
         }
     }
 }
+

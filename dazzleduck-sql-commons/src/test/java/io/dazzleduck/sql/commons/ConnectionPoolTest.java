@@ -11,10 +11,12 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.List;
+import java.util.*;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 
 public class ConnectionPoolTest {
@@ -108,6 +110,18 @@ public class ConnectionPoolTest {
                 Assertions.assertEquals(new LongAndString( "s", 1L), i);
             });
         }
+    }
 
+    @Test
+    public void testArrayCollection() throws SQLException {
+        try (var c = ConnectionPool.getConnection()) {
+            Iterable<Object[]> longArray = (Iterable<Object[]>) ConnectionPool.collectFirstColumn(c, "select [1, 2]", Object.class.arrayType());
+            for (var a : longArray) {
+                var res = new Object[2];
+                res[0] = 1;
+                res[1] = 2;
+                Assertions.assertArrayEquals(res, a);
+            }
+        }
     }
 }

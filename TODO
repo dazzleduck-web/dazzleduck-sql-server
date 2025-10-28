@@ -1,5 +1,7 @@
-Background Task Execution
-Write support in http
-DropWizard and System metrics.
-LogCollection.
-Audit Collection.
+- Better ingestion testing with large files  and error condition - Very High
+- Better query testing with large files, error - Very High
+- Query cancellation support - Very High
+- Spark support.
+- DropWizard and System metrics.
+- LogCollection.
+- Audit Collection.

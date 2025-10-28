@@ -5,6 +5,8 @@ import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.util.TestConstants;
 import io.dazzleduck.sql.commons.util.TestUtils;
+import io.dazzleduck.sql.flight.server.StatementHandle;
+import io.dazzleduck.sql.login.LoginObject;
 import io.helidon.http.HeaderNames;
 import io.helidon.http.HeaderValues;
 import org.apache.arrow.memory.BufferAllocator;
@@ -25,7 +27,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.NoSuchAlgorithmException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -176,7 +177,7 @@ public class HttpServerTest {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
-        var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
+        var res = objectMapper.readValue(inputStreamResponse.body(), StatementHandle[].class);
         assertEquals(1, res.length);
     }
 
@@ -184,7 +185,7 @@ public class HttpServerTest {
     public void testPrintPlaning() throws SQLException {
         var query = "%s where p='1'".formatted(TestConstants.SUPPORTED_HIVE_PATH_QUERY);
         var request = "http://localhost:8080/plan?%s=1&q=".formatted(HEADER_SPLIT_SIZE);
-        var toExecute = "SELECT size FROM read_json(concat('%s', url_encode('%s')))".formatted(request, query.replaceAll("'", "''"));
+        var toExecute = "SELECT splitSize FROM read_json(concat('%s', url_encode('%s')))".formatted(request, query.replaceAll("'", "''"));
         ConnectionPool.printResult(toExecute);
         assertEquals(254, ConnectionPool.collectFirst(toExecute, Long.class));
     }
@@ -199,7 +200,7 @@ public class HttpServerTest {
                 .header(HEADER_SPLIT_SIZE, "1")
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
-        var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
+        var res = objectMapper.readValue(inputStreamResponse.body(), StatementHandle[].class);
         assertEquals(3, res.length);
     }
 
@@ -212,7 +213,7 @@ public class HttpServerTest {
                 .header(HEADER_SPLIT_SIZE, "1")
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofString());
-        var res = objectMapper.readValue(inputStreamResponse.body(), Split[].class);
+        var res = objectMapper.readValue(inputStreamResponse.body(), StatementHandle[].class);
         assertEquals(2, res.length);
     }
 
