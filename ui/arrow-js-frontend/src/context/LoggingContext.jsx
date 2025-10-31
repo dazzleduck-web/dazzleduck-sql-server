@@ -88,8 +88,6 @@ export const LoggingProvider = ({ children }) => {
                 {
                     responseType: "arraybuffer", // handles both JSON and Arrow
                     headers,
-                    // Only use Basic auth if no JWT
-                    auth: token ? undefined : { username, password },
                     timeout: 20000,
                     maxContentLength: 50 * 1024 * 1024,
                 }

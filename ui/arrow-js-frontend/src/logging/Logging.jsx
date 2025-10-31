@@ -346,6 +346,12 @@ const Logging = () => {
                                 <textarea
                                     value={row.query}
                                     onChange={(e) => updateRow(row.id, "query", e.target.value)}
+                                    onKeyDown={(e) => {
+                                            if (e.key === "Enter" && e.shiftKey && isConnected) {
+                                                e.preventDefault();
+                                                handleRunQuery(row);
+                                            }
+                                        }}
                                     placeholder="e.g. SELECT * FROM read_arrow('/your/file.arrow');"
                                     rows={5}
                                     className="w-full border border-gray-400 rounded-lg p-3 text-sm h-35 scrollbar-custom"
@@ -474,7 +480,8 @@ const Logging = () => {
 
                 <button
                     onClick={runAllQuerys}
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md transition duration-300 cursor-pointer"
+                       disabled={!isConnected}
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md disabled:opacity-50 transition duration-300 cursor-pointer"
                 >
                     Run Queries
                 </button>
