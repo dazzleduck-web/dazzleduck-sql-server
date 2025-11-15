@@ -4,13 +4,8 @@ import { useLogging } from "../context/LoggingContext";
 import { v4 as uuidv4 } from "uuid";
 import DisplayCharts from "../components/DisplayCharts";
 import { useForm } from 'react-hook-form';
-import {
-    HiOutlineChevronDoubleUp,
-    HiOutlineChevronDoubleDown,
-    HiOutlineChevronDoubleRight,
-    HiOutlineChevronDoubleLeft,
-    HiOutlineX,
-} from "react-icons/hi";
+import { HiOutlineChevronDoubleUp, HiOutlineChevronDoubleDown, HiOutlineChevronDoubleRight, HiOutlineX } from "react-icons/hi";
+import { formatPossibleDate } from "../components/utils/DateNormalizer";
 
 const Logging = () => {
     const DEFAULT_VIEW = "table";
@@ -338,11 +333,11 @@ const Logging = () => {
                                     value={row.query}
                                     onChange={(e) => updateRow(row.id, "query", e.target.value)}
                                     onKeyDown={(e) => {
-                                            if (e.key === "Enter" && e.shiftKey && isConnected) {
-                                                e.preventDefault();
-                                                handleRunQuery(row);
-                                            }
-                                        }}
+                                        if (e.key === "Enter" && e.shiftKey && isConnected) {
+                                            e.preventDefault();
+                                            handleRunQuery(row);
+                                        }
+                                    }}
                                     placeholder="e.g. SELECT * FROM read_arrow('/your/file.arrow');"
                                     rows={5}
                                     className="w-full border border-gray-400 rounded-lg p-3 text-sm h-35 scrollbar-custom"
@@ -414,7 +409,7 @@ const Logging = () => {
                                         </p>
                                     ) : (
                                         <p className="text-gray-500 text-center p-10">
-                                            No results yet. Run a query to view log data.
+                                            No results yet. Run a query to view result data.
                                         </p>
                                     )
                                 ) : row.view === "table" ? (
@@ -442,7 +437,7 @@ const Logging = () => {
                                                             key={j}
                                                             className="p-2 border border-gray-300 text-center"
                                                         >
-                                                            {key === "dt" ? new Date(val).toLocaleString() : String(val)}
+                                                            {String(formatPossibleDate(val))}
                                                         </td>
                                                     ))}
                                                 </tr>
@@ -471,7 +466,7 @@ const Logging = () => {
 
                 <button
                     onClick={runAllQuerys}
-                       disabled={!isConnected}
+                    disabled={!isConnected}
                     className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md disabled:opacity-50 transition duration-300 cursor-pointer"
                 >
                     Run Queries

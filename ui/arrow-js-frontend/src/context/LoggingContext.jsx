@@ -133,70 +133,70 @@ export const LoggingProvider = ({ children }) => {
 
     // --- Execute Query ---
     const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt) => {
-            if (!serverUrl || !query) {
-                throw new Error("Please fill in all fields before running the query.");
-            }
+        if (!serverUrl || !query) {
+            throw new Error("Please fill in all fields before running the query.");
+        }
 
-            const numericSplitSize = Number(splitSize);
-            let finalResults = [];
+        const numericSplitSize = Number(splitSize);
+        let finalResults = [];
 
-            try {
-                if (numericSplitSize <= 0) {
-                    let url = serverUrl.endsWith("/query")
+        try {
+            if (numericSplitSize <= 0) {
+                let url = serverUrl.endsWith("/query")
+                    ? serverUrl
+                    : serverUrl.replace(/\/+$/, "") + "/query";
+
+                const result = await forwardToDazzleDuck(url, query, jwt);
+                finalResults = result.type === "json"
+                    ? parseResponseData(result.data)
+                    : parseResponseData({
+                        binary: true,
+                        contentType: result.contentType,
+                        payloadBase64: result.base64,
+                    });
+            } else {
+                let planUrl = serverUrl.endsWith("/plan")
+                    ? serverUrl
+                    : serverUrl.replace(/\/+$/, "") + "/plan";
+                planUrl += `?split_size=${numericSplitSize}`;
+
+                const planResult = await forwardToDazzleDuck(planUrl, { query }, jwt);
+                const splits = Array.isArray(planResult.data) ? planResult.data : [];
+
+                if (splits.length === 0) throw new Error("No splits returned from /plan endpoint.");
+
+                for (const split of splits) {
+                    const sql = split.query || split.sql;
+                    if (!sql) continue;
+
+                    const splitUrl = serverUrl.endsWith("/query")
                         ? serverUrl
                         : serverUrl.replace(/\/+$/, "") + "/query";
 
-                    const result = await forwardToDazzleDuck(url, query, jwt);
-                    finalResults = result.type === "json"
-                        ? parseResponseData(result.data)
+                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt);
+                    const normalized = splitResult.type === "json"
+                        ? parseResponseData(splitResult.data)
                         : parseResponseData({
                             binary: true,
-                            contentType: result.contentType,
-                            payloadBase64: result.base64,
+                            contentType: splitResult.contentType,
+                            payloadBase64: splitResult.base64,
                         });
-                } else {
-                    let planUrl = serverUrl.endsWith("/plan")
-                        ? serverUrl
-                        : serverUrl.replace(/\/+$/, "") + "/plan";
-                    planUrl += `?split_size=${numericSplitSize}`;
 
-                    const planResult = await forwardToDazzleDuck(planUrl, { query }, jwt);
-                    const splits = Array.isArray(planResult.data) ? planResult.data : [];
-
-                    if (splits.length === 0) throw new Error("No splits returned from /plan endpoint.");
-
-                    for (const split of splits) {
-                        const sql = split.query || split.sql;
-                        if (!sql) continue;
-
-                        const splitUrl = serverUrl.endsWith("/query")
-                            ? serverUrl
-                            : serverUrl.replace(/\/+$/, "") + "/query";
-
-                        const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt);
-                        const normalized = splitResult.type === "json"
-                            ? parseResponseData(splitResult.data)
-                            : parseResponseData({
-                                binary: true,
-                                contentType: splitResult.contentType,
-                                payloadBase64: splitResult.base64,
-                            });
-
-                        finalResults.push(...normalized);
-                    }
+                    finalResults.push(...normalized);
                 }
-
-                // Normalize again (for safety)
-                const normalized = Array.isArray(finalResults)
-                    ? finalResults
-                    : parseResponseData(finalResults);
-
-                return normalized;
-            } catch (err) {
-                const msg = err?.message || String(err);
-                throw new Error(`Query execution failed: ${msg}`);
             }
-        }, []);
+
+            // Normalize again (for safety)
+            const normalized = Array.isArray(finalResults)
+                ? finalResults
+                : parseResponseData(finalResults);
+
+            return normalized;
+        } catch (err) {
+            const msg = err?.message || String(err);
+            throw new Error(`Query execution failed: ${msg}`);
+        }
+    }, []);
 
     return (
         <LoggingContext.Provider

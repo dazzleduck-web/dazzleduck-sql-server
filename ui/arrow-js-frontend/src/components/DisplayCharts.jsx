@@ -1,7 +1,7 @@
 import LineChartD3 from "./charts/LineChartD3";
 import BarChartD3 from "./charts/BarChartD3";
 import PieChartD3 from "./charts/PieChartD3";
-
+import { formatPossibleDate } from "./utils/DateNormalizer";
 /**
  * Universal chart display component
  * Supports Line, Bar, and Pie charts.
@@ -40,48 +40,48 @@ export default function DisplayCharts({ logs, view, width, height }) {
     animation: true,
   };
 
-  // Helper function — detect timestamp-like values and convert
-  const formatPossibleDate = (val) => {
-    if (val == null) return val;
-
-    // If numeric string timestamp (e.g. "1735689600000")
-    if (typeof val === "string" && /^\d{12,}$/.test(val.trim())) {
-      const num = Number(val);
-      return !isNaN(num) ? new Date(num).toLocaleString() : val;
-    }
-
-    // If number timestamp (e.g. 1735689600000)
-    if (typeof val === "number" && String(val).length >= 12) {
-      try {
-        return new Date(val).toLocaleString();
-      } catch {
-        return val;
-      }
-    }
-
-    // If date-like string (e.g. "2025-01-01T00:00:00")
-    if (typeof val === "string" && /\d{4}-\d{2}-\d{2}/.test(val)) {
-      try {
-        return new Date(val).toLocaleString();
-      } catch {
-        return val;
-      }
-    }
-
-    return val;
-  };
-
   // -------------------------------------------------
-  // PIE CHART (always works using first 2 columns)
+  // PIE CHART (always uses first 2 columns)
   // -------------------------------------------------
   if (view === "pie") {
     const [k1, k2] = keys.slice(0, 2); // only first two columns used
 
-    // Detect numeric vs label column
-    const numericKey = logs.some(row => !isNaN(Number(row[k1]))) ? k1 :
-                       logs.some(row => !isNaN(Number(row[k2]))) ? k2 : null;
+    // Helper: check if something is a timestamp
+    const isTimestamp = (val) => {
+      if (val == null) return false;
+      if (typeof val === "string" && /^\d{10,16}$/.test(val)) return true;
+      if (typeof val === "number" && val > 1000000000) return true;
+      if (typeof val === "string" && /\d{4}-\d{2}-\d{2}/.test(val)) return true;
+      return false;
+    };
 
-    const labelKey = numericKey === k1 ? k2 : k1;
+    // Helper: check if column is numeric (NOT timestamps!)
+    const isNumericColumn = (key) => {
+      return logs.every(row => {
+        const v = row[key];
+        if (v == null || v === "") return true;
+        if (isTimestamp(v)) return false;
+        return !isNaN(Number(v));
+      });
+    };
+
+    let numericKey = null;
+    let labelKey = null;
+
+    const k1IsNum = isNumericColumn(k1);
+    const k2IsNum = isNumericColumn(k2);
+
+    if (k1IsNum && !k2IsNum) {
+      numericKey = k1;
+      labelKey = k2;
+    } else if (k2IsNum && !k1IsNum) {
+      numericKey = k2;
+      labelKey = k1;
+    } else {
+      // fallback: use second as numeric
+      numericKey = k2;
+      labelKey = k1;
+    }
 
     const pieData = logs.map(row => ({
       label: String(formatPossibleDate(row[labelKey])),
