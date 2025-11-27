@@ -18,5 +18,7 @@ public class TestConstants {
             "UNION ALL BY NAME\n" +
             "FROM read_delta('example/delta_table'))";
 
+    public static final String SUPPORTED_DUCKLAKE_QUERY = "SELECT * FROM read_ducklake('database.schema.table')";
+
     public static final String SUPPORTED_DELTA_HIVE_PATH_QUERY = "select count(*) from %s group by key".formatted(SUPPORTED_DELTA_PATH_QUERY);
 }

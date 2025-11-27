@@ -39,8 +39,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.dazzleduck.sql.common.LocalStartupConfigProvider.SCRIPT_LOCATION_KEY;
-import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_DELTA_PATH_QUERY;
-import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY;
+import static io.dazzleduck.sql.commons.util.TestConstants.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -174,6 +173,36 @@ public class DuckDBFlightSqlProducerTest {
                 var flightCallHeaders = new FlightCallHeaders();
                 flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
                 var flightInfo = splittableClient.execute(SUPPORTED_DELTA_PATH_QUERY, new HeaderCallOption(flightCallHeaders));
+                var size = 0;
+                assertEquals(8, flightInfo.getEndpoints().size());
+                for (var endpoint : flightInfo.getEndpoints()) {
+                    try (final FlightStream stream = splittableClient.getStream(endpoint.getTicket(), new HeaderCallOption(flightCallHeaders))) {
+                        while (stream.next()) {
+                            size+=stream.getRoot().getRowCount();
+                        }
+                    }
+                }
+                assertEquals(11, size);
+            }
+        }
+    }
+
+    @Test
+    public void testStatementSplittableDucklake() throws Exception {
+        var serverLocation = Location.forGrpcInsecure(LOCALHOST, 55571);
+        try(var clientServer = createRestrictedServerClient( serverLocation, "admin")) {
+
+            try (var splittableClient = new FlightSqlClient(FlightClient.builder(clientServer.clientAllocator(), serverLocation)
+                    .intercept(AuthUtils.createClientMiddlewareFactory(USER,
+                            PASSWORD,
+                            Map.of("function", "read_ducklake",
+                                    "path", "database.schema.table",
+                                    "catalog", "catalog",
+                                    "schema", "schema")))
+                    .build())) {
+                var flightCallHeaders = new FlightCallHeaders();
+                flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
+                var flightInfo = splittableClient.execute(SUPPORTED_DUCKLAKE_QUERY, new HeaderCallOption(flightCallHeaders));
                 var size = 0;
                 assertEquals(8, flightInfo.getEndpoints().size());
                 for (var endpoint : flightInfo.getEndpoints()) {

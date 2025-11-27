@@ -9,6 +9,7 @@ import io.dazzleduck.sql.commons.delta.PartitionPruning;
 import io.dazzleduck.sql.commons.ExpressionFactory;
 import io.dazzleduck.sql.commons.FileStatus;
 import io.dazzleduck.sql.commons.Transformations;
+import io.dazzleduck.sql.commons.ducklake.DucklakePartitionPruning;
 import io.dazzleduck.sql.commons.hive.HivePartitionPruning;
 
 import java.io.IOException;
@@ -23,6 +24,12 @@ public interface SplitPlanner {
 
     public static List<List<FileStatus>> getSplitStatus(JsonNode tree,
                                                         long maxSplitSize) throws SQLException, IOException {
+        return getSplitStatus(tree, maxSplitSize, Map.of());
+    }
+
+    public static List<List<FileStatus>> getSplitStatus(JsonNode tree,
+                                                        long maxSplitSize,
+                                                        Map<String, String> databaseMetadataDatabaseMap) throws SQLException, IOException {
         var statement = Transformations.getFirstStatementNode(tree);
         var filterExpression = Transformations.getWhereClauseForTableFunction(statement);
         var catalogSchemaAndTables =
@@ -42,6 +49,20 @@ public interface SplitPlanner {
             }
             case "read_delta" ->
                     fileStatuses = PartitionPruning.pruneFiles(path, filterExpression);
+
+            case "read_ducklake" -> {
+                //
+                // Get the metadataDatabase from
+                var fisrt = catalogSchemaAndTables.get(0);
+                var catalog = fisrt.catalog();
+                var metadata = databaseMetadataDatabaseMap.get(catalog);
+                try {
+                    fileStatuses = DucklakePartitionPruning.pruneFiles(fisrt.schema(), fisrt.tableOrPath(), "", metadata);
+                } catch (NoSuchMethodException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
             default -> throw new SQLException("unsupported type : " + tableFunction);
         }
 
@@ -110,7 +131,7 @@ public interface SplitPlanner {
         from.set("function", readParquetFunction);
     }
 
-    public static List<TreeAndSize> getSplitTreeAndSize(JsonNode tree,
+    static List<TreeAndSize> getSplitTreeAndSize(JsonNode tree,
                                                         long maxSplitSize) throws SQLException, IOException {
         var splits = getSplitStatus(tree, maxSplitSize);
         return splits.stream().map(split -> {
