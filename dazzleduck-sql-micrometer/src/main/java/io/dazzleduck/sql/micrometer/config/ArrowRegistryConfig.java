@@ -1,7 +1,6 @@
 package io.dazzleduck.sql.micrometer.config;
 
 import io.micrometer.core.instrument.step.StepRegistryConfig;
-
 import java.time.Duration;
 
 public interface ArrowRegistryConfig extends StepRegistryConfig {
@@ -22,6 +21,7 @@ public interface ArrowRegistryConfig extends StepRegistryConfig {
     }
 
     default String uri() {
-        return get(prefix() + ".uri");
+        return get(prefix() + ".endpoint");
     }
+
 }

@@ -107,15 +107,11 @@ public final class ArrowFileWriterUtil {
                 case Gauge g -> value = g.value();
                 case Timer tmr -> {
                     HistogramSnapshot snap = tmr.takeSnapshot();
-                    value = snap.total(TimeUnit.SECONDS);
-                    double[] vals = Arrays.stream(snap.percentileValues())
-                            .mapToDouble(v -> v.value(TimeUnit.SECONDS))
-                            .toArray();
-                    if (vals.length > 0) {
-                        min = Arrays.stream(vals).min().orElse(Double.NaN);
-                        max = Arrays.stream(vals).max().orElse(Double.NaN);
-                        mean = Arrays.stream(vals).average().orElse(Double.NaN);
-                    }
+                    value = tmr.count();
+                    Double totalTime = snap.total(TimeUnit.SECONDS);
+                    max = snap.max(TimeUnit.SECONDS);
+                    mean = snap.mean(TimeUnit.SECONDS);
+
                 }
                 case DistributionSummary ds -> {
                     value = ds.count();
@@ -161,10 +157,10 @@ public final class ArrowFileWriterUtil {
                 id.getName(),
                 id.getType().name().toLowerCase(),
                 tagsMap,
-                !Double.isNaN(value) ? value : null,
-                !Double.isNaN(min) ? min : null,
-                !Double.isNaN(max) ? max : null,
-                !Double.isNaN(mean) ? mean : null
+                !Double.isNaN(value) ? value : 0,
+                !Double.isNaN(min) ? min : 0,
+                !Double.isNaN(max) ? max : 0,
+                !Double.isNaN(mean) ? mean : 0
         });
     }
 

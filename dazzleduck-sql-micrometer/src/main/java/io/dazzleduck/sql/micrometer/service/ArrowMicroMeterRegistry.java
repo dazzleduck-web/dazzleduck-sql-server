@@ -46,7 +46,7 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
         this.arrowConfig = Objects.requireNonNull(config, "config");
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
         this.httpClient = (httpClient != null) ? httpClient : HttpClient.newHttpClient();
-        this.httpTimeout = (httpTimeout != null) ? httpTimeout : Duration.ofSeconds(10);
+        this.httpTimeout = (httpTimeout != null) ? httpTimeout : Duration.ofSeconds(20);
         this.outputPath = outputPath;
         this.testMode = testMode;
         this.receiver = receiver;
@@ -112,7 +112,7 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
         };
         private java.net.http.HttpClient httpClient;
         private String endpoint;
-        private Duration httpTimeout = Duration.ofSeconds(10);
+        private Duration httpTimeout = Duration.ofSeconds(20);
         private String outputPath;
         private boolean testMode = false;
         private ArrowReceiverServer receiver;

@@ -20,7 +20,7 @@ public class ArrowReceiverServer {
 
     public ArrowReceiverServer(int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/arrow", new MetricsHandler());
+        server.createContext("/ingest", new MetricsHandler());
         server.setExecutor(Executors.newCachedThreadPool());
     }
 

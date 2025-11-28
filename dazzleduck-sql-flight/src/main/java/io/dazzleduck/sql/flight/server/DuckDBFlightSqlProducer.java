@@ -378,7 +378,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             final CallContext context,
             final FlightDescriptor descriptor) {
         String query = request.getQuery();
-        return getFlightInfoStatementFromQuery(query,  context, descriptor);
+        return getFlightInfoStatementFromQuery(query, context, descriptor);
     }
 
 
