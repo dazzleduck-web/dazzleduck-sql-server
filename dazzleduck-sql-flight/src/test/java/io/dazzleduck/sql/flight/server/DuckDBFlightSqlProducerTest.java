@@ -8,7 +8,6 @@ import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.commons.ingestion.NOOPPostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
@@ -33,16 +32,17 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 
 import static io.dazzleduck.sql.common.LocalStartupConfigProvider.SCRIPT_LOCATION_KEY;
 import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_DELTA_PATH_QUERY;
 import static io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class DuckDBFlightSqlProducerTest {
     protected static final String LOCALHOST = "localhost";
@@ -94,7 +94,7 @@ public class DuckDBFlightSqlProducerTest {
                                 "change me",
                                 serverAllocator, warehousePath, AccessMode.COMPLETE,
                                 DuckDBFlightSqlProducer.newTempDir(),
-                        PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory()))
+                        PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2)))
                 .headerAuthenticator(AuthUtils.getTestAuthenticator())
                 .build()
                 .start();

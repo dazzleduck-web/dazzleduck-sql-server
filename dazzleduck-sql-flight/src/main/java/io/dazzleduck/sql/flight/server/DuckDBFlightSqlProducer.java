@@ -48,11 +48,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import static com.google.protobuf.Any.pack;
 import static com.google.protobuf.ByteString.copyFrom;
@@ -109,6 +108,29 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     private final Path tempDir;
 
+    private final ScheduledExecutorService scheduledExecutorService;
+
+    private final Duration queryTimeout;
+
+    private final long CANCEL_TASK_INTERVAL_SECOND = 10;
+
+    StreamListener<CancelStatus> streamListener = new StreamListener<>() {
+        @Override
+        public void onNext(CancelStatus val) {
+
+        }
+
+        @Override
+        public void onError(Throwable t) {
+
+        }
+
+        @Override
+        public void onCompleted() {
+
+        }
+    };
+
     public static DuckDBFlightSqlProducer createProducer(Location location,
                                                           String producerId,
                                                           String secretKey,
@@ -116,7 +138,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                                           String warehousePath,
                                                           AccessMode accessMode,
                                                          PostIngestionTaskFactory postIngestionTaskFactory) {
-        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, newTempDir(), postIngestionTaskFactory);
+        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, newTempDir(), postIngestionTaskFactory, Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2));
     }
 
     public static Path newTempDir() {
@@ -137,7 +159,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     public DuckDBFlightSqlProducer(Location location, String producerId) {
         this(location, producerId, "change me", new RootAllocator(),  System.getProperty("user.dir") + "/warehouse", AccessMode.COMPLETE, newTempDir()
-        , PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory());
+        , PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2));
     }
 
     public DuckDBFlightSqlProducer(Location location,
@@ -147,13 +169,17 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                    String warehousePath,
                                    AccessMode accessMode,
                                    Path tempDir,
-                                   PostIngestionTaskFactory postIngestionTaskFactory) {
+                                   PostIngestionTaskFactory postIngestionTaskFactory,
+                                   ScheduledExecutorService scheduledExecutorService,
+                                   Duration queryTimeout) {
         this.location = location;
         this.producerId = producerId;
         this.allocator = allocator;
         this.secretKey = secretKey;
         this.accessMode = accessMode;
         this.tempDir = tempDir;
+        this.scheduledExecutorService = scheduledExecutorService;
+        this.queryTimeout = queryTimeout;
         if(AccessMode.RESTRICTED ==  accessMode) {
             this.sqlAuthorizer = SqlAuthorizer.JWT_AUTHORIZER;
         } else {
@@ -217,6 +243,19 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             var providerField =  sqlInfoBuilder.getClass().getDeclaredField("providers");
             providerField.setAccessible(true);
             supportedSqlInfo = ((HashMap<Integer, ?>)providerField.get(sqlInfoBuilder)).keySet();
+            scheduledExecutorService.scheduleWithFixedDelay(() -> {
+                preparedStatementLoadingCache.asMap().forEach((key, ctx) -> {
+                    if (ctx.startTime().plus(queryTimeout).isBefore(Instant.now())) {
+                        cancel(key.id, streamListener, key.peerIdentity);
+                    }
+                });
+
+                statementLoadingCache.asMap().forEach((key, ctx) -> {
+                    if (ctx.startTime().plus(queryTimeout).isBefore(Instant.now())) {
+                        cancel(key.id, streamListener, key.peerIdentity);
+                    }
+                });
+            }, 0, CANCEL_TASK_INTERVAL_SECOND, TimeUnit.SECONDS);
         } catch (SQLException | NoSuchFieldException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
@@ -406,8 +445,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         if (statementContext == null) {
             ErrorHandling.handleContextNotFound();
         }
-        final PreparedStatement preparedStatement = statementContext.getStatement();
-        streamResultSet(executorService, OptionalResultSetSupplier.of(preparedStatement),
+        streamResultSet(executorService, OptionalResultSetSupplier.of(statementContext),
             allocator, getBatchSize(context),
             listener, () -> {});
     }
@@ -437,7 +475,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             var key = new CacheKey(context.peerIdentity(), statementHandle.queryId());
             statementLoadingCache.put(key, statementContext);
             streamResultSet(executorService,
-                    OptionalResultSetSupplier.of(statement, statementHandle.query()),
+                    OptionalResultSetSupplier.of(statementContext, statementHandle.query()),
                     allocator,
                     getBatchSize(context),
                     listener,
@@ -824,27 +862,43 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     @Override
     public void cancel(Long queryId,
-                        StreamListener<CancelStatus> listener,
-                        String peerIdentity) {
+                       StreamListener<CancelStatus> listener,
+                       String peerIdentity) {
         var key = new CacheKey(peerIdentity, queryId);
+        StatementContext<?> context = getStatementContext(key);
+
+        if (context == null) {
+            ErrorHandling.handleContextNotFound(listener);
+            return;
+        }
         try {
-            StatementContext<Statement> statementContext =
-                    statementLoadingCache.getIfPresent(key);
-            if (statementContext == null) {
-                ErrorHandling.handleContextNotFound(listener);
-                return;
-            }
-            Statement statement = statementContext.getStatement();
+            Statement statement = context.getStatement();
             listener.onNext(CancelStatus.CANCELLING);
             try {
                 statement.cancel();
+                listener.onNext(CancelStatus.CANCELLED);
             } catch (SQLException e) {
                 ErrorHandling.handleSqlException(listener, e);
             }
-            listener.onNext(CancelStatus.CANCELLED);
         } finally {
             listener.onCompleted();
-            statementLoadingCache.invalidate(queryId);
+            invalidateCache(key, context);
+        }
+    }
+
+    private StatementContext<?> getStatementContext(CacheKey key) {
+        StatementContext<?> context = statementLoadingCache.getIfPresent(key);
+        if (context == null) {
+            context = preparedStatementLoadingCache.getIfPresent(key);
+        }
+        return context;
+    }
+
+    private void invalidateCache(CacheKey key, StatementContext<?> context) {
+        if (context.getStatement() instanceof PreparedStatement) {
+            preparedStatementLoadingCache.invalidate(key);
+        } else {
+            statementLoadingCache.invalidate(key);
         }
     }
 
