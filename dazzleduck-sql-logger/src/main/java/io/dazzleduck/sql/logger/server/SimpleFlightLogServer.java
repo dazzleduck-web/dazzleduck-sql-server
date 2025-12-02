@@ -7,24 +7,39 @@ import org.apache.arrow.vector.types.pojo.Schema;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class SimpleFlightLogServer {
-    static Schema emptySchema = new Schema(Collections.emptyList());
-    public static void main(String[] args) throws Exception {
+
+    private final List<String> receivedLogs = new CopyOnWriteArrayList<>();
+    private FlightServer server;
+
+    public List<String> getReceivedLogs() {
+        return receivedLogs;
+    }
+
+    static final Schema emptySchema = new Schema(Collections.emptyList());
+
+    public void start() throws Exception {
         var allocator = new RootAllocator(Long.MAX_VALUE);
-//use http
+
         FlightProducer producer = new FlightProducer() {
             @Override
             public Runnable acceptPut(CallContext context, FlightStream stream, StreamListener<PutResult> ackStream) {
                 return () -> {
                     try {
                         VectorSchemaRoot root = stream.getRoot();
+
                         while (stream.next()) {
-                            for (int i = 0; i < root.getRowCount(); i++) {
+                            for (int row = 0; row < root.getRowCount(); row++) {
                                 StringBuilder sb = new StringBuilder();
-                                int finalI = i;
-                                root.getFieldVectors().forEach(v -> sb.append(v.getObject(finalI)).append(" | "));
-                                System.out.println("[LOG RECEIVED] " + sb);
+                                int finalRow = row;
+                                root.getFieldVectors().forEach(v ->
+                                        sb.append(v.getObject(finalRow)).append(" | ")
+                                );
+
+                                receivedLogs.add(sb.toString());
                             }
                         }
 
@@ -39,43 +54,37 @@ public class SimpleFlightLogServer {
                 };
             }
 
-            // Minimal implementations for the interface
             @Override
             public FlightInfo getFlightInfo(CallContext context, FlightDescriptor descriptor) {
-                // Arrow 16.x allows empty endpoint list using Collections.emptyList()
-                return new FlightInfo(
-                        emptySchema,
-                        descriptor,
-                        Collections.emptyList(),
-                        -1,
-                        -1
-                );
+                return new FlightInfo(emptySchema, descriptor, Collections.emptyList(), -1, -1);
             }
 
-            @Override
-            public void listFlights(CallContext context, Criteria criteria, StreamListener<FlightInfo> listener) {
+            @Override public void listFlights(CallContext context, Criteria criteria, StreamListener<FlightInfo> listener) {
                 listener.onCompleted();
             }
 
-            @Override
-            public void getStream(CallContext context, Ticket ticket, ServerStreamListener listener) {
+            @Override public void getStream(CallContext context, Ticket ticket, ServerStreamListener listener) {
                 listener.error(CallStatus.UNIMPLEMENTED.toRuntimeException());
             }
 
-            @Override
-            public void doAction(CallContext context, Action action, StreamListener<Result> listener) {
+            @Override public void doAction(CallContext context, Action action, StreamListener<Result> listener) {
                 listener.onCompleted();
             }
 
-            @Override
-            public void listActions(CallContext context, StreamListener<ActionType> listener) {
+            @Override public void listActions(CallContext context, StreamListener<ActionType> listener) {
                 listener.onCompleted();
             }
         };
 
-        // Build and start Flight server
-        var server = FlightServer.builder(allocator, Location.forGrpcInsecure("0.0.0.0", 32010), producer).build();
+        server = FlightServer.builder(allocator, Location.forGrpcInsecure("0.0.0.0", 32010), producer)
+                .build();
+
         server.start();
-        server.awaitTermination();
+    }
+
+    public void stop() throws Exception {
+        if (server != null) {
+            server.close();
+        }
     }
 }
