@@ -39,9 +39,7 @@ public record IngestionParameters(String path,
     }
 
     public String completePath(String warehousePath) {
-        var baseUri = Path.of(warehousePath).toUri();
-        var resolvedUri = baseUri.resolve(path);
-        return Paths.get(resolvedUri).toString();
+        return Path.of(warehousePath).resolve(path).toString();
     }
     public static IngestionParameters getIngestionParameters(FlightSql.CommandStatementIngest command){
         Map<String, String > optionMap = command.getOptionsMap();

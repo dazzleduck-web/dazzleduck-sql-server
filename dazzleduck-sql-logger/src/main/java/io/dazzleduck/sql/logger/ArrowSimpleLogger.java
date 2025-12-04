@@ -45,9 +45,9 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
     ));
 
     // load config ONCE — names unchanged
-    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_micrometer");
-    private static final String CONFIG_APPLICATION_ID = config.getString("applicationId");
-    private static final String CONFIG_APPLICATION_NAME = config.getString("applicationName");
+    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logger");
+    private static final String CONFIG_APPLICATION_ID = config.getString("application_id");
+    private static final String CONFIG_APPLICATION_NAME = config.getString("application_name");
     private static final String CONFIG_HOST = config.getString("host");
 
     private static final DateTimeFormatter TS_FORMAT =
@@ -55,7 +55,7 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
 
     // -------- instance fields (names unchanged) ----------
     private final String name;
-    private final AsyncArrowFlightSender flightSender;
+    private final ArrowHttpPoster httpPoster;
     private final Queue<JavaRow> batchBuffer = new ConcurrentLinkedQueue<>();
     final AtomicInteger batchCounter = new AtomicInteger(0);
     final String applicationId;
@@ -63,12 +63,12 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
     final String host;
 
     public ArrowSimpleLogger(String name) {
-        this(name, AsyncArrowFlightSender.getDefault());
+        this(name, new ArrowHttpPoster());
     }
 
-    public ArrowSimpleLogger(String name, AsyncArrowFlightSender sender) {
+    public ArrowSimpleLogger(String name, ArrowHttpPoster sender) {
         this.name = name;
-        this.flightSender = sender;
+        this.httpPoster = sender;
         this.applicationId = CONFIG_APPLICATION_ID;
         this.applicationName = CONFIG_APPLICATION_NAME;
         this.host = CONFIG_HOST;
@@ -138,18 +138,21 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
             streamWriter.writeBatch();
             streamWriter.end();
 
-            flightSender.enqueue(out.toByteArray());
+            httpPoster.enqueue(out.toByteArray());
         } catch (Exception e) {
             System.err.println("[ArrowSimpleLogger] flushBatch failed: " + e.getMessage());
         }
     }
 
     public void flush() {
-        flushBatch();
+        while (!batchBuffer.isEmpty()) {
+            flushBatch();
+        }
     }
     /** Close logger and flush remaining logs */
     public void close() {
-        flushBatch();
+        flush();
+        httpPoster.close();
     }
     /** For SLF4J event forwarding */
     public void log(LoggingEvent event) {

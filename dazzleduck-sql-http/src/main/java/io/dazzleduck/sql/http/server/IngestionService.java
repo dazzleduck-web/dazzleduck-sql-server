@@ -23,6 +23,7 @@ import java.io.InputStream;
 import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static io.dazzleduck.sql.common.Headers.*;
@@ -60,7 +61,11 @@ public class IngestionService implements HttpService, ParameterUtils, Controller
     protected IngestionParameters parseIngestionParameters(ServerRequest serverRequest) {
         UriQuery query = serverRequest.query();
         var path = query.get("path");
-        final String completePath = warehousePath + "/" + path;
+        String fileName = UUID.randomUUID().toString();
+        // Create unique file name
+        // Full path: <warehouse>/logs/20251204_104500.parquet
+        //Full path: <warehouse>/metrics/0251204_104500.parquet
+        String completePath = warehousePath + "/" + path + "/" + fileName;
         String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
         var partitionString = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
         var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);
