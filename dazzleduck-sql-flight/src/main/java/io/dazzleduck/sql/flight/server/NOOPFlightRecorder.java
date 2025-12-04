@@ -98,4 +98,29 @@ public class NOOPFlightRecorder implements FlightRecorder {
     public double getBytesIn() {
         return 0;
     }
+
+    @Override
+    public long getCompletedStatements() {
+        return 0;
+    }
+
+    @Override
+    public long getCancelledPreparedStatements() {
+        return 0;
+    }
+
+    @Override
+    public long getCancelledStatements() {
+        return 0;
+    }
+
+    @Override
+    public long getCompletedPreparedStatements() {
+        return 0;
+    }
+
+    @Override
+    public long getCompletedBulkIngest() {
+        return 0;
+    }
 }

@@ -73,6 +73,16 @@ public interface FlightRecorder {
 
     double getBytesIn();
 
+    long getCompletedStatements();
+
+    long getCancelledPreparedStatements();
+
+    long getCancelledStatements();
+
+    long getCompletedPreparedStatements();
+
+    long getCompletedBulkIngest();
+
 
     // Add other methods which needs to be recorded
 }

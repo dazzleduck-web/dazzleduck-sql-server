@@ -53,7 +53,21 @@ An integrated project combining **DazzleDuck SQL HTTP Server** and a modern **Ar
    ```
    http://localhost:5173
    ```
+---
 
+# Docker Support
+
+## 🛠️ Build the Docker Image
+From the project root (where the `Dockerfile` is located), run:
+
+```bash
+docker build -t dazzleduck-frontend .
+```
+
+## 🛠️ Start the container
+```bash
+docker run -p 5174:5174 dazzleduck-frontend
+```
 ---
 
 ## 🔄 Integration Flow

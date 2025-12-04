@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 
+import io.dazzleduck.sql.commons.util.MutableClock;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;

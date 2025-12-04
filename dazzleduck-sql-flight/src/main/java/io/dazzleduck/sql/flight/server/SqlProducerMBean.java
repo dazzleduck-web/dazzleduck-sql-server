@@ -9,4 +9,9 @@ public interface SqlProducerMBean {
     double getBytesOut();
     double getBytesIn();
     Instant getStartTime();
+    long getCompletedStatements();
+    long getCompletedPreparedStatements();
+    long getCompletedBulkIngest();
+    long getCancelledStatements();
+    long getCancelledPreparedStatements();
 }

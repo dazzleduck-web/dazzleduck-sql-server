@@ -209,4 +209,25 @@ public class MicroMeterFlightRecorder implements FlightRecorder {
     public double getBytesIn() {
         return 0;
     }
+
+    @Override
+    public long getCompletedStatements() {
+        return (long) streamStatementCompletedCounter.count();
+    }
+    @Override
+    public long getCompletedPreparedStatements() {
+        return (long) streamPreparedStatementCompletedCounter.count();
+    }
+    @Override
+    public long getCompletedBulkIngest() {
+        return (long) bulkIngestCompletedCounter.count();
+    }
+    @Override
+    public long getCancelledStatements() {
+        return (long) cancelStatementCounter.count();
+    }
+    @Override
+    public long getCancelledPreparedStatements() {
+        return (long) cancelPreparedStatementCounter.count();
+    }
 }

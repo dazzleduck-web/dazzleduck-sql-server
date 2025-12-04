@@ -17,8 +17,10 @@ JDK  21
 
 ## Getting started with Docker
 - Build the docker image.
-  `./mvnw clean package -DskipTests`
-- `./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime`
+```bash
+./mvnw clean package install -DskipTests
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime
+```
 - Start the container with `example/data` mounted to the container
   ``` 
   docker run -ti -p 59307:59307 -p 8080:8080 dazzleduck/dazzleduck:latest --conf warehouse=/data
@@ -27,6 +29,12 @@ JDK  21
   Flight Server is up: Listening on URI: grpc+tcp://0.0.0.0:59307
   ```
 - The server is running in arrow flight sql and http mode
+
+## Getting started in the dev setup 
+ ```bash
+export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse"
+```
 
 ### Supported functionality
 1. Database and schema specified as part of connection url. Passed to server as header database and schema.

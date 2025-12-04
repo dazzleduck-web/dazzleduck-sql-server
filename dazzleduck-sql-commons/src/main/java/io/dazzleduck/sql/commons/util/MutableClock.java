@@ -1,4 +1,4 @@
-package io.dazzleduck.sql.commons.ingestion;
+package io.dazzleduck.sql.commons.util;
 
 import java.time.Clock;
 import java.time.Duration;

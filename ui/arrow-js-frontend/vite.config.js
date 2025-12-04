@@ -6,7 +6,11 @@ import path from 'path';
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(),],
-
+  server: {
+    host: '0.0.0.0',
+    port: 5174,
+    strictPort: true
+  },
   // Configuration for building your library for NPM
   build: {
     lib: {
