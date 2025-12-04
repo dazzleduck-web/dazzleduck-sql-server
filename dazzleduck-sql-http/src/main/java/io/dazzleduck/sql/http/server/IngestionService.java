@@ -21,6 +21,8 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.UUID;
@@ -62,10 +64,14 @@ public class IngestionService implements HttpService, ParameterUtils, Controller
         UriQuery query = serverRequest.query();
         var path = query.get("path");
         String fileName = UUID.randomUUID().toString();
-        // Create unique file name
-        // Full path: <warehouse>/logs/20251204_104500.parquet
-        //Full path: <warehouse>/metrics/0251204_104500.parquet
-        String completePath = warehousePath + "/" + path + "/" + fileName;
+        String fullDir = warehousePath + "/" + path;
+        // ---- Create directory automatically ----
+        try {
+            Files.createDirectories(Path.of(fullDir));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create ingestion folder: " + fullDir, e);
+        }
+        String completePath = fullDir + "/" + fileName;
         String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
         var partitionString = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
         var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);
