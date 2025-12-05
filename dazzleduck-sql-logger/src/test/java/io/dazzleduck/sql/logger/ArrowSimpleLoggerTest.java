@@ -8,23 +8,26 @@ import static org.mockito.Mockito.*;
 class ArrowSimpleLoggerTest {
 
     @Mock
-    private AsyncArrowFlightSender mockSender;
+    private ArrowHttpPoster mockSender;
 
     private ArrowSimpleLogger logger;
 
+    AutoCloseable mocks;
+
     @BeforeEach
     void setup() {
-        MockitoAnnotations.openMocks(this);
+        mocks = MockitoAnnotations.openMocks(this);
 
         // Mock enqueue to always return true
-        when(mockSender.enqueue(any())).thenReturn(true);
+        when( mockSender.enqueue(any())).thenReturn(true);
 
-        logger = new ArrowSimpleLogger("test-logger", mockSender);
+        logger = new ArrowSimpleLogger("test-logger",  mockSender);
     }
 
     @AfterEach
-    void teardown() {
+    void teardown() throws Exception {
         logger.close();
+        mocks.close();
     }
 
     @Test

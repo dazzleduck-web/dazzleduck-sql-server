@@ -21,8 +21,11 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static io.dazzleduck.sql.common.Headers.*;
@@ -60,7 +63,15 @@ public class IngestionService implements HttpService, ParameterUtils, Controller
     protected IngestionParameters parseIngestionParameters(ServerRequest serverRequest) {
         UriQuery query = serverRequest.query();
         var path = query.get("path");
-        final String completePath = warehousePath + "/" + path;
+        String fileName = UUID.randomUUID().toString();
+        String fullDir = warehousePath + "/" + path;
+        // ---- Create directory automatically ----
+        try {
+            Files.createDirectories(Path.of(fullDir));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create ingestion folder: " + fullDir, e);
+        }
+        String completePath = fullDir + "/" + fileName;
         String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
         var partitionString = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
         var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);
