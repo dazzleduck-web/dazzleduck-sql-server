@@ -3,7 +3,6 @@ package io.dazzleduck.sql.logger;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -41,11 +40,8 @@ public class ArrowHttpPoster implements AutoCloseable {
         this.queue = new ArrayBlockingQueue<>(queueCapacity);
         this.batchCount = batchCount;
 
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "arrow-http-poster");
-            t.setDaemon(true);
-            return t;
-        });
+        this.scheduler = createScheduler();
+
 
         // Start workers
         scheduler.scheduleAtFixedRate(this::flushSafely,
@@ -54,6 +50,13 @@ public class ArrowHttpPoster implements AutoCloseable {
         scheduler.execute(this::drainLoop);
     }
 
+    protected ScheduledExecutorService createScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "arrow-http-poster");
+            t.setDaemon(true);
+            return t;
+        });
+    }
     public boolean enqueue(byte[] bytes) {
         return running && queue.offer(bytes);
     }
@@ -69,9 +72,11 @@ public class ArrowHttpPoster implements AutoCloseable {
             while (running) {
                 byte[] first = queue.poll(1, TimeUnit.SECONDS);
                 if (first == null) continue;
+
                 List<byte[]> batch = new ArrayList<>();
                 batch.add(first);
                 queue.drainTo(batch);
+
                 sendAll(batch);
             }
         } catch (Exception ignored) {}
@@ -93,7 +98,7 @@ public class ArrowHttpPoster implements AutoCloseable {
 
     private void sendAll(List<byte[]> batches) throws Exception {
         for (byte[] payload : batches) {
-            sendHttpPost(payload);  // send each Arrow batch independently
+            sendHttpPost(payload);
         }
     }
 

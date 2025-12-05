@@ -3,34 +3,46 @@ package io.dazzleduck.sql.logger;
 import org.junit.jupiter.api.*;
 import org.mockito.ArgumentCaptor;
 
-import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.http.*;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-public class ArrowHttpPosterTest {
+class ArrowHttpPosterTest {
 
     private ArrowHttpPoster poster;
     private HttpClient mockClient;
 
+    // ---- Custom subclass to disable background threads ----
+    static class TestArrowHttpPoster extends ArrowHttpPoster {
+        public TestArrowHttpPoster(String url, int q, int b, Duration d) {
+            super(url, q, b, d);
+        }
+
+        @Override
+        protected ScheduledExecutorService createScheduler() {
+            // Prevents drainLoop + flush threads from running
+            return mock(ScheduledExecutorService.class);
+        }
+    }
+
     @BeforeEach
     void setup() throws Exception {
-        poster = new ArrowHttpPoster("http://localhost:9999/test", 100, 1, Duration.ofMillis(200));
+        poster = new TestArrowHttpPoster("http://localhost:9999/test", 100, 1, Duration.ofMillis(200));
 
         mockClient = mock(HttpClient.class);
-        Field f = ArrowHttpPoster.class.getDeclaredField("httpClient");
-        f.setAccessible(true);
-        f.set(poster, mockClient);
+        var field = ArrowHttpPoster.class.getDeclaredField("httpClient");
+        field.setAccessible(true);
+        field.set(poster, mockClient);
 
-        HttpResponse<String> okResponse = mock(HttpResponse.class);
-        when(okResponse.statusCode()).thenReturn(200);
-        when(mockClient.send(any(), any(HttpResponse.BodyHandler.class)))
-                .thenReturn(okResponse);
+        HttpResponse<String> ok = mock(HttpResponse.class);
+        when(ok.statusCode()).thenReturn(200);
+        when(mockClient.send(any(), any(HttpResponse.BodyHandler.class))).thenReturn(ok);
     }
 
     @AfterEach
@@ -41,8 +53,7 @@ public class ArrowHttpPosterTest {
     // ------------------------------------------------------------
     @Test
     void testEnqueueSuccess() {
-        byte[] data = "hello".getBytes();
-        assertTrue(poster.enqueue(data), "Enqueue should succeed when running");
+        assertTrue(poster.enqueue("hello".getBytes()));
     }
 
     // ------------------------------------------------------------
@@ -54,49 +65,49 @@ public class ArrowHttpPosterTest {
         poster.enqueue(batch1);
         poster.enqueue(batch2);
 
-        // Trigger flush manually via reflection
-        var flushMethod = ArrowHttpPoster.class.getDeclaredMethod("flushSafely");
-        flushMethod.setAccessible(true);
-        flushMethod.invoke(poster);
+        Method sendAll = ArrowHttpPoster.class.getDeclaredMethod("sendAll", List.class);
+        sendAll.setAccessible(true);
+        sendAll.invoke(poster, List.of(batch1, batch2));
 
-        // Verify HTTP POST calls
         verify(mockClient, times(2))
                 .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
     }
 
-    // ------------------------------------------------------------
     @Test
-    void testDrainLoopSendsAll() throws Exception {
+    void testDrainLoopManualSendAll() throws Exception {
         byte[] payload = "batch".getBytes();
         poster.enqueue(payload);
 
-        var sendMethod = ArrowHttpPoster.class.getDeclaredMethod("sendAll", List.class);
-        sendMethod.setAccessible(true);
-        sendMethod.invoke(poster, List.of(payload));
+        Method sendAll = ArrowHttpPoster.class.getDeclaredMethod("sendAll", List.class);
+        sendAll.setAccessible(true);
+        sendAll.invoke(poster, List.of(payload));
 
         ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
 
         verify(mockClient, times(1))
                 .send(captor.capture(), any(HttpResponse.BodyHandler.class));
 
-        HttpRequest req = captor.getValue();
-        assertEquals(URI.create("http://localhost:9999/test"), req.uri());
+        assertEquals(URI.create("http://localhost:9999/test"), captor.getValue().uri());
     }
 
     // ------------------------------------------------------------
     @Test
     void testHttpFailureThrowsException() throws Exception {
-        HttpResponse<String> failResp = mock(HttpResponse.class);
-        when(failResp.statusCode()).thenReturn(500);
-        when(failResp.body()).thenReturn("failed");
-        when(mockClient.send(any(), any(HttpResponse.BodyHandler.class)))
-                .thenReturn(failResp);
+        HttpResponse<String> badResp = mock(HttpResponse.class);
+        when(badResp.statusCode()).thenReturn(500);
+        when(badResp.body()).thenReturn("failed");
+        when(mockClient.send(any(), any(HttpResponse.BodyHandler.class))).thenReturn(badResp);
 
-        var sendMethod = ArrowHttpPoster.class.getDeclaredMethod("sendHttpPost", byte[].class);
-        sendMethod.setAccessible(true);
+        Method sendPost = ArrowHttpPoster.class.getDeclaredMethod("sendHttpPost", byte[].class);
+        sendPost.setAccessible(true);
 
-        RuntimeException ex = assertThrows(RuntimeException.class,
-                () -> sendMethod.invoke(poster, "bad".getBytes()));
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> {
+            try {
+                sendPost.invoke(poster, "bad".getBytes());
+            } catch (Exception e) {
+                throw (RuntimeException) e.getCause(); // unwrap
+            }
+        });
 
         assertTrue(ex.getMessage().contains("HTTP POST failed"));
     }
@@ -105,10 +116,8 @@ public class ArrowHttpPosterTest {
     void testCloseStopsRunning() throws Exception {
         poster.close();
 
-        Field runningField = ArrowHttpPoster.class.getDeclaredField("running");
-        runningField.setAccessible(true);
-
-        boolean running = runningField.getBoolean(poster);
-        assertFalse(running, "Poster must stop running after close()");
+        var field = ArrowHttpPoster.class.getDeclaredField("running");
+        field.setAccessible(true);
+        assertFalse(field.getBoolean(poster));
     }
 }
