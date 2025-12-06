@@ -41,10 +41,10 @@ export const LoggingProvider = ({ children }) => {
     // --- Login ---
     const login = async (serverUrl, username, password) => {
         try {
-            const response = await axios.post(`${serverUrl}/login`, {
+            const response = await axios.post(`${serverUrl}/api/login`, {
                 username,
                 password,
-                claims: { org: "1" },
+                claims: { cluster: "org1_cluster1" },
             });
             const jwt = `${response.data.tokenType} ${response.data.accessToken}`;
             Cookies.set("jwtToken", jwt, { path: "/", secure: true });
@@ -80,9 +80,8 @@ export const LoggingProvider = ({ children }) => {
         const headers = {
             "Content-Type": "application/json",
             Accept: "application/json, application/vnd.apache.arrow.stream",
-            Authorization: token !== undefined || token !== null ? `Bearer ${token}` : jwt,
+            Authorization: token,
         };
-
         try {
             const response = await axios.post(
                 serverUrl,
@@ -119,14 +118,6 @@ export const LoggingProvider = ({ children }) => {
             const base64 = btoa(String.fromCharCode(...safeBuffer));
             return { type: "binary", contentType, base64 };
         } catch (err) {
-            if (err.response) {
-                const code = err.response.status;
-                const text = err.response.statusText || "Upstream server error";
-                throw new Error(`DazzleDuck responded ${code} ${text}`);
-            }
-            if (err.code === "ECONNABORTED") {
-                throw new Error("DazzleDuck request timed out");
-            }
             throw err;
         }
     };
@@ -146,7 +137,7 @@ export const LoggingProvider = ({ children }) => {
                     ? serverUrl
                     : serverUrl.replace(/\/+$/, "") + "/query";
 
-                const result = await forwardToDazzleDuck(url, query, jwt);
+                const result = await forwardToDazzleDuck("http://localhost:9006/query", query, jwt);
                 finalResults = result.type === "json"
                     ? parseResponseData(result.data)
                     : parseResponseData({
