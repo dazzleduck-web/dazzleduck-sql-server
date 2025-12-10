@@ -39,8 +39,8 @@ class ArrowMicroMeterRegistryTest {
 
         // Load test metadata EXACTLY like production
         Config dazzConfig = ConfigFactory.load().getConfig("dazzleduck_micrometer");
-        applicationId = dazzConfig.getString("applicationId");
-        applicationName = dazzConfig.getString("applicationName");
+        applicationId = dazzConfig.getString("application_id");
+        applicationName = dazzConfig.getString("application_name");
         host = dazzConfig.getString("host");
 
         testClock = new MockClock();

@@ -3,16 +3,21 @@ package io.dazzleduck.sql.micrometer.service;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.*;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Objects;
-
+import io.dazzleduck.sql.common.ingestion.FlightSender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class ArrowHttpPoster {
     private static final Logger log = LoggerFactory.getLogger(ArrowHttpPoster.class);
+    private final FlightSender sender;
 
-    private ArrowHttpPoster() {}
+    private ArrowHttpPoster(FlightSender sender) {
+        this.sender = sender;
+    }
 
     public static int postBytes(HttpClient httpClient, byte[] arrowBytes, String url, Duration timeout) throws IOException, InterruptedException {
         Objects.requireNonNull(httpClient, "httpClient");

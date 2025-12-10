@@ -1,6 +1,10 @@
 package io.dazzleduck.sql.common.ingestion;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 
@@ -10,10 +14,9 @@ public interface FlightSender {
         IN_MEMORY, ON_DISK, FULL
     }
 
+    void setIngestEndpoint(String uri);
     void enqueue(byte[] input);
-
     long getMaxInMemorySize();
-
     long getMaxOnDiskSize();
 
     abstract class AbstractFlightSender implements FlightSender {
@@ -24,8 +27,12 @@ public interface FlightSender {
                 while (true) {
                     try {
                         var current = queue.take();
-                        doSend(current);
-                        updateState(current);
+                        try {
+                            doSend(current);
+                        } finally {
+                            updateState(current);
+                            current.cleanup(); // ADDED: cleanup after processing
+                        }
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
@@ -35,24 +42,54 @@ public interface FlightSender {
         private long inMemorySize = 0;
 
         private long onDiskSize = 0;
+        protected String ingestEndpoint;
+        protected long getCurrentInMemorySize() {
+            return inMemorySize;
+        }
+
+        protected long getCurrentOnDiskSize() {
+            return onDiskSize;
+        }
+        @Override
+        public void setIngestEndpoint(String uri) {
+            this.ingestEndpoint = uri;
+        }
+
 
         @Override
         public void enqueue(byte[] input) {
-            var storeStatus = getStoreStatus(input.length);
-            switch (storeStatus) {
-                case FULL -> throw new IllegalStateException("queue is full");
-                case IN_MEMORY -> queue.add(new MemoryElement(input));
-                case ON_DISK -> queue.add(new FileMappedMemoryElement(input));
+            SendElement element; // CHANGED: create element inside synchronized block
+            synchronized (this) { // ADDED: synchronize the entire operation
+                var storeStatus = getStoreStatus(input.length);
+                switch (storeStatus) {
+                    case FULL -> throw new IllegalStateException("queue is full");
+                    case IN_MEMORY -> element = new MemoryElement(input);
+                    case ON_DISK -> element = new FileMappedMemoryElement(input);
+                    default -> throw new IllegalStateException("Unknown status");
+                }
+
+                // ADDED: Try to add to queue, rollback on failure
+                if (!queue.offer(element)) {
+                    // Rollback the counter increment
+                    if (element instanceof MemoryElement) {
+                        inMemorySize -= element.length();
+                    } else {
+                        onDiskSize -= element.length();
+                    }
+                    element.cleanup();
+                    throw new IllegalStateException("queue capacity exceeded");
+                }
+
             }
         }
 
         public synchronized StoreStatus getStoreStatus(int size) {
-            if (inMemorySize + size < getMaxInMemorySize()) {
+            if (inMemorySize + size <= getMaxInMemorySize()) {
                 inMemorySize += size;
                 return StoreStatus.IN_MEMORY;
             }
 
-            if (onDiskSize + size < getMaxOnDiskSize()) {
+            if (onDiskSize + size <= getMaxOnDiskSize()) {
                 onDiskSize += size;
                 return StoreStatus.ON_DISK;
             }
@@ -79,6 +116,7 @@ public interface FlightSender {
         InputStream read();
 
         long length();
+        default void cleanup() {} // ADDED: default no-op cleanup
     }
 
     public class MemoryElement implements SendElement {
@@ -91,7 +129,7 @@ public interface FlightSender {
 
         @Override
         public InputStream read() {
-            return null;
+            return new ByteArrayInputStream(data);
         }
 
         @Override
@@ -101,22 +139,42 @@ public interface FlightSender {
     }
 
     public class FileMappedMemoryElement implements SendElement {
-        long length;
+        private Path tempFile; // ADDED: store file path
+        private long length;
 
         public FileMappedMemoryElement(byte[] data) {
-
-            // write the data into temp location
-            this.length = data.length;
+            try {
+                this.tempFile = Files.createTempFile("flight-", ".dat");
+                Files.write(tempFile, data);
+                this.length = data.length;
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to create temp file", e);
+            }
         }
 
         @Override
         public InputStream read() {
-            return null;
+            try {
+                return Files.newInputStream(tempFile); // FIXED: return actual stream
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to read temp file", e);
+            }
         }
 
         @Override
         public long length() {
             return length;
+        }
+
+        @Override
+        public void cleanup() { // ADDED: delete temp file
+            try {
+                if (tempFile != null) {
+                    Files.deleteIfExists(tempFile);
+                }
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
         }
     }
 }

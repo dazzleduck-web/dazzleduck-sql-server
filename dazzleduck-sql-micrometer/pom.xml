@@ -3,116 +3,88 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
         <version>0.0.13-SNAPSHOT</version>
     </parent>
+
     <artifactId>dazzleduck-sql-micrometer</artifactId>
     <name>DazzleDuck Project Micrometer</name>
+
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Module-specific versions just like logger module -->
+        <micrometer.version>1.12.7</micrometer.version>
+        <arrow.version>18.3.0</arrow.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <junit.version>5.10.2</junit.version>
     </properties>
 
     <dependencies>
 
+        <!-- Micrometer Core -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
-            <version>1.12.7</version> <!-- stable version -->
+            <version>${micrometer.version}</version>
         </dependency>
 
-        <!-- Apache Arrow (vector + memory + IPC) -->
+        <!-- DazzleDuck Core Dependency -->
+        <dependency>
+            <groupId>io.dazzleduck.sql</groupId>
+            <artifactId>dazzleduck-sql-commons</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- Apache Arrow (consistent with logger pattern) -->
         <dependency>
             <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-vector</artifactId>
-            <version>18.1.0</version>
+            <version>${arrow.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-memory-core</artifactId>
+            <version>${arrow.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-memory-netty</artifactId>
-            <version>18.1.0</version>
+            <version>${arrow.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-format</artifactId>
-            <version>18.1.0</version>
+            <version>${arrow.version}</version>
         </dependency>
 
-        <!-- Logging (SLF4J API + Logback backend) -->
+        <!-- SLF4J API -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
-            <version>2.0.12</version>
-        </dependency>
-        <!-- JSON (if you need tag serialization anywhere) -->
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>2.17.2</version>
+            <version>${slf4j.version}</version>
         </dependency>
 
-        <!-- ===================== TEST DEPENDENCIES ===================== -->
-
-        <!-- JUnit 5 -->
+        <!-- Test Dependencies -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.11.3</version>
+            <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
 
-        <!-- Mockito -->
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
-            <version>5.14.2</version>
+            <version>5.6.0</version>
             <scope>test</scope>
         </dependency>
 
-        <!-- OkHttp MockWebServer (for simulating HTTP Arrow server in tests) -->
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>mockwebserver</artifactId>
-            <version>4.12.0</version>
-            <scope>test</scope>
-        </dependency>
-
-        <!--Dazzle duck SQL Flight (exclude slf4j-simple) -->
-        <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-flight</artifactId>
-            <version>0.0.4</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-simple</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.8</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-simple</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-http</artifactId>
-            <version>0.0.8</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-simple</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
     </dependencies>
+
 </project>
