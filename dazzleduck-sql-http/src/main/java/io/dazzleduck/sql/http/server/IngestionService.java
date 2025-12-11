@@ -21,11 +21,8 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static io.dazzleduck.sql.common.Headers.*;
