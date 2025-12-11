@@ -2,114 +2,99 @@ package io.dazzleduck.sql.micrometer.metrics;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
+
 import io.dazzleduck.sql.common.ingestion.FlightSender;
 import io.dazzleduck.sql.micrometer.config.ArrowRegistryConfig;
-import io.dazzleduck.sql.micrometer.service.ArrowHttpPoster;
 import io.dazzleduck.sql.micrometer.service.ArrowMicroMeterRegistry;
-import io.micrometer.core.instrument.MeterRegistry;
+import io.dazzleduck.sql.micrometer.service.MetricsFlightSender;
+
 import io.micrometer.core.instrument.Clock;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 
-import java.io.InputStream;
-import java.net.http.HttpClient;
-import java.time.Duration;
-public class MetricsRegistryFactory {
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-    private static FlightSender sender;
+import java.time.Duration;
+
+public final class MetricsRegistryFactory {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MetricsRegistryFactory.class);
+
+    private static volatile FlightSender sender;
 
     public static MeterRegistry create() {
 
+        // ------------------------------
+        // Read configuration
+        // ------------------------------
         Config dazzConfig = ConfigFactory.load().getConfig("dazzleduck_micrometer");
 
         String applicationId   = dazzConfig.getString("application_id");
         String applicationName = dazzConfig.getString("application_name");
+
         String host            = dazzConfig.getString("host");
+        int grpcPort           = dazzConfig.getInt("port");
+        String httpEndpoint    = dazzConfig.getString("http_endpoint");
 
-        String endpoint = dazzConfig.hasPath("arrow_endpoint")
-                ? dazzConfig.getString("arrow_endpoint")
-                : "http://localhost:8081/ingest?path=metrics";
+        boolean httpEnabled    = dazzConfig.getBoolean("http.enabled");
+        boolean grpcEnabled    = dazzConfig.getBoolean("grpc.enabled");
 
-        ArrowRegistryConfig config = new ArrowRegistryConfig() {
+        LOG.info("Micrometer config loaded: http={}, grpcEnabled={}, grpcUrl=grpc://{}:{}",
+                httpEndpoint, grpcEnabled, host, grpcPort);
+
+        // ------------------------------
+        // Build ArrowRegistryConfig
+        // ------------------------------
+        ArrowRegistryConfig regCfg = new ArrowRegistryConfig() {
             @Override
             public String get(String key) {
                 return switch (key) {
                     case "arrow.enabled"  -> "true";
-                    case "arrow.endpoint" -> endpoint;
+                    case "arrow.endpoint" -> httpEndpoint;
                     default -> null;
                 };
             }
+
             @Override
             public String uri() {
-                return endpoint;
+                return httpEndpoint;
             }
         };
 
-
+        // ------------------------------
+        // Lazy init of the FlightSender
+        // ------------------------------
         if (sender == null) {
             synchronized (MetricsRegistryFactory.class) {
                 if (sender == null) {
 
-                    sender = new FlightSender.AbstractFlightSender() {
+                    MetricsFlightSender s = new MetricsFlightSender();
 
-                        private final HttpClient client = HttpClient.newHttpClient();
+                    // Enable gRPC mode
+                    if (grpcEnabled) {
+                        s.enableGrpc(host, grpcPort);
+                    }
 
-                        @Override
-                        protected void doSend(SendElement element) throws InterruptedException {
-                            try (InputStream in = element.read()) {
+                    // Enable HTTP mode
+                    if (httpEnabled) {
+                        s.enableHttp(httpEndpoint);
+                    }
+                    sender = s;
 
-                                if (ingestEndpoint == null) {
-                                    System.err.println("[FlightSender] ERROR: ingest endpoint is NULL!");
-                                    return;
-                                }
-
-                                byte[] arrowBytes = in.readAllBytes();
-
-                                System.out.println("[FlightSender] Sending " + arrowBytes.length + " bytes to " + ingestEndpoint);
-
-                                // TEMP: fallback until real Arrow Flight RPC implemented
-                                int status = ArrowHttpPoster.postBytes(
-                                        client, arrowBytes, ingestEndpoint, Duration.ofSeconds(10)
-                                );
-
-                                if (status / 100 != 2) {
-                                    System.err.println("[FlightSender] Failed to post metrics, status: " + status);
-                                } else {
-                                    System.out.println("[FlightSender] Successfully posted metrics, status: " + status);
-                                }
-
-                            } catch (Exception e) {
-                                System.err.println("[FlightSender] Error sending metrics: " + e.getMessage());
-                                e.printStackTrace();
-                            }
-                        }
-
-                        @Override
-                        public long getMaxInMemorySize() {
-                            return 2 * 1024 * 1024;
-                        }
-
-                        @Override
-                        public long getMaxOnDiskSize() {
-                            return 4 * 1024 * 1024;
-                        }
-                    };
-
-                    // Start the sender thread
+                    // Background queue worker thread
                     ((FlightSender.AbstractFlightSender) sender).start();
-                    System.out.println("[FlightSender] Started sender thread");
+
+                    LOG.info("MetricsFlightSender thread started successfully");
                 }
             }
         }
 
-        // Set the endpoint on the sender
-        sender.setIngestEndpoint(endpoint);
-        System.out.println("[MetricsRegistryFactory] Set endpoint to: " + endpoint);
-
         ArrowMicroMeterRegistry arrow =
                 new ArrowMicroMeterRegistry.Builder()
-                        .config(config)
+                        .config(regCfg)
                         .flightSender(sender)
-                        .endpoint(config.uri())
+                        .endpoint(httpEndpoint)
                         .httpTimeout(Duration.ofMinutes(2))
                         .applicationId(applicationId)
                         .applicationName(applicationName)
@@ -117,8 +102,7 @@ public class MetricsRegistryFactory {
                         .clock(Clock.SYSTEM)
                         .build();
 
-        CompositeMeterRegistry composite = new CompositeMeterRegistry();
-        composite.add(arrow);
-        return composite;
+        LOG.info("Arrow MicroMeter Registry initialized");
+        return arrow;
     }
 }

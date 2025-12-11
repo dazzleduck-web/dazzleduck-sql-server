@@ -40,6 +40,11 @@
             <artifactId>dazzleduck-sql-commons</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>io.dazzleduck.sql</groupId>
+            <artifactId>dazzleduck-sql-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
 
         <!-- Apache Arrow (consistent with logger pattern) -->
         <dependency>

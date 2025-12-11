@@ -1,4 +1,5 @@
-package io.dazzleduck.sql.http.server.sender;
+package io.dazzleduck.sql.client;
+
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,7 +13,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 public final class ArrowHttpPoster {
-    private static final Logger log = LoggerFactory.getLogger(ArrowHttpPoster.class);
+    private static final Logger log = LoggerFactory.getLogger(io.dazzleduck.sql.client.ArrowHttpPoster.class);
 
     private ArrowHttpPoster() {} // utility, prevent construction
 
