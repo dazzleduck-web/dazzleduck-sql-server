@@ -1,24 +1,29 @@
-package io.dazzleduck.sql.micrometer.service;
+package io.dazzleduck.sql.http.server.sender;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.*;
-import java.time.Duration;
-import java.util.Objects;
-import io.dazzleduck.sql.common.ingestion.FlightSender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.Objects;
+
 public final class ArrowHttpPoster {
     private static final Logger log = LoggerFactory.getLogger(ArrowHttpPoster.class);
-    private final FlightSender sender;
 
-    private ArrowHttpPoster(FlightSender sender) {
-        this.sender = sender;
-    }
+    private ArrowHttpPoster() {} // utility, prevent construction
 
-    public static int postBytes(HttpClient httpClient, byte[] arrowBytes, String url, Duration timeout) throws IOException, InterruptedException {
+    public static int postBytes(HttpClient httpClient,
+                                byte[] arrowBytes,
+                                String url,
+                                Duration timeout)
+            throws IOException, InterruptedException {
+
         Objects.requireNonNull(httpClient, "httpClient");
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(timeout)
@@ -28,11 +33,12 @@ public final class ArrowHttpPoster {
 
         HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         int status = resp.statusCode();
+
         if (status / 100 != 2) {
             log.warn("POST to {} returned non-2xx status {}. Body: {}", url, status, resp.body());
-        } else {
-            log.debug("POST to {} returned {} (body len={})", url, status, (resp.body() == null ? 0 : resp.body().length()));
         }
+
         return status;
     }
 }
+

@@ -27,12 +27,8 @@ public interface FlightSender {
                 while (true) {
                     try {
                         var current = queue.take();
-                        try {
-                            doSend(current);
-                        } finally {
-                            updateState(current);
-                            current.cleanup(); // ADDED: cleanup after processing
-                        }
+                        doSend(current);
+                        updateState(current);
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
@@ -58,38 +54,21 @@ public interface FlightSender {
 
         @Override
         public void enqueue(byte[] input) {
-            SendElement element; // CHANGED: create element inside synchronized block
-            synchronized (this) { // ADDED: synchronize the entire operation
-                var storeStatus = getStoreStatus(input.length);
-                switch (storeStatus) {
-                    case FULL -> throw new IllegalStateException("queue is full");
-                    case IN_MEMORY -> element = new MemoryElement(input);
-                    case ON_DISK -> element = new FileMappedMemoryElement(input);
-                    default -> throw new IllegalStateException("Unknown status");
-                }
-
-                // ADDED: Try to add to queue, rollback on failure
-                if (!queue.offer(element)) {
-                    // Rollback the counter increment
-                    if (element instanceof MemoryElement) {
-                        inMemorySize -= element.length();
-                    } else {
-                        onDiskSize -= element.length();
-                    }
-                    element.cleanup();
-                    throw new IllegalStateException("queue capacity exceeded");
-                }
-
+            var storeStatus = getStoreStatus(input.length);
+            switch (storeStatus) {
+                case FULL -> throw new IllegalStateException("queue is full");
+                case IN_MEMORY -> queue.add(new MemoryElement(input));
+                case ON_DISK -> queue.add(new FileMappedMemoryElement(input));
             }
         }
 
         public synchronized StoreStatus getStoreStatus(int size) {
-            if (inMemorySize + size <= getMaxInMemorySize()) {
+            if (inMemorySize + size < getMaxInMemorySize()) {
                 inMemorySize += size;
                 return StoreStatus.IN_MEMORY;
             }
 
-            if (onDiskSize + size <= getMaxOnDiskSize()) {
+            if (onDiskSize + size < getMaxOnDiskSize()) {
                 onDiskSize += size;
                 return StoreStatus.ON_DISK;
             }
@@ -144,7 +123,7 @@ public interface FlightSender {
 
         public FileMappedMemoryElement(byte[] data) {
             try {
-                this.tempFile = Files.createTempFile("flight-", ".dat");
+                this.tempFile = Files.createTempFile("flight-", ".arrow");
                 Files.write(tempFile, data);
                 this.length = data.length;
             } catch (IOException e) {
