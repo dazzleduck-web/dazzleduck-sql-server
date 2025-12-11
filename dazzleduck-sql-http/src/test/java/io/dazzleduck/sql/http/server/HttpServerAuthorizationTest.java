@@ -54,6 +54,12 @@ public class HttpServerAuthorizationTest {
         ConnectionPool.execute("INSERT INTO auth_test VALUES (1, 'shivam', 'chhindwara', 21), (2, 'hariom', 'delhi', 22), (3, 'piyush', 'bhopal', 21)");
     }
 
+    @AfterAll
+    static void cleanup() throws Exception {
+        ConnectionPool.execute("DROP TABLE IF EXISTS auth_test");
+        new java.io.File(warehousePath).delete();
+    }
+
     @Test
     public void testQueryWithClaimsFilter() throws Exception {
         var claims = Map.of(

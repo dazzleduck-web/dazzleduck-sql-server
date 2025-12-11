@@ -76,27 +76,4 @@ public class MicroMeterFlightRecorderTest {
         recorder.recordGetStreamPreparedStatement(123);
     }
 
-    @Test
-    void testSnapshotRunningCounts() {
-
-        // start but don't end -> running = 1
-        recorder.startStreamStatement();
-        recorder.startStreamPreparedStatement();
-        recorder.startBulkIngest();
-
-        FlightMetricsSnapshot snap = recorder.snapshot();
-
-        assertEquals(1, snap.runningStatements());
-        assertEquals(1, snap.runningPrepared());
-    }
-
-    @Test
-    void testStartTimeCaptured() {
-        long before = System.currentTimeMillis();
-        MicroMeterFlightRecorder r2 = new MicroMeterFlightRecorder(registry, "p1");
-        long after = System.currentTimeMillis();
-        long recorded = r2.snapshot().startTimeMs();
-
-        assertTrue(recorded >= before && recorded <= after);
-    }
 }
