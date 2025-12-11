@@ -55,11 +55,5 @@
             <version>${calcite.version}</version>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-logger</artifactId>
-            <version>0.0.13-SNAPSHOT</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 </project>

@@ -14,7 +14,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <arrow.version>15.0.2</arrow.version> <!-- Latest stable Arrow -->
+        <arrow.version>18.3.0</arrow.version> <!-- Latest stable Arrow -->
         <slf4j.version>2.0.13</slf4j.version>
         <junit.version>5.10.2</junit.version>
     </properties>
@@ -36,20 +36,9 @@
         </dependency>
         <dependency>
             <groupId>org.apache.arrow</groupId>
-            <artifactId>arrow-memory-netty</artifactId>
-            <version>${arrow.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.arrow</groupId>
             <artifactId>arrow-format</artifactId>
             <version>${arrow.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.apache.arrow</groupId>
-            <artifactId>flight-grpc</artifactId>
-            <version>${arrow.version}</version>
-        </dependency>
-
         <!-- SLF4J API + Simple binding (replace with logback/log4j if needed) -->
         <dependency>
             <groupId>org.slf4j</groupId>
@@ -65,7 +54,7 @@
         <dependency>
             <groupId>org.apache.arrow</groupId>
             <artifactId>flight-core</artifactId>
-            <version>15.0.2</version>
+            <version>${arrow.version}</version>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
@@ -73,6 +62,13 @@
             <version>5.6.0</version> <!-- or latest -->
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>io.dazzleduck.sql</groupId>
+            <artifactId>dazzleduck-sql-runtime</artifactId>
+            <version>0.0.13-SNAPSHOT</version>
+            <scope>test</scope>
+        </dependency>
+
 
     </dependencies>
 

@@ -1,10 +1,9 @@
-package io.dazzleduck.sql.runtime;
+package io.dazzleduck.sql.logger;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.util.TestUtils;
-import io.dazzleduck.sql.logger.ArrowSimpleLogger;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
@@ -92,4 +91,15 @@ public class FlightServerStartupLoggerIntegrationTest {
                             "No log file found in " + logsDir));
         }
     }
+
+    @Test
+    void testLoggerCanPostLogs1() throws Exception {
+        ArrowSimpleLogger logger = new ArrowSimpleLogger("integration-test");
+
+        for (int i = 0; i < 18; i++) {
+            logger.info("Test {}", i);
+        }
+
+        logger.flush();
+        Thread.sleep(2000);}
 }
