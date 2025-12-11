@@ -39,5 +39,15 @@
             <artifactId>helidon-config-hocon</artifactId>
             <version>${helidon.version}</version>
         </dependency>
+        <dependency>
+            <groupId>io.helidon.webserver.observe</groupId>
+            <artifactId>helidon-webserver-observe-health</artifactId>
+            <version>${helidon.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.helidon.health</groupId>
+            <artifactId>helidon-health-checks</artifactId>
+            <version>${helidon.version}</version>
+        </dependency>
     </dependencies>
 </project>

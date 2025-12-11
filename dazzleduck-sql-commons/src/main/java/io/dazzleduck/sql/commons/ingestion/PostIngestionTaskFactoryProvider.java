@@ -12,8 +12,4 @@ public interface PostIngestionTaskFactoryProvider extends ConfigBasedProvider {
 
     PostIngestionTaskFactory getPostIngestionTaskFactory();
 
-    static PostIngestionTaskFactoryProvider load(Config config) throws Exception {
-        return (PostIngestionTaskFactoryProvider) ConfigBasedProvider.load(config, POST_INGESTION_CONFIG_PREFIX,
-                PostIngestionTaskFactoryProvider.NO_OP);
-    }
 }

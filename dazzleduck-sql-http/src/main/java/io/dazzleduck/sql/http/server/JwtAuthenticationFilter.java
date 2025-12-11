@@ -70,6 +70,12 @@ public class JwtAuthenticationFilter implements Filter {
             chain.proceed();
             return;
         }
+
+        if ("OPTIONS".equalsIgnoreCase(req.prologue().method().name())) {
+            chain.proceed();
+            return;
+        }
+
         var token = req.headers().value(HeaderNames.AUTHORIZATION);
         if (token.isEmpty()) {
             res.status(Status.UNAUTHORIZED_401);

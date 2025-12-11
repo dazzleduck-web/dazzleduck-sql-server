@@ -6,6 +6,8 @@ import Cookies from "js-cookie";
 const LoggingContext = createContext();
 
 export const LoggingProvider = ({ children }) => {
+    const FIVE_MINUTES_MS = 300000;
+    
     // --- Normalization / Parsing ---
     const parseResponseData = (data) => {
         let tableData = [];
@@ -39,12 +41,12 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Login ---
-    const login = async (serverUrl, username, password) => {
+    const login = async (serverUrl, username, password, claims) => {
         try {
-            const response = await axios.post(`${serverUrl}/login`, {
+            const response = await axios.post(`${serverUrl.trim()}/login`, {
                 username,
                 password,
-                claims: { org: "1" },
+                claims: claims,
             });
             const jwt = `${response.data.tokenType} ${response.data.accessToken}`;
             Cookies.set("jwtToken", jwt, { path: "/", secure: true });
@@ -70,8 +72,8 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Core forwarder ---
-    const forwardToDazzleDuck = async (serverUrl, query, jwt) => {
-        if (!/^https?:\/\//i.test(serverUrl)) {
+    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null) => {
+        if (!/^https?:\/\//i.test(serverUrl.trim())) {
             throw new Error("Server URL must start with http:// or https://");
         }
 
@@ -80,17 +82,25 @@ export const LoggingProvider = ({ children }) => {
         const headers = {
             "Content-Type": "application/json",
             Accept: "application/json, application/vnd.apache.arrow.stream",
-            Authorization: token !== undefined || token !== null ? `Bearer ${token}` : jwt,
+            Authorization: token,
         };
+
+        // Prepare request body with queryId (as number)
+        let requestBody;
+        if (typeof query === "string") {
+            requestBody = queryId !== null ? { query, id: queryId } : { query };
+        } else {
+            requestBody = queryId !== null ? { ...query, id: queryId } : query;
+        }
 
         try {
             const response = await axios.post(
                 serverUrl,
-                typeof query === "string" ? { query } : query,
+                requestBody,
                 {
                     responseType: "arraybuffer",
                     headers,
-                    timeout: 20000,
+                    timeout: FIVE_MINUTES_MS,
                     maxContentLength: 50 * 1024 * 1024,
                 }
             );
@@ -119,20 +129,13 @@ export const LoggingProvider = ({ children }) => {
             const base64 = btoa(String.fromCharCode(...safeBuffer));
             return { type: "binary", contentType, base64 };
         } catch (err) {
-            if (err.response) {
-                const code = err.response.status;
-                const text = err.response.statusText || "Upstream server error";
-                throw new Error(`DazzleDuck responded ${code} ${text}`);
-            }
-            if (err.code === "ECONNABORTED") {
-                throw new Error("DazzleDuck request timed out");
-            }
             throw err;
         }
     };
 
     // --- Execute Query ---
-    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt) => {
+    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId) => {
+        const cleanUrl = serverUrl.trim();
         if (!serverUrl || !query) {
             throw new Error("Please fill in all fields before running the query.");
         }
@@ -142,11 +145,11 @@ export const LoggingProvider = ({ children }) => {
 
         try {
             if (numericSplitSize <= 0) {
-                let url = serverUrl.endsWith("/query")
-                    ? serverUrl
-                    : serverUrl.replace(/\/+$/, "") + "/query";
+                let url = cleanUrl.endsWith("/query")
+                    ? cleanUrl
+                    : cleanUrl.replace(/\/+$/, "") + "/query";
 
-                const result = await forwardToDazzleDuck(url, query, jwt);
+                const result = await forwardToDazzleDuck(url, query, jwt, queryId);
                 finalResults = result.type === "json"
                     ? parseResponseData(result.data)
                     : parseResponseData({
@@ -160,7 +163,7 @@ export const LoggingProvider = ({ children }) => {
                     : serverUrl.replace(/\/+$/, "") + "/plan";
                 planUrl += `?split_size=${numericSplitSize}`;
 
-                const planResult = await forwardToDazzleDuck(planUrl, { query }, jwt);
+                const planResult = await forwardToDazzleDuck(planUrl, { query }, jwt, queryId);
                 const splits = Array.isArray(planResult.data) ? planResult.data : [];
 
                 if (splits.length === 0) throw new Error("No splits returned from /plan endpoint.");
@@ -173,7 +176,7 @@ export const LoggingProvider = ({ children }) => {
                         ? serverUrl
                         : serverUrl.replace(/\/+$/, "") + "/query";
 
-                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt);
+                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt, queryId);
                     const normalized = splitResult.type === "json"
                         ? parseResponseData(splitResult.data)
                         : parseResponseData({
@@ -191,10 +194,50 @@ export const LoggingProvider = ({ children }) => {
                 ? finalResults
                 : parseResponseData(finalResults);
 
-            return normalized;
+            return { data: normalized, queryId };
         } catch (err) {
             const msg = err?.message || String(err);
             throw new Error(`Query execution failed: ${msg}`);
+        }
+    }, []);
+
+    // --- Cancel Query ---
+    const cancelQuery = useCallback(async (serverUrl, query, queryId) => {
+        if (!serverUrl || !queryId) {
+            throw new Error("Server URL and Query ID are required to cancel.");
+        }
+
+        const token = Cookies.get("jwtToken");
+
+        const headers = {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: token,
+        };
+
+        try {
+            let cancelUrl = serverUrl.endsWith("/cancel")
+                ? serverUrl
+                : serverUrl.replace(/\/+$/, "") + "/cancel";
+
+            const response = await axios.post(
+                cancelUrl,
+                { query, id: queryId },
+                {
+                    headers,
+                    timeout: 5000,
+                }
+            );
+
+            // Accept status codes 200, 202, 409 as success (matching the test)
+            if ([200, 202, 409].includes(response.status)) {
+                return { success: true, status: response.status };
+            }
+
+            return { success: false, status: response.status };
+        } catch (err) {
+            const msg = err?.message || String(err);
+            throw new Error(`Cancel request failed: ${msg}`);
         }
     }, []);
 
@@ -203,6 +246,7 @@ export const LoggingProvider = ({ children }) => {
             value={{
                 executeQuery,
                 login,
+                cancelQuery,
             }}>
             {children}
         </LoggingContext.Provider>

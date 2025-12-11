@@ -5,6 +5,7 @@ import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.util.MutableClock;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
@@ -82,7 +83,8 @@ public class DuckDBSqlProducerTimeoutTest {
                                 executor,
                                 Duration.ofSeconds(5),
                                 mutableClock,
-                                new NOOPFlightRecorder()
+                                new NOOPFlightRecorder(),
+                                QueryOptimizer.NOOP_QUERY_OPTIMIZER
                         ))
                 .headerAuthenticator(AuthUtils.getTestAuthenticator())
                 .build()

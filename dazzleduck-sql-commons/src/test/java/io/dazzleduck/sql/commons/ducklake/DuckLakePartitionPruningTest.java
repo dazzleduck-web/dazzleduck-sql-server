@@ -65,7 +65,7 @@ public class DuckLakePartitionPruningTest {
         String  tableName = "";
         var tableId = getTableId(tableName);
         String query = constructQuery(METADATA_DATABASE, 1, List.of(1L, 2L, 3L, 4L));
-        //ConnectionPool.printResult(query);
+        ConnectionPool.printResult(query);
     }
 
     private Object getTableId(String tableName) {

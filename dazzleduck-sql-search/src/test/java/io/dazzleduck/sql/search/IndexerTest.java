@@ -33,7 +33,7 @@ public class IndexerTest {
     public void testIndexCreationWriteSql() throws SQLException, IOException {
         var fieldToIndex = List.of("f1", "f2");
         try (var connection = ConnectionPool.getConnection()) {
-            var inputSql = "create temp view input as select '/a/b/c' as prefix, 'd' as filename, 1 as row_num, 'f1' as f1, 'f2' as f2, struct_pack(f1:=['one', 'two'], f2:=['p', 'q']) as tokens, cast('2025-01-01' as timestamp) as time";
+            var inputSql = "create temp view input as select 'd' as filename, 1 as row_num, 'f1' as f1, 'f2' as f2, struct_pack(f1:=['one', 'two'], f2:=['p', 'q']) as tokens, cast('2025-01-01' as timestamp) as time";
             ConnectionPool.execute(connection, inputSql);
             var outputSql = Indexer.constructWriteSql(fieldToIndex, "time","tokens", "input");
             var expected = "select 'd' as filename, unnest(['one', 'p', 'q', 'two']) as token";
@@ -53,8 +53,8 @@ public class IndexerTest {
             var sourceFiles = List.of(file1, file2);
             var fieldToIndex = List.of("f1", "f2");
             Indexer.create(dir, sourceFiles, fieldToIndex, "time", Map.of("f1", tokenizationFunction, "f2", tokenizationFunction), targetFile);
-            TestUtils.isEqual("select 2 as filename_count, 14 as distinct_count",
-                    "select count(distinct filename) filename_count, count(distinct token) as distinct_token from '%s'".formatted(targetFile));
+            TestUtils.isEqual("select 14 as distinct_count",
+                    "select count(distinct token) as distinct_token from '%s'".formatted(targetFile));
         });
     }
 

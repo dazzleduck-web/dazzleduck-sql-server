@@ -17,14 +17,11 @@ import org.apache.arrow.flight.sql.impl.FlightSql;
 public class QueryService extends AbstractQueryBasedService {
 
     private final FlightProducer flightProducer;
-    private final String secretKey;
-
     private final String producerId;
 
-    public QueryService(SimpleBulkIngestConsumer flightProducer, AccessMode accessMode, String secretKey) {
+    public QueryService(SimpleBulkIngestConsumer flightProducer, AccessMode accessMode) {
         super(accessMode);
         this.flightProducer = flightProducer;
-        this.secretKey = secretKey;
         this.producerId = flightProducer.getProducerId();
     }
 
@@ -35,14 +32,14 @@ public class QueryService extends AbstractQueryBasedService {
         var context = ControllerService.createContext(request);
         try {
             var id = query.id() == null ? StatementHandle.nextStatementId() : query.id();
-            var statementHandle = StatementHandle.newStatementHandle(id, query.query(), producerId, -1)
-                    .signed(secretKey);
+            var statementHandle = StatementHandle.newStatementHandle(id, query.query(), producerId, -1);
             var ticket = createTicket(statementHandle);
             var listener = new OutputStreamServerStreamListener(response);
             flightProducer.getStream(context, ticket, listener);
             listener.waitForEnd();
         } catch (Exception e) {
-            response.send(e.getMessage().getBytes());
+            logger.atError().setCause(e).log("Error sending query result");
+            response.send(e.getMessage());
             response.status(Status.INTERNAL_SERVER_ERROR_500);
         }
     }

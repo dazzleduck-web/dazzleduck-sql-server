@@ -3,10 +3,12 @@ package io.dazzleduck.sql.http.server;
 
 
 import com.typesafe.config.ConfigFactory;
+import io.dazzleduck.sql.common.ConfigBasedProvider;
 import io.dazzleduck.sql.common.auth.Validator;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizerProvider;
 import io.dazzleduck.sql.flight.server.DuckDBFlightSqlProducer;
 import io.dazzleduck.sql.login.LoginService;
 import io.helidon.config.Config;
@@ -30,11 +32,6 @@ import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 public class Main {
 
 
-    /**
-     * Cannot be instantiated.
-     */
-    private Main() {
-    }
 
 
 
@@ -75,16 +72,20 @@ public class Main {
                 .build();
 
         var producerId = UUID.randomUUID().toString();
-        var provider = PostIngestionTaskFactoryProvider.load(appConfig);
+        PostIngestionTaskFactoryProvider provider = ConfigBasedProvider.load(appConfig,
+                PostIngestionTaskFactoryProvider.POST_INGESTION_CONFIG_PREFIX,
+                PostIngestionTaskFactoryProvider.NO_OP);
         var factory = provider.getPostIngestionTaskFactory();
+        QueryOptimizerProvider optimizer = ConfigBasedProvider.load(appConfig, QueryOptimizerProvider.QUERY_OPTIMIZER_PROVIDER_CONFIG_PREFIX,
+                QueryOptimizerProvider.NOOPOptimizerProvider);
         var producer = DuckDBFlightSqlProducer.createProducer(Location.forGrpcInsecure(host, port), producerId,
-                base64SecretKey, allocator, warehousePath, accessMode, factory);
+                base64SecretKey, allocator, warehousePath, accessMode, factory, optimizer.getOptimizer());
         WebServer server = WebServer.builder()
                 .config(helidonConfig.get("dazzleduck_server"))
                 .config(helidonConfig.get("flight_sql"))
                 .routing(routing -> {
                     routing.register(cors);
-                    var b = routing.register("/query", new QueryService(producer, accessMode,base64SecretKey))
+                    var b = routing.register("/query", new QueryService(producer, accessMode))
                             .register("/login", new LoginService(appConfig, secretKey, jwtExpiration))
                             .register("/plan", new PlaningService(producer, location, allocator, accessMode))
                             .register("/cancel", new CancelService(producer, accessMode))
@@ -98,7 +99,8 @@ public class Main {
                 .host(host)
                 .build()
                 .start();
-        String url = "http://localhost:" + server.port();
+        var http = server.hasTls() ? "https" : "http";
+        String url = "%s://%s:%s".formatted(http, host, port);
         System.out.println("Http Server is up: Listening on URL: " + url);
     }
 }

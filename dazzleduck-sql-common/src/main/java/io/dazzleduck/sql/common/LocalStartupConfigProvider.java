@@ -9,7 +9,7 @@ import java.nio.file.Paths;
 
 public class LocalStartupConfigProvider implements StartupScriptProvider {
 
-    public static final String SCRIPT_LOCATION_KEY = "script-location";
+    public static final String SCRIPT_LOCATION_KEY = "script_location";
     Config config;
     public String getStartupScript() throws IOException {
         String startUpFile = config.hasPathOrNull(SCRIPT_LOCATION_KEY) ? config.getString(SCRIPT_LOCATION_KEY) : null;

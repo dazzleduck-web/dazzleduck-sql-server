@@ -15,8 +15,8 @@ public class MetricsRegistryFactory {
     public static MeterRegistry create() {
         Config dazzConfig = ConfigFactory.load().getConfig("dazzleduck_micrometer");
 
-        String applicationId = dazzConfig.getString("applicationId");
-        String applicationName = dazzConfig.getString("applicationName");
+        String applicationId = dazzConfig.getString("application_id");
+        String applicationName = dazzConfig.getString("application_name");
         String host = dazzConfig.getString("host");
         ArrowRegistryConfig config = new ArrowRegistryConfig() {
             @Override
@@ -33,7 +33,7 @@ public class MetricsRegistryFactory {
                 new ArrowMicroMeterRegistry.Builder()
                         .config(config)
                         .endpoint(config.uri())
-                        .httpTimeout(Duration.ofSeconds(20))
+                        .httpTimeout(Duration.ofMinutes(2))
                         .applicationId(applicationId)
                         .applicationName(applicationName)
                         .host(host)
@@ -42,7 +42,6 @@ public class MetricsRegistryFactory {
 
         CompositeMeterRegistry composite = new CompositeMeterRegistry();
         composite.add(arrow);
-
         return composite;
     }
 }

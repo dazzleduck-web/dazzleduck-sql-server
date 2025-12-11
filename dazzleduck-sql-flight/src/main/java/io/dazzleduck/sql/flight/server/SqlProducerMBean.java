@@ -1,6 +1,9 @@
 package io.dazzleduck.sql.flight.server;
 
+import io.dazzleduck.sql.flight.model.RunningStatementInfo;
+
 import java.time.Instant;
+import java.util.List;
 
 public interface SqlProducerMBean {
     long getRunningStatements();
@@ -14,4 +17,8 @@ public interface SqlProducerMBean {
     long getCompletedBulkIngest();
     long getCancelledStatements();
     long getCancelledPreparedStatements();
+    List<RunningStatementInfo> getRunningStatementDetails();
+    List<RunningStatementInfo> getOpenPreparedStatementDetails();
+    List<RunningStatementInfo> getRunningBulkIngestDetails();
+
 }

@@ -2,7 +2,7 @@ package io.dazzleduck.sql.logger;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.commons.types.JavaRow;
+import io.dazzleduck.sql.common.types.JavaRow;
 import io.dazzleduck.sql.commons.types.VectorSchemaRootWriter;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;

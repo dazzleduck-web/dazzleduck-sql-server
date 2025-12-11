@@ -6,6 +6,7 @@ import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ingestion.NOOPPostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.util.TestUtils;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceJWTTokenAuthenticator;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
@@ -92,7 +93,9 @@ public interface FlightTestUtils {
                     "change me",
                     allocator, warehousePath, AccessMode.RESTRICTED,
                     Path.of(System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString()),
-                    NOOPPostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2)),
+                    NOOPPostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(),
+                    Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2),
+                    QueryOptimizer.NOOP_QUERY_OPTIMIZER),
                 serverLocation, additionalClientHeaders, testAuthenticator);
     }
 

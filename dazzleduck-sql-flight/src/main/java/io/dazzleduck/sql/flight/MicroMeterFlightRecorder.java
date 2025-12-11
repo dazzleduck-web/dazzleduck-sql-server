@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.flight;
 
-import io.dazzleduck.sql.flight.model.FlightMetricsSnapshot;
+
 import io.micrometer.core.instrument.*;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,7 +67,6 @@ public class MicroMeterFlightRecorder implements FlightRecorder {
 
         this.stremPreparedStatementBytesOutCounter = counter("stream_prepared_statement_bytes_out", producerId);
         this.stremStatementBytesOutCounter = counter("stream_statement_bytes_out", producerId);
-
     }
 
     // ==========================================================
@@ -164,41 +163,14 @@ public class MicroMeterFlightRecorder implements FlightRecorder {
 
     @Override
     public void recordGetStreamPreparedStatement(long size) {
-
+        stremPreparedStatementBytesOutCounter.increment(size);
     }
 
     @Override
     public void recordGetStreamStatement(long size) {
-
+        stremStatementBytesOutCounter.increment(size);
     }
 
-
-    @Override
-    public FlightMetricsSnapshot snapshot() {
-
-        long startTimeMs = startTime.get();
-        long runningStatements = Math.round(streamStatementCounter.count()) - Math.round(streamStatementCompletedCounter.count()) - Math.round(cancelStatementCounter.count());
-        long runningPrepared = Math.round(streamPreparedStatementCounter.count()) - Math.round(streamPreparedStatementCompletedCounter.count()) - Math.round(cancelPreparedStatementCounter.count());
-        long runningBulkIngest = Math.round(bulkIngestCounter.count()) - Math.round(bulkIngestCompletedCounter.count());
-        long completedStatements = Math.round(streamStatementCompletedCounter.count());
-        long completedPrepared = Math.round(streamPreparedStatementCompletedCounter.count());
-        long completedBulkIngest = Math.round(bulkIngestCompletedCounter.count());
-        long cancelledStatements = Math.round(cancelStatementCounter.count());
-        long cancelledPrepared = Math.round(cancelPreparedStatementCounter.count());
-
-        return new FlightMetricsSnapshot(
-                startTimeMs,
-                runningStatements,
-                runningPrepared,
-                runningBulkIngest,
-                completedStatements,
-                completedPrepared,
-                completedBulkIngest,
-                cancelledStatements,
-                cancelledPrepared
-
-        );
-    }
 
     @Override
     public double getBytesOut() {
