@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.flight.server;
 
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -18,13 +19,11 @@ import io.dazzleduck.sql.commons.planner.SplitPlanner;
 import io.dazzleduck.sql.flight.FlightRecorder;
 import io.dazzleduck.sql.flight.MicroMeterFlightRecorder;
 import io.dazzleduck.sql.flight.ingestion.IngestionParameters;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import io.dazzleduck.sql.flight.model.RunningStatementInfo;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
-import io.dazzleduck.sql.micrometer.metrics.MetricsRegistryFactory;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.arrow.adapter.jdbc.JdbcParameterBinder;
 import org.apache.arrow.adapter.jdbc.JdbcToArrowUtils;
 import org.apache.arrow.flight.*;
@@ -146,7 +145,6 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     public List<RunningStatementInfo> getRunningStatementDetails() {
         var result = new ArrayList<RunningStatementInfo>();
         statementLoadingCache.asMap().forEach((key, ctx) -> {
-            if (ctx.running()) {
                 result.add(
                         new RunningStatementInfo(
                                 key.peerIdentity(),                       // user
@@ -157,7 +155,6 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                 ctx.endTime()                                       // endInstant
                         )
                 );
-            }
         });
 
         return result;
@@ -239,6 +236,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     private final Clock clock;
 
+    private final QueryOptimizer queryOptimizer;
     private final long CANCEL_TASK_INTERVAL_SECOND = 10;
 
     StreamListener<CancelStatus> streamListener = new StreamListener<>() {
@@ -264,8 +262,11 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                                           BufferAllocator allocator,
                                                           String warehousePath,
                                                           AccessMode accessMode,
-                                                         PostIngestionTaskFactory postIngestionTaskFactory) {
-        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, newTempDir(), postIngestionTaskFactory, Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2));
+                                                         PostIngestionTaskFactory postIngestionTaskFactory,
+                                                         QueryOptimizer queryOptimizer) {
+        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, newTempDir(),
+                postIngestionTaskFactory, Executors.newSingleThreadScheduledExecutor(),
+                Duration.ofMinutes(2), queryOptimizer);
     }
 
     public static Path newTempDir() {
@@ -286,7 +287,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     public DuckDBFlightSqlProducer(Location location, String producerId) {
         this(location, producerId, "change me", new RootAllocator(),  System.getProperty("user.dir") + "/warehouse", AccessMode.COMPLETE, newTempDir()
-        , PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2));
+        , PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2), QueryOptimizer.NOOP_QUERY_OPTIMIZER);
     }
 
     public DuckDBFlightSqlProducer(Location location,
@@ -298,10 +299,11 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                    Path tempDir,
                                    PostIngestionTaskFactory postIngestionTaskFactory,
                                    ScheduledExecutorService scheduledExecutorService,
-                                   Duration queryTimeout) {
+                                   Duration queryTimeout,
+                                   QueryOptimizer queryOptimizer) {
         this(location, producerId, secretKey, allocator, warehousePath, accessMode, tempDir, postIngestionTaskFactory,
                 scheduledExecutorService, queryTimeout, Clock.systemDefaultZone(),
-                buildRecorder(producerId));
+                buildRecorder(producerId), queryOptimizer);
 
     }
     public DuckDBFlightSqlProducer(Location location,
@@ -315,7 +317,8 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                                    ScheduledExecutorService scheduledExecutorService,
                                    Duration queryTimeout,
                                    Clock clock,
-                                   FlightRecorder recorder) {
+                                   FlightRecorder recorder,
+                                   QueryOptimizer queryOptimizer) {
         this.startTime = clock.instant();
         this.location = location;
         this.producerId = producerId;
@@ -348,6 +351,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         this.warehousePath = warehousePath;
         this.clock = clock;
         sqlInfoBuilder = new SqlInfoBuilder();
+        this.queryOptimizer = queryOptimizer;
         try (final Connection connection = ConnectionPool.getConnection()) {
             final DatabaseMetaData metaData = connection.getMetaData();
 
@@ -606,26 +610,33 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             final CallContext context,
             final ServerStreamListener listener) {
         StatementHandle statementHandle = StatementHandle.deserialize(ticketStatementQuery.getStatementHandle());
-        if (statementHandle.signatureMismatch(secretKey)) {
-            ErrorHandling.handleSignatureMismatch(listener);
-            return;
-        }
         getStreamStatement(statementHandle, context, listener);
     }
 
-    public void getStreamStatement(
+    private void getStreamStatement(
             StatementHandle statementHandle,
             final CallContext context,
             final ServerStreamListener listener) {
         try {
             var connection = getConnection(context, accessMode);
+            String query = statementHandle.query();
+            if (statementHandle.queryChecksum() != null
+                    && statementHandle.signatureMismatch(secretKey)) {
+                ErrorHandling.handleSignatureMismatch(listener);
+                return;
+            }
+            if (statementHandle.queryChecksum() == null  &&
+                    AccessMode.RESTRICTED == accessMode) {
+                query = authorize(context, query, connection);
+            }
+
             Statement statement = connection.createStatement();
-            var statementContext = new StatementContext<>(statement, statementHandle.query());
+            var statementContext = new StatementContext<>(statement, query);
             var key = new CacheKey(context.peerIdentity(), statementHandle.queryId());
             statementLoadingCache.put(key, statementContext);
             streamResultSet(executorService,
                     statementContext,
-                    OptionalResultSetSupplier.of(statement, statementHandle.query()),
+                    OptionalResultSetSupplier.of(statement, query, queryOptimizer),
                     allocator,
                     getBatchSize(context),
                     listener,
@@ -1240,13 +1251,17 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
                 recorder.errorStream(statementContext.isPreparedStatementContext());
                 ErrorHandling.handleThrowable(listener, throwable);
             } finally {
-                if (!error) {
-                    listener.completed();
+                try {
+                    if (!error) {
+                        listener.completed();
+                    }
+                    statementContext.end();
+                    recorder.endStream(statementContext.isPreparedStatementContext());
+                    finalBlock.run();
+                    childAllocator.close();
+                } catch (Exception e){
+                    logger.atError().setCause(e).log("Error running finally block");
                 }
-                statementContext.end();
-                recorder.endStream(statementContext.isPreparedStatementContext());
-                finalBlock.run();
-                childAllocator.close();
             }
         });
     }
@@ -1312,6 +1327,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         var verifiedClaims = getVerifiedClaims(callContext);
         var databaseSchema = getDatabaseSchema(callContext, accessMode);
         return sqlAuthorizer.authorize(peerIdentity, databaseSchema.database, databaseSchema.schema, sql, verifiedClaims);
+    }
+
+    private String authorize(CallContext callContext, String sql, Connection connection)
+            throws UnauthorizedException, JsonProcessingException, SQLException {
+        var tree = Transformations.parseToTree(connection, sql);
+        var authorizedTree = authorize(callContext, tree);
+        return Transformations.parseToSql(connection, authorizedTree);
     }
 
     protected StatementHandle newStatementHandle(String query, long splitSize) {

@@ -10,19 +10,20 @@ import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.util.TestUtils;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
+import io.dazzleduck.sql.flight.FlightRecorder;
+import io.dazzleduck.sql.flight.MicroMeterFlightRecorder;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
 import io.dazzleduck.sql.flight.stream.ArrowStreamReaderWrapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.duckdb.DuckDBConnection;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -34,6 +35,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.sql.*;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -61,7 +63,7 @@ public class DuckDBFlightSqlProducerTest {
     protected static FlightServer flightServer;
     protected static FlightSqlClient sqlClient;
     protected static String warehousePath;
-
+    private static DuckDBFlightSqlProducer producer;
     @TempDir
     Path projectTempDir;
     private Path catalogFile;
@@ -93,15 +95,27 @@ public class DuckDBFlightSqlProducerTest {
 
     private static void setUpClientServer() throws Exception {
         final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55556);
+        String producerId = UUID.randomUUID().toString();
+        FlightRecorder recorder = new MicroMeterFlightRecorder(new SimpleMeterRegistry(), producerId);
+        producer = new DuckDBFlightSqlProducer(
+                serverLocation,
+                producerId,
+                "change me",
+                serverAllocator,
+                warehousePath,
+                AccessMode.COMPLETE,
+                DuckDBFlightSqlProducer.newTempDir(),
+                PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(),
+                Executors.newSingleThreadScheduledExecutor(),
+                Duration.ofMinutes(2),
+                Clock.systemDefaultZone(),
+                recorder, QueryOptimizer.NOOP_QUERY_OPTIMIZER);
+
         flightServer = FlightServer.builder(
                         serverAllocator,
                         serverLocation,
-                        new DuckDBFlightSqlProducer(serverLocation,
-                                UUID.randomUUID().toString(),
-                                "change me",
-                                serverAllocator, warehousePath, AccessMode.COMPLETE,
-                                DuckDBFlightSqlProducer.newTempDir(),
-                        PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(), Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2)))
+                        producer)
+
                 .headerAuthenticator(AuthUtils.getTestAuthenticator())
                 .build()
                 .start();
@@ -112,7 +126,6 @@ public class DuckDBFlightSqlProducerTest {
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA)))
                 .build());
     }
-
 
     @ParameterizedTest
     @ValueSource(strings = {"SELECT * FROM generate_series(10)",
@@ -267,7 +280,11 @@ public class DuckDBFlightSqlProducerTest {
         Thread thread = new Thread(() -> {
             try {
                 Thread.sleep(200);
+                var running = producer.getRunningStatementDetails();
                 sqlClient.cancelFlightInfo(new CancelFlightInfoRequest(flightInfo));
+                // Test the assertion after cancel is  called because if assert will fail
+                // then the test will hang for a very long time
+                assertEquals(1, producer.getRunningStatementDetails().size());
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
@@ -282,6 +299,7 @@ public class DuckDBFlightSqlProducerTest {
         } catch (Exception e) {
             // Expected. Ignore it
         }
+        assertEquals(0, producer.getRunningStatementDetails().size());
     }
 
     @Test
@@ -399,6 +417,32 @@ public class DuckDBFlightSqlProducerTest {
              Statement stmt = conn.createStatement()) {
             stmt.execute("DROP TABLE a");
         }
+    }
+
+    @Test
+    public void testOpenPreparedStatementDetailsLifecycle() throws Exception {
+        SqlProducerMBean mbean = producer;
+        var preparedStatement = sqlClient.prepare("SELECT * FROM generate_series(10)");
+        assertEquals(1, mbean.getOpenPreparedStatementDetails().size());
+        var flightInfo = preparedStatement.execute();
+        var ticket = flightInfo.getEndpoints().get(0).getTicket();
+        var stream = sqlClient.getStream(ticket);
+        while (stream.next()) {}
+        stream.close();
+        preparedStatement.close();
+        assertEquals(0, mbean.getOpenPreparedStatementDetails().size());
+    }
+
+    @Test
+    public void testBytesOut() throws Exception {
+
+        SqlProducerMBean mbean = producer;
+        var flightInfo = sqlClient.execute("SELECT * FROM generate_series(1000)");
+        try (var stream = sqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) { }
+        }
+        double bytesOut = mbean.getBytesOut();
+        assertTrue(bytesOut > 0);
     }
 
     private ServerClient createRestrictedServerClient(Location serverLocation,

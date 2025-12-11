@@ -6,10 +6,19 @@ import DisplayCharts from "../components/DisplayCharts";
 import { useForm } from 'react-hook-form';
 import { HiOutlineChevronDoubleUp, HiOutlineChevronDoubleDown, HiOutlineChevronDoubleRight, HiOutlineX } from "react-icons/hi";
 import { formatPossibleDate } from "../components/utils/DateNormalizer";
+import { AiFillCloseCircle, AiFillCheckCircle } from "react-icons/ai";
 
 const Logging = () => {
     const DEFAULT_VIEW = "table";
-    const { executeQuery, login } = useLogging();
+    const { executeQuery, login, cancelQuery } = useLogging();
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [claims, setClaims] = useState([{ key: "", value: "" }]);
+
+    // State to track query IDs and cancellation status
+    const [queryIds, setQueryIds] = useState({}); // { rowId: numeric queryId }
+    const [cancellingQueries, setCancellingQueries] = useState({}); // { rowId: boolean }
+    // generating numeric query IDs
+    const queryIdCounter = useRef(1);
 
     // react-hook-form with defaultValues
     const {
@@ -22,6 +31,7 @@ const Logging = () => {
             url: "",
             username: "",
             password: "",
+            cluster: "",
             splitSize: 0,
         },
     });
@@ -33,6 +43,7 @@ const Logging = () => {
         url: "",
         username: "",
         password: "",
+        claims: { cluster: "" },
         splitSize: 0,
     });
 
@@ -66,6 +77,12 @@ const Logging = () => {
             delete copy[id];
             return copy;
         });
+        // Clean up queryId tracking
+        setQueryIds((prev) => {
+            const copy = { ...prev };
+            delete copy[id];
+            return copy;
+        });
     };
 
     const updateRow = (id, key, value) => {
@@ -74,20 +91,51 @@ const Logging = () => {
         );
     };
 
+    const addClaim = () => {
+        setClaims(prev => [...prev, { key: "", value: "" }]);
+    };
+
+    const removeClaim = (index) => {
+        setClaims(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const updateClaim = (index, field, value) => {
+        setClaims(prev =>
+            prev.map((item, i) =>
+                i === index ? { ...item, [field]: value } : item
+            )
+        );
+    };
+
+    // Generate a numeric query ID
+    const generateQueryId = () => {
+        return queryIdCounter.current++;
+    };
+
     // Core executor for one query row
     const runQueryForRow = async (row) => {
         const { url, username, password, splitSize } = connection;
 
         // Not connected
-        if (!isConnected) { return { logs: [], error: "Not connected — click Connect" }; }
+        if (!isConnected) {
+            return { logs: [], error: "Not connected — click Connect", queryId: null };
+        }
         // Empty query
-        if (!row.query?.trim()) { return { logs: [], error: "Empty query — skipped" }; }
+        if (!row.query?.trim()) {
+            return { logs: [], error: "Empty query — skipped", queryId: null };
+        }
+
+        // Generate numeric query ID BEFORE executing
+        const queryId = generateQueryId();
+
+        // Store it immediately so cancel can use it
+        setQueryIds(prev => ({ ...prev, [row.id]: queryId }));
 
         try {
-            const logs = await executeQuery(url, row.query, splitSize);
-            return { logs, error: null };
+            const result = await executeQuery(url, row.query, splitSize, null, queryId);
+            return { logs: result.data, error: null, queryId: result.queryId };
         } catch (err) {
-            return { logs: [], error: err?.message || "Query failed" };
+            return { logs: [], error: err?.message || "Query failed", queryId: null };
         }
     };
 
@@ -100,35 +148,113 @@ const Logging = () => {
 
         setResults(prev => ({
             ...prev,
-            [id]: { ...result, loading: false },
+            [id]: { logs: result.logs, loading: false, error: result.error },
         }));
     };
 
-    // Run all queries (sequential)
-    const runAllQuerys = async ({ delayMs = 100 } = {}) => {
-        if (!isConnected) {
-            const updated = Object.fromEntries(
-                rows.map(r => [r.id, { logs: [], loading: false, error: "Not connected — click Connect" }])
-            );
-            setResults(updated);
+    // Cancel a query
+    const handleCancelQuery = async (row) => {
+        const id = row.id;
+        const queryId = queryIds[id];
+
+        if (!queryId) {
+            console.warn("No query ID found for row:", id);
+            setResults(prev => ({
+                ...prev,
+                [id]: {
+                    ...prev[id],
+                    error: "No active query to cancel for this row"
+                },
+            }));
             return;
         }
 
-        // Mark all rows loading
-        setResults(prev => ({
-            ...prev,
-            ...Object.fromEntries(rows.map(r => [r.id, { logs: [], loading: true, error: null }])),
-        }));
-
-        for (const row of rows) {
-            const result = await runQueryForRow(row);
+        if (!isConnected) {
             setResults(prev => ({
                 ...prev,
-                [row.id]: { ...result, loading: false },
+                [id]: { ...prev[id], error: "Not connected — cannot cancel" },
             }));
-
-            if (delayMs > 0) await new Promise(res => setTimeout(res, delayMs));
+            return;
         }
+
+        setCancellingQueries(prev => ({ ...prev, [id]: true }));
+
+        try {
+            const { url } = connection;
+            const cleanUrl = url.trim();
+            const result = await cancelQuery(cleanUrl, row.query, queryId);
+
+            if (result.success) {
+                setResults(prev => ({
+                    ...prev,
+                    [id]: {
+                        logs: prev[id]?.logs || [],
+                        loading: false,
+                        error: `Query cancelled (status: ${result.status})`,
+                    },
+                }));
+            } else {
+                setResults(prev => ({
+                    ...prev,
+                    [id]: {
+                        ...prev[id],
+                        error: `Cancel failed with status: ${result.status}`,
+                    },
+                }));
+            }
+
+            // Clean up the queryId after successful cancel
+            setQueryIds(prev => {
+                const updated = { ...prev };
+                delete updated[id];
+                return updated;
+            });
+        } catch (err) {
+            setResults(prev => ({
+                ...prev,
+                [id]: {
+                    ...prev[id],
+                    error: `Cancel error: ${err?.message || "Unknown error"}`,
+                },
+            }));
+        } finally {
+            setCancellingQueries(prev => ({ ...prev, [id]: false }));
+        }
+    };
+
+    // Run all queries (parallel)
+    const runAllQueries = async () => {
+        if (!isConnected) return;
+
+        const loadingState = {};
+        rows.forEach(row => {
+            loadingState[row.id] = { logs: [], loading: true, error: null };
+        });
+        setResults(prev => ({ ...prev, ...loadingState }));
+
+        rows.forEach(async (row) => {
+            const id = row.id;
+            try {
+                const result = await runQueryForRow(row);
+                setResults(prev => ({
+                    ...prev,
+                    [id]: {
+                        logs: result.logs,
+                        loading: false,
+                        error: result.error
+                    }
+                }));
+            } catch (err) {
+                setResults(prev => ({
+                    ...prev,
+                    [id]: {
+                        logs: [],
+                        loading: false,
+                        error: err?.message || "Query failed"
+                    }
+                }));
+            }
+        });
     };
 
     const clearRowLogs = (id) => {
@@ -140,20 +266,29 @@ const Logging = () => {
 
     // Handle form submission (Connect)
     const onSubmit = async (data) => {
-        // clear previous login error
         setLoginError(null);
-        // set connection state (so UI has it)
-        setConnection({
+
+        // convert claims list → object
+        const claimsObject = {};
+        claims.forEach(c => {
+            if (c.key.trim() !== "") {
+                claimsObject[c.key.trim()] = c.value.trim();
+            }
+        });
+
+        const newConnection = {
             url: data.url,
             username: data.username,
             password: data.password,
+            claims: claimsObject,
             splitSize: data.splitSize ?? 0,
-        });
+        };
+
+        setConnection(newConnection);
 
         try {
-            await login(data.url, data.username, data.password);
+            await login(data.url, data.username, data.password, claimsObject);
             setIsConnected(true);
-            setLoginError(null);
         } catch (err) {
             setIsConnected(false);
             setLoginError(err?.message || "Login failed");
@@ -163,7 +298,7 @@ const Logging = () => {
     // whenever any field changes in connection settings we will disconnect.
     useEffect(() => {
         setIsConnected(false);
-    }, [watchedFields.url, watchedFields.username, watchedFields.password, watchedFields.splitSize]);
+    }, [watchedFields.url, watchedFields.username, watchedFields.password, watchedFields.splitSize, claims]);
 
     return (
         <div className="relative min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 p-8 space-y-10">
@@ -177,20 +312,21 @@ const Logging = () => {
 
             {/* === Connection Panel === */}
             <div
-                className={`fixed top-30 left-8 w-80 bg-white shadow-2xl rounded-2xl border border-gray-600 transform transition-transform duration-300 ease-in-out p-6 z-20 ${showConnection ? "translate-x-0" : "-translate-x-full"
-                    }`}
+                className={`fixed top-30 left-8 w-90 bg-white shadow-2xl rounded-2xl border border-gray-600 transform transition-transform duration-300 ease-in-out px-6 py-4 z-20 max-h-[80vh] overflow-y-auto scrollbar-hidden ${showConnection ? "translate-x-0" : "-translate-x-full"}`}
             >
-                <h2 className="text-2xl font-semibold text-gray-800 mb-4">
-                    Connection Settings
-                </h2>
+                <div className="flex items-center gap-2 mb-3">
+                    <h2 className="text-2xl font-semibold text-gray-800">
+                        Connection Settings
+                    </h2>
 
-                {/* show a tiny status */}
-                <div className="mb-2">
-                    {isConnected ? (
-                        <p className="text-sm text-green-700">Connected</p>
-                    ) : (
-                        <p className="text-sm text-gray-600">Not connected</p>
-                    )}
+                    {/* Status circle */}
+                    <div className="mt-2">
+                        {isConnected ? (
+                            <AiFillCheckCircle className="text-green-600" size={20} />
+                        ) : (
+                            <AiFillCloseCircle className="text-red-600" size={20} />
+                        )}
+                    </div>
                 </div>
 
                 <form className="space-y-4" onSubmit={handleSubmit(onSubmit)}>
@@ -202,7 +338,7 @@ const Logging = () => {
                             type="text"
                             {...register("url", { required: "Server URL is required" })}
                             placeholder="Enter Server URL"
-                            className="w-full border border-gray-400 rounded-lg p-2"
+                            className="w-full border border-gray-400 rounded-lg py-1 px-2"
                         />
                         {/* show error only after submit attempt */}
                         {isSubmitted && errors.url && (
@@ -218,7 +354,7 @@ const Logging = () => {
                             type="text"
                             {...register("username", { required: "Username is required" })}
                             placeholder="Enter username"
-                            className="w-full border border-gray-400 rounded-lg p-2"
+                            className="w-full border border-gray-400 rounded-lg py-1 px-2"
                         />
                         {isSubmitted && errors.username && (
                             <p className="text-red-500 text-sm">{errors.username.message}</p>
@@ -233,31 +369,138 @@ const Logging = () => {
                             type="password"
                             {...register("password", { required: "Password is required" })}
                             placeholder="Enter password"
-                            className="w-full border border-gray-400 rounded-lg p-2"
+                            className="w-full border border-gray-400 rounded-lg py-1 px-2"
                         />
                         {isSubmitted && errors.password && (
                             <p className="text-red-500 text-sm">{errors.password.message}</p>
                         )}
                     </div>
 
-                    <div>
-                        <label className="text-sm font-medium text-gray-600 mb-1 mr-2">
-                            Split Size:
-                        </label>
-                        {/* remove any direct value binding; use RHF default value */}
-                        <input
-                            type="number"
-                            min="0"
-                            {...register("splitSize", {
-                                valueAsNumber: true,
-                                validate: (v) => (v >= 0) || "Split size must be 0 or greater",
-                            })}
-                            className="w-40 border border-gray-400 rounded-lg p-1"
-                        />
-                        {isSubmitted && errors.splitSize && (
-                            <p className="text-red-500 text-xs mt-1">{errors.splitSize.message}</p>
-                        )}
-                        <p className="text-xs text-gray-500 mt-1">0 = /query; &gt;0 = plan/split</p>
+                    {/* === Advanced Settings === */}
+                    <div className="">
+                        <button
+                            type="button"
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="flex justify-between w-full text-left text-gray-800 font-medium"
+                        >
+                            <span>Advanced Settings</span>
+                            <span className="text-sm">{showAdvanced ? "▲" : "▼"}</span>
+                        </button>
+
+                        {/* Collapsible Content */}
+                        <div
+                            className={`transition-all duration-300 overflow-hidden ${showAdvanced ? "max-h-96 opacity-100" : "max-h-0 opacity-0"
+                                }`}
+                        >
+                            <div className="mt-2 space-y-4">
+
+                                {/* === Claims Section === */}
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        Claims
+                                    </label>
+
+                                    {claims.map((item, index) => {
+                                        const allowedKeys = ["cluster", "orgId", "database", "schema", "table", "path", "function",];
+                                        const isValidKey = item.key.trim() === "" || allowedKeys.includes(item.key.trim());
+
+                                        // Suggestions appear only when partial typing AND no exact match
+                                        const filteredSuggestions =
+                                            item.key.trim() &&
+                                                !allowedKeys.includes(item.key.trim())
+                                                ? allowedKeys.filter((k) =>
+                                                    k.toLowerCase().includes(item.key.toLowerCase())
+                                                ) : [];
+
+                                        return (
+                                            <div key={index} className="relative mb-2">
+                                                <div className="flex items-center gap-2">
+                                                    {/* Key Input */}
+                                                    <div className="w-1/2 relative">
+                                                        <input
+                                                            type="text"
+                                                            placeholder="key"
+                                                            value={item.key}
+                                                            onChange={(e) => updateClaim(index, "key", e.target.value)}
+                                                            className={`w-full border rounded-lg py-1 px-2 ${item.key.trim() === "" ? "border-gray-400" : isValidKey ? "border-green-500" : "border-red-500"}`}
+                                                        />
+
+                                                        {/* Suggestions */}
+                                                        {filteredSuggestions.length > 0 && (
+                                                            <div className="absolute left-0 right-0 bg-white border border-gray-300 rounded shadow-lg max-h-40 overflow-y-auto z-20">
+                                                                {filteredSuggestions.map((suggest, i) => (
+                                                                    <div
+                                                                        key={i}
+                                                                        className="px-2 py-1 hover:bg-gray-100 cursor-pointer"
+                                                                        onClick={() => {
+                                                                            updateClaim(index, "key", suggest);
+                                                                        }}
+                                                                    >
+                                                                        {suggest}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Value Input */}
+                                                    <input
+                                                        type="text"
+                                                        placeholder="value"
+                                                        value={item.value}
+                                                        onChange={(e) => updateClaim(index, "value", e.target.value)}
+                                                        className="w-1/2 border border-gray-400 rounded-lg py-1 px-2"
+                                                    />
+
+                                                    {/* Remove */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => removeClaim(index)}
+                                                        className="text-red-600 font-bold"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+
+                                    {/* Add Row */}
+                                    <button
+                                        type="button"
+                                        onClick={addClaim}
+                                        className="text-blue-600 font-semibold mt-1"
+                                    >
+                                        + Add Claim
+                                    </button>
+                                </div>
+
+                                {/* === Split Size (unchanged) === */}
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        Split Size
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        {...register("splitSize", {
+                                            valueAsNumber: true,
+                                            validate: (v) =>
+                                                v >= 0 || "Split size must be 0 or greater",
+                                        })}
+                                        className="w-40 border border-gray-400 rounded-lg p-1"
+                                    />
+                                    {isSubmitted && errors.splitSize && (
+                                        <p className="text-red-500 text-xs mt-1">
+                                            {errors.splitSize.message}
+                                        </p>
+                                    )}
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        0 = /query; &gt;0 = plan/split
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     {/* show login error if any */}
@@ -267,7 +510,7 @@ const Logging = () => {
 
                     <button
                         type="submit"
-                        className={`w-full ${isConnected ? "bg-blue-300 hover:bg-blue-400" : "bg-blue-600 hover:bg-blue-700 cursor-pointer"} text-white font-medium py-2 rounded-lg mt-4 transition`}
+                        className={`w-full ${isConnected ? "bg-blue-300 hover:bg-blue-400" : "bg-blue-600 hover:bg-blue-700 cursor-pointer"} text-white font-medium py-2 rounded-lg mt-1 transition`}
                         disabled={(isSubmitting, isConnected)}
                     >
                         {isSubmitting ? "Connecting..." : "Connect"}
@@ -328,6 +571,11 @@ const Logging = () => {
                             <div className="flex flex-col flex-1 bg-gray-50 rounded-xl border border-gray-300 p-6">
                                 <h2 className="text-2xl font-semibold text-gray-800 mb-2">
                                     SQL Query #{row.id.split("-")[0]}
+                                    {queryIds[row.id] && (
+                                        <span className="text-sm text-gray-500 ml-2">
+                                            (Query ID: {queryIds[row.id]})
+                                        </span>
+                                    )}
                                 </h2>
                                 <textarea
                                     value={row.query}
@@ -344,18 +592,25 @@ const Logging = () => {
                                 />
                                 <div className="flex justify-end items-center gap-3 mt-3">
                                     <button
-                                        onClick={() => clearRowLogs(row.id)}
-                                        disabled={loading || logs.length === 0}
-                                        className="bg-gray-400 hover:bg-gray-500 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
-                                    >
-                                        Clear
-                                    </button>
-                                    <button
                                         onClick={() => handleRunQuery(row)}
                                         disabled={loading || !isConnected}
                                         className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
                                     >
                                         {loading ? "Running..." : "Run"}
+                                    </button>
+                                    <button
+                                        onClick={() => handleCancelQuery(row)}
+                                        disabled={!isConnected || cancellingQueries[row.id] || !queryIds[row.id]}
+                                        className="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
+                                    >
+                                        {cancellingQueries[row.id] ? "Canceling..." : "Cancel"}
+                                    </button>
+                                    <button
+                                        onClick={() => clearRowLogs(row.id)}
+                                        disabled={loading || logs.length === 0}
+                                        className="bg-gray-400 hover:bg-gray-500 text-white font-medium py-2 px-4 rounded-md transition disabled:opacity-50 cursor-pointer"
+                                    >
+                                        Clear
                                     </button>
                                 </div>
                             </div>
@@ -465,7 +720,7 @@ const Logging = () => {
                 </button>
 
                 <button
-                    onClick={runAllQuerys}
+                    onClick={runAllQueries}
                     disabled={!isConnected}
                     className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md disabled:opacity-50 transition duration-300 cursor-pointer"
                 >

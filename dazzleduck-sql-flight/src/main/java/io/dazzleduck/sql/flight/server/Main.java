@@ -2,12 +2,16 @@ package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
+import io.dazzleduck.sql.common.ConfigBasedProvider;
+import io.dazzleduck.sql.common.ConfigBasedStartupScriptProvider;
 import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactory;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizerProvider;
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceJWTTokenAuthenticator;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
@@ -54,15 +58,23 @@ public class Main {
             System.out.printf("Warehouse dir does not exist %s. Create the dir to proceed", warehousePath);
         }
         AccessMode accessMode = DuckDBFlightSqlProducer.getAccessMode(config);
-        var startupContent = StartupScriptProvider.load(config).getStartupScript();
-        if (startupContent != null) {
-            ConnectionPool.execute(startupContent);
+        StartupScriptProvider startupScriptProvider = ConfigBasedProvider.load(config,
+                StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX,
+                new ConfigBasedStartupScriptProvider());
+        if (startupScriptProvider.getStartupScript() != null) {
+            ConnectionPool.execute(startupScriptProvider.getStartupScript());
         }
         BufferAllocator allocator = new RootAllocator();
-        var postIngestionTaskFactorProvider = PostIngestionTaskFactoryProvider.load(config);
+        PostIngestionTaskFactoryProvider postIngestionTaskFactorProvider =
+                ConfigBasedProvider.load(config, PostIngestionTaskFactoryProvider.POST_INGESTION_CONFIG_PREFIX, PostIngestionTaskFactoryProvider.NO_OP);
+
         var postIngestionTaskFactor = postIngestionTaskFactorProvider.getPostIngestionTaskFactory();
+        QueryOptimizerProvider queryOptimizerProvider = ConfigBasedProvider.load(config,
+                QueryOptimizerProvider.QUERY_OPTIMIZER_PROVIDER_CONFIG_PREFIX,
+                QueryOptimizerProvider.NOOPOptimizerProvider);
+        var queryOptimizer = queryOptimizerProvider.getOptimizer();
         var tempWriteDirector = DuckDBFlightSqlProducer.getTempWriteDir(config);
-        var producer = createProducer(location, producerId, secretKey, allocator, warehousePath, tempWriteDirector, accessMode, postIngestionTaskFactor);
+        var producer = createProducer(location, producerId, secretKey, allocator, warehousePath, tempWriteDirector, accessMode, postIngestionTaskFactor, queryOptimizer);
         var certStream = getInputStreamForResource(serverCertLocation);
         var keyStream = getInputStreamForResource(keystoreLocation);
 
@@ -97,8 +109,10 @@ public class Main {
                                                          String warehousePath,
                                                          Path tempWriteDir,
                                                          AccessMode accessMode,
-                                                         PostIngestionTaskFactory postIngestionTaskFactory) {
-        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, tempWriteDir, postIngestionTaskFactory, Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2));
+                                                         PostIngestionTaskFactory postIngestionTaskFactory,
+                                                         QueryOptimizer queryOptimizer) {
+        return new DuckDBFlightSqlProducer(location, producerId, secretKey, allocator, warehousePath, accessMode, tempWriteDir,
+                postIngestionTaskFactory, Executors.newSingleThreadScheduledExecutor(), Duration.ofMinutes(2), queryOptimizer);
     }
 
     private static InputStream getInputStreamForResource(String filename) {

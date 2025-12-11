@@ -2,7 +2,7 @@ package io.dazzleduck.sql.logger;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.commons.types.JavaRow;
+import io.dazzleduck.sql.common.types.JavaRow;
 import io.dazzleduck.sql.commons.types.VectorSchemaRootWriter;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -45,9 +45,9 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
     ));
 
     // load config ONCE — names unchanged
-    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_micrometer");
-    private static final String CONFIG_APPLICATION_ID = config.getString("applicationId");
-    private static final String CONFIG_APPLICATION_NAME = config.getString("applicationName");
+    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logger");
+    private static final String CONFIG_APPLICATION_ID = config.getString("application_id");
+    private static final String CONFIG_APPLICATION_NAME = config.getString("application_name");
     private static final String CONFIG_HOST = config.getString("host");
 
     private static final DateTimeFormatter TS_FORMAT =

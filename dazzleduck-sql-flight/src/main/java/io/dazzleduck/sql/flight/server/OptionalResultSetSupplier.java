@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.flight.server;
 
+import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import org.duckdb.DuckDBResultSet;
 
 import java.sql.PreparedStatement;
@@ -13,7 +14,7 @@ public interface OptionalResultSetSupplier {
 
     void execute() throws SQLException;
 
-    static OptionalResultSetSupplier of(final Statement statement, String query) {
+    static OptionalResultSetSupplier of(final Statement statement, String query, QueryOptimizer queryOptimizer) {
         return new OptionalResultSetSupplier() {
             boolean hasResultSet;
 
@@ -29,7 +30,8 @@ public interface OptionalResultSetSupplier {
 
             @Override
             public void execute() throws SQLException {
-                hasResultSet = statement.execute(query);
+                var optimizedQuery = queryOptimizer.optimize(query);
+                hasResultSet = statement.execute(optimizedQuery);
             }
         };
     }

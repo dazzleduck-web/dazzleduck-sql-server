@@ -1,6 +1,6 @@
-- Ducklake Support
-- DropWizard and System metrics.
+- Ducklake Support - WIP
+- DropWizard and System metrics - WIP
 - Audit Collection.
 - LogCollection.
-- Long Running Task Monitor.
-- Management UI
+- Long Running Task Monitor. - Done
+- Management UI - WIP

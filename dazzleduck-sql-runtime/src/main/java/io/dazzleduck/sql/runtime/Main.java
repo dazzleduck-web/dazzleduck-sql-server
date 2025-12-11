@@ -14,7 +14,7 @@ import static io.dazzleduck.sql.common.util.ConfigUtils.CONFIG_PATH;
 public class Main {
     public static void main(String[] args) throws Exception {
         var commandLineConfig = ConfigUtils.loadCommandLineConfig(args).config();
-        var config = commandLineConfig.withFallback(ConfigFactory.load().getConfig(CONFIG_PATH));
+        var config = commandLineConfig.withFallback(ConfigFactory.load()).getConfig(CONFIG_PATH);
         start(config);
     }
 

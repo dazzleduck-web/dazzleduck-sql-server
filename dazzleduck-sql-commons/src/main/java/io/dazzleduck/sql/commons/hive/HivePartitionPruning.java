@@ -155,7 +155,6 @@ public class HivePartitionPruning extends PartitionPruning {
     public static List<FileStatus> pruneFiles(String basePath,
                                               JsonNode tree,
                                               String[][] partitionDataTypes) throws SQLException, IOException {
-
         return pruneFiles(basePath, getFilterSql(tree), partitionDataTypes);
     }
     /**

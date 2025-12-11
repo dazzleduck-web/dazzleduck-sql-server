@@ -39,6 +39,9 @@ public class Transformations {
     public static final Function<JsonNode, Boolean> IS_CONJUNCTION_AND = isClassAndType(CONJUNCTION_CLASS,
             CONJUNCTION_TYPE_AND);
 
+    public static final Function<JsonNode, Boolean> IS_COMPARE_IN = isClassAndType(OPERATOR_CLASS,
+            COMPARE_IN_TYPE);
+
     public static final Function<JsonNode, Boolean> IS_CONJUNCTION_OR = isClassAndType(CONJUNCTION_CLASS,
             CONJUNCTION_TYPE_OR);
 
@@ -51,6 +54,28 @@ public class Transformations {
         JsonNode children = n.get("children");
         return children == null || children.isEmpty();
     };
+
+    public static Function<JsonNode, Boolean> isFunction(String functionName) {
+        return n -> {
+            var name = n.get("function_name");
+            if (name == null)
+                return false;
+
+            return isClassAndType(FUNCTION_CLASS, FUNCTION_TYPE).apply(n)
+                    && functionName.equals(name.asText());
+        };
+    }
+
+    public static Function<JsonNode, Boolean> isTableFunction(String functionName) {
+        return n -> {
+            var function = n.get("function");
+            if (function == null )
+                return false;
+
+            return isType(TABLE_FUNCTION_TYPE).apply(n)
+                    && functionName.equals(function.get("function_name").asText());
+        };
+    }
 
     public static final Function<JsonNode, Boolean> IS_REFERENCE_CAST = node -> {
         return IS_CAST.apply(node) && node.get("child") !=null && IS_REFERENCE.apply(node.get("child"));
@@ -395,6 +420,12 @@ public class Transformations {
         return list;
     }
 
+    public static List<JsonNode> collectFunction(JsonNode tree, String functionName) {
+        final List<JsonNode> list = new ArrayList<>();
+        find(tree, isFunction(functionName), list::add);
+        return list;
+    }
+
     public static List<JsonNode> collectReferences(JsonNode tree) {
         final List<JsonNode> list = new ArrayList<>();
         find(tree, IS_REFERENCE, list::add);
@@ -470,6 +501,31 @@ public class Transformations {
     public static Function<JsonNode, JsonNode> identity() {
         return node -> node;
     }
+
+
+    public static Function<JsonNode, JsonNode> changeMatching(Function<JsonNode, Boolean> matching,
+                                                              Consumer<JsonNode> changeFunction) {
+        return input -> {
+            changeMatching(input, matching, changeFunction);
+            return input;
+        };
+    }
+
+    private static void changeMatching(JsonNode input,
+                                       Function<JsonNode, Boolean> matching,
+                                       Consumer<JsonNode> changeFunction) {
+        if (matching.apply(input)) {
+            changeFunction.accept(input);
+        }
+        var children = (ArrayNode) input.get("children");
+        if (children == null) {
+            return;
+        }
+        for (var c : children) {
+            changeMatching(c, matching, changeFunction);
+        }
+    }
+
 
     public static String parseToSql(Connection connection, JsonNode node) throws SQLException {
         String sql = String.format(JSON_DESERIALIZE_SQL, node.toString());
@@ -706,6 +762,17 @@ public class Transformations {
         return "select "  + String.join(",", childTypeString) + " where false";
     }
 
+    public static <T> T getConstant(JsonNode constant) {
+        assert (CONSTANT_CLASS.equals(constant.get("class").asText()));
+        var valueNode = constant.get("value");
+        var valueType = valueNode.get("type").get("id").asText();
+        switch (valueType) {
+            case "VARCHAR" -> {
+                return (T) valueNode.get("value").asText();
+            }
+            default -> throw new IllegalStateException("Not supported " + valueType);
+        }
+    }
 
     private static String structCast(JsonNode node) {
         var typeInfo = (ArrayNode) node.get("type_info").get("child_types");

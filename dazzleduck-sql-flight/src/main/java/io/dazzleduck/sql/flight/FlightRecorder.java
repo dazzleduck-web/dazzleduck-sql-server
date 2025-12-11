@@ -67,7 +67,6 @@ public interface FlightRecorder {
 
     void recordGetStreamStatement(long size);
 
-    FlightMetricsSnapshot snapshot();
 
     double getBytesOut();
 

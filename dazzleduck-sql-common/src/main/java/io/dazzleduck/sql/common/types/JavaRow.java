@@ -1,4 +1,4 @@
-package io.dazzleduck.sql.commons.types;
+package io.dazzleduck.sql.common.types;
 
 public record JavaRow(Object[] objects) {
     public Object get(int index) {
