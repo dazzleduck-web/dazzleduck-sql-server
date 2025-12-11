@@ -104,8 +104,11 @@ public class ArrowHttpPoster implements AutoCloseable {
     }
 
     private void sendHttpPost(byte[] data) throws Exception {
+        String uuid = java.util.UUID.randomUUID().toString();
+        String base = endpoint.toString(); // Unique per file
+        String finalUrl = base + "/" + uuid;
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(endpoint)
+                .uri(URI.create(finalUrl))
                 .header("Content-Type", "application/vnd.apache.arrow.stream")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(data))
                 .build();

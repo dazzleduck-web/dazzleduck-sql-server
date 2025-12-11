@@ -63,15 +63,7 @@ public class IngestionService implements HttpService, ParameterUtils, Controller
     protected IngestionParameters parseIngestionParameters(ServerRequest serverRequest) {
         UriQuery query = serverRequest.query();
         var path = query.get("path");
-        String fileName = UUID.randomUUID().toString();
-        String fullDir = warehousePath + "/" + path;
-        // ---- Create directory automatically ----
-        try {
-            Files.createDirectories(Path.of(fullDir));
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create ingestion folder: " + fullDir, e);
-        }
-        String completePath = fullDir + "/" + fileName;
+        final String completePath = warehousePath + "/" + path;
         String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
         var partitionString = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
         var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);

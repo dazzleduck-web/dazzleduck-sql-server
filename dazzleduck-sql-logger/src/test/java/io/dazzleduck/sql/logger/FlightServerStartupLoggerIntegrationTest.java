@@ -82,7 +82,7 @@ public class FlightServerStartupLoggerIntegrationTest {
         Files.createDirectories(path);
     }
     private Path findFirstLogFile(String warehousePath) throws IOException {
-        Path logsDir = Path.of(warehousePath, "logs");
+        Path logsDir = Path.of(warehousePath);
         try (var stream = Files.list(logsDir)) {
             return stream
                     .filter(Files::isRegularFile)
@@ -91,15 +91,4 @@ public class FlightServerStartupLoggerIntegrationTest {
                             "No log file found in " + logsDir));
         }
     }
-
-    @Test
-    void testLoggerCanPostLogs1() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("integration-test");
-
-        for (int i = 0; i < 18; i++) {
-            logger.info("Test {}", i);
-        }
-
-        logger.flush();
-        Thread.sleep(2000);}
 }
