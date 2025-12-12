@@ -196,7 +196,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
 
     private static FlightRecorder buildRecorder(String producerId) {
         try {
-            var registry = new LoggingMeterRegistry();
+            var registry = MetricsRegistryFactory.create();
             return new MicroMeterFlightRecorder(registry, producerId);
         } catch (Throwable t) {
             return new NOOPFlightRecorder();

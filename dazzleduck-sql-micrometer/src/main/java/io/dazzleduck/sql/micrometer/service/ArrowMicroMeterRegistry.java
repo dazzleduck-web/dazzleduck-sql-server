@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.micrometer.service;
 
+import io.dazzleduck.sql.common.ingestion.FlightSender;
 import io.dazzleduck.sql.micrometer.config.ArrowRegistryConfig;
 import io.dazzleduck.sql.micrometer.server.ArrowReceiverServer;
 import io.dazzleduck.sql.micrometer.util.ArrowFileWriterUtil;
@@ -33,6 +34,7 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
     private final String applicationId;
     private final String applicationName;
     private final String host;
+    private final FlightSender flightSender;
 
     private ArrowMicroMeterRegistry(
             ArrowRegistryConfig config,
@@ -46,7 +48,8 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
             ArrowReceiverServer receiver,
             String applicationId,
             String applicationName,
-            String host
+            String host,
+            FlightSender flightSender
     ) {
         super(config, clock);
         this.arrowConfig = Objects.requireNonNull(config, "config");
@@ -59,6 +62,7 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
         this.applicationId = applicationId;
         this.applicationName = applicationName;
         this.host = host;
+        this.flightSender = flightSender;
         this.config().namingConvention(NamingConvention.dot);
 
         if (!testMode) {
@@ -85,19 +89,12 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
                 log.info("Wrote {} meters to Arrow file: {}", meters.size(), outputPath);
             }
 
-            // Optionally post to HTTP endpoint
-            if (endpoint != null && !endpoint.isBlank()) {
-                if (receiver != null && !testMode) {
-                    receiver.start();
-                }
-
-                int status = ArrowHttpPoster.postBytes(httpClient, payload, endpoint, httpTimeout);
-                log.info("Published {} meters to {} (HTTP {})", meters.size(), endpoint, status);
-
-                if (receiver != null && !testMode) {
-                    receiver.stop(0);
-                }
+            if (flightSender != null) {
+                flightSender.enqueue(payload);
+                log.info("Published {} meters async via FlightSender → {}", meters.size(), endpoint);
+                return;
             }
+
 
         } catch (Exception e) {
             log.error("Error publishing Arrow metrics", e);
@@ -140,13 +137,25 @@ public class ArrowMicroMeterRegistry extends StepMeterRegistry {
         public Builder applicationId(String id) { this.applicationId = id; return this; }
         public Builder applicationName(String name) { this.applicationName = name; return this; }
         public Builder host(String host) { this.host = host; return this; }
+        private FlightSender flightSender;
+
+        public Builder flightSender(FlightSender fs) {
+            this.flightSender = fs;
+            return this;
+        }
 
         public ArrowMicroMeterRegistry build() {
-            if (endpoint == null) throw new IllegalStateException("endpoint is required");
+            if (endpoint == null)
+                throw new IllegalStateException("endpoint is required");
+
+            if (flightSender != null) {
+                flightSender.setIngestEndpoint(endpoint);
+            }
+
             return new ArrowMicroMeterRegistry(
                     config, clock, threadFactory, httpClient,
-                    endpoint, httpTimeout, outputPath, testMode, receiver, applicationId,
-                    applicationName, host
+                    endpoint, httpTimeout, outputPath, testMode,
+                    receiver, applicationId, applicationName, host, flightSender
             );
         }
     }

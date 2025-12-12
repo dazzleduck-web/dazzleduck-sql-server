@@ -38,6 +38,7 @@
         <module>dazzleduck-sql-micrometer</module>
         <module>dazzleduck-sql-logger</module>
         <module>dazzleduck-sql-login</module>
+        <module>dazzleduck-sql-client</module>
     </modules>
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

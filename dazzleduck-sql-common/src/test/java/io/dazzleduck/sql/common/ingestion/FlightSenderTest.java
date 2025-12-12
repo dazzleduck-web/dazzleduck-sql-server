@@ -1,74 +1,118 @@
 package io.dazzleduck.sql.common.ingestion;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class FlightSenderTest {
-    // Use  on demand Sender to test it
 
-    @Test
-    void testStoreStatusMemoryAndDisk() throws Exception {
-        CountDownLatch latch = new CountDownLatch(1);
+    private OnDemandSender sender;
 
-        OnDemandSender sender = new OnDemandSender(
-                2 * 1024 * 1024,
-                10 * 1024 * 1024,
-                latch
-        );
-
-        sender.start();
-        assertEquals(FlightSender.StoreStatus.IN_MEMORY, sender.getStoreStatus(1024 * 1024));
-        assertEquals(FlightSender.StoreStatus.ON_DISK, sender.getStoreStatus(7 * 1024 * 1024));
-        latch.countDown();
+    @AfterEach
+    void cleanup() {
+        sender = null;
     }
+
+    private final long KB = 1024;
+    private final long MB = 1024 * KB;
+
+    private OnDemandSender createSender(long mem, long disk) {
+        return new OnDemandSender(mem, disk, new CountDownLatch(1));
+    }
+
     @Test
-    void testDiskFull() throws Exception {
-        CountDownLatch latch = new CountDownLatch(1);
+    void testStoreStatusMemoryAndDisk() {
+        sender = createSender(2 * MB, 10 * MB);
 
-        OnDemandSender sender = new OnDemandSender(
-                1024 * 1024,
-                5 * 1024 * 1024,
-                latch
-        );
+        assertEquals(FlightSender.StoreStatus.IN_MEMORY, sender.getStoreStatus((int) MB));
+        assertEquals(FlightSender.StoreStatus.ON_DISK, sender.getStoreStatus((int) (7 * MB)));
+        long expectedTotal = MB + (7 * MB);
+        long actualTotal = sender.getCurrentInMemorySize() + sender.getCurrentOnDiskSize();
+        assertEquals(expectedTotal, actualTotal);
+    }
 
+    @Test
+    void testStoreStatusFull() {
+        sender = createSender(MB, 4 * MB);
+        assertEquals(FlightSender.StoreStatus.ON_DISK, sender.getStoreStatus((int) MB));
+        assertEquals(FlightSender.StoreStatus.FULL, sender.getStoreStatus((int) (5 * MB)));
+    }
+
+    @Test
+    void testEnqueueInMemory() {
+        sender = createSender(10 * MB, 10 * MB);
         sender.start();
-        sender.enqueue(new byte[1024 * 1024]);
-        IllegalStateException ex = assertThrows(IllegalStateException.class, () ->
-                sender.enqueue(new byte[5 * 1024 * 1024])
+        assertDoesNotThrow(() -> sender.enqueue(new byte[1024]));
+    }
+
+    @Test
+    void testEnqueueOnDisk() {
+        sender = createSender(100, 10 * MB);
+        sender.start();
+        assertDoesNotThrow(() -> sender.enqueue(new byte[1024]));
+    }
+
+    @Test
+    void testEnqueueThrowsWhenFull() {
+        sender = createSender(MB, 5 * MB);
+        sender.start();
+        sender.enqueue(new byte[(int) MB]); // goes to disk
+        sender.release(); // let it process
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> sender.enqueue(new byte[(int) (6 * MB)])
         );
+
         assertEquals("queue is full", ex.getMessage());
-        latch.countDown();
     }
 
     @Test
-    void testQueueDrainsAfterLatch() throws Exception {
-        CountDownLatch latch = new CountDownLatch(1);
-
-        OnDemandSender sender = new OnDemandSender(
-                10 * 1024 * 1024,
-                10 * 1024 * 1024,
-                latch
-        );
+    void testProcessingClearsCounters() throws Exception {
+        sender = createSender(10 * MB, 10 * MB);
         sender.start();
-        sender.enqueue(new byte[5 * 1024 * 1024]);
-        sender.enqueue(new byte[5 * 1024 * 1024]);
-        Thread.sleep(10);
-        latch.countDown();
-        Thread.sleep(10);
+        sender.enqueue(new byte[1024]);
+        sender.enqueue(new byte[2048]);
+        assertEquals(1024 + 2048, sender.getCurrentInMemorySize());
+        sender.release();
+        Thread.sleep(60);
+        assertEquals(0, sender.getCurrentInMemorySize());
     }
 
-}
+
+
+    @Test
+    void testFileCleanupAfterProcessing() throws Exception {
+        sender = new OnDemandSender(100, 10 * MB, new CountDownLatch(1));
+        sender.start();
+        sender.enqueue(new byte[1024]);  // goes to ON_DISK
+        assertEquals(1, sender.filesCreated.get());
+        sender.release();
+        Thread.sleep(60);
+        assertEquals(1, sender.filesDeleted.get());
+    }
+
+    @Test
+    void testFileCleanupOnEnqueueFailure() {
+        sender = new OnDemandSender(100, 1024, new CountDownLatch(1));
+
+        sender.enqueue(new byte[500]); // fits in ON_DISK
+        assertEquals(1, sender.filesCreated.get());
+        assertThrows(IllegalStateException.class, () -> sender.enqueue(new byte[555]));
+        assertEquals(2, sender.filesCreated.get());
+        assertEquals(1, sender.filesDeleted.get());
+    }
 
 class OnDemandSender extends FlightSender.AbstractFlightSender {
 
     private final long maxOnDiskSize;
     private final long maxInMemorySize;
     private final CountDownLatch latch;
-
+    public final AtomicInteger filesCreated = new AtomicInteger();
+    public final AtomicInteger filesDeleted = new AtomicInteger();
     public OnDemandSender(long maxInMemorySize, long maxOnDiskSize, CountDownLatch latch) {
         this.maxInMemorySize = maxInMemorySize;
         this.maxOnDiskSize = maxOnDiskSize;
@@ -85,8 +129,25 @@ class OnDemandSender extends FlightSender.AbstractFlightSender {
         return maxOnDiskSize;
     }
 
-    @Override
-    protected void doSend(SendElement element) throws InterruptedException {
-        latch.await();
+        @Override
+        public void enqueue(byte[] input) {
+            filesCreated.incrementAndGet(); // always count
+
+            try {
+                super.enqueue(input);
+            } catch (Exception e) {
+                filesDeleted.incrementAndGet(); // rollback
+                throw e;
+            }
+        }
+
+        @Override
+        protected void doSend(SendElement element) throws InterruptedException {
+            latch.await();        // wait for release()
+            filesDeleted.incrementAndGet(); // after successful send
+        }
+        public void release() {
+            latch.countDown();
+        }
     }
 }

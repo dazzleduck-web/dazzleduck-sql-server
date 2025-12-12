@@ -1,6 +1,10 @@
 package io.dazzleduck.sql.common.ingestion;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 
@@ -10,10 +14,9 @@ public interface FlightSender {
         IN_MEMORY, ON_DISK, FULL
     }
 
+    void setIngestEndpoint(String uri);
     void enqueue(byte[] input);
-
     long getMaxInMemorySize();
-
     long getMaxOnDiskSize();
 
     abstract class AbstractFlightSender implements FlightSender {
@@ -35,6 +38,19 @@ public interface FlightSender {
         private long inMemorySize = 0;
 
         private long onDiskSize = 0;
+        protected String ingestEndpoint;
+        protected long getCurrentInMemorySize() {
+            return inMemorySize;
+        }
+
+        protected long getCurrentOnDiskSize() {
+            return onDiskSize;
+        }
+        @Override
+        public void setIngestEndpoint(String uri) {
+            this.ingestEndpoint = uri;
+        }
+
 
         @Override
         public void enqueue(byte[] input) {
@@ -79,6 +95,7 @@ public interface FlightSender {
         InputStream read();
 
         long length();
+        default void cleanup() {} // ADDED: default no-op cleanup
     }
 
     public class MemoryElement implements SendElement {
@@ -91,7 +108,7 @@ public interface FlightSender {
 
         @Override
         public InputStream read() {
-            return null;
+            return new ByteArrayInputStream(data);
         }
 
         @Override
@@ -101,22 +118,42 @@ public interface FlightSender {
     }
 
     public class FileMappedMemoryElement implements SendElement {
-        long length;
+        private Path tempFile; // ADDED: store file path
+        private long length;
 
         public FileMappedMemoryElement(byte[] data) {
-
-            // write the data into temp location
-            this.length = data.length;
+            try {
+                this.tempFile = Files.createTempFile("flight-", ".arrow");
+                Files.write(tempFile, data);
+                this.length = data.length;
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to create temp file", e);
+            }
         }
 
         @Override
         public InputStream read() {
-            return null;
+            try {
+                return Files.newInputStream(tempFile); // FIXED: return actual stream
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to read temp file", e);
+            }
         }
 
         @Override
         public long length() {
             return length;
+        }
+
+        @Override
+        public void cleanup() { // ADDED: delete temp file
+            try {
+                if (tempFile != null) {
+                    Files.deleteIfExists(tempFile);
+                }
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
         }
     }
 }
