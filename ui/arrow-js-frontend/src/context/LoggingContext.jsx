@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useCallback } from "react";
+import React, { createContext, useContext, useCallback, useState, useEffect } from "react";
 import axios from "axios";
 import { tableFromIPC } from "apache-arrow";
 import Cookies from "js-cookie";
@@ -7,7 +7,22 @@ const LoggingContext = createContext();
 
 export const LoggingProvider = ({ children }) => {
     const FIVE_MINUTES_MS = 300000;
-    
+
+    // Session state
+    const [connectionInfo, setConnectionInfo] = useState(null);
+
+    // Load connection info from cookies on mount
+    useEffect(() => {
+        const savedConnection = Cookies.get("connectionInfo");
+        if (savedConnection) {
+            try {
+                setConnectionInfo(JSON.parse(savedConnection));
+            } catch (e) {
+                console.error("Failed to parse saved connection info:", e);
+            }
+        }
+    }, []);
+
     // --- Normalization / Parsing ---
     const parseResponseData = (data) => {
         let tableData = [];
@@ -41,7 +56,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Login ---
-    const login = async (serverUrl, username, password, claims) => {
+    const login = async (serverUrl, username, password, splitSize, claims) => {
         try {
             const response = await axios.post(`${serverUrl.trim()}/login`, {
                 username,
@@ -49,7 +64,23 @@ export const LoggingProvider = ({ children }) => {
                 claims: claims,
             });
             const jwt = `${response.data.tokenType} ${response.data.accessToken}`;
+
+            // Save JWT with expiration
             Cookies.set("jwtToken", jwt, { path: "/", secure: true });
+
+            // Save connection info (without password for security in cookies)
+            const connInfo = {
+                serverUrl: serverUrl.trim(),
+                username,
+                claims,
+                splitSize, // Default, will be updated when executing queries
+                loginTime: new Date().toISOString()
+            };
+
+            Cookies.set("connectionInfo", JSON.stringify(connInfo), { path: "/" });
+
+            setConnectionInfo(connInfo);
+
             return jwt;
         } catch (err) {
             if (err.response) {
@@ -59,6 +90,24 @@ export const LoggingProvider = ({ children }) => {
             }
             throw err;
         }
+    };
+
+    // --- Logout ---
+    const logout = useCallback(() => {
+        Cookies.remove("jwtToken", { path: "/" });
+        Cookies.remove("connectionInfo", { path: "/" });
+        setConnectionInfo(null);
+    }, []);
+
+
+    // --- Helper: Check jwt and logout ---
+    const requireJwtOrLogout = (jwt) => {
+        const token = Cookies.get("jwtToken");
+        if (!token && !jwt) {
+            logout();
+            throw new Error("Session expired. Please login again.");
+        }
+        return token;
     };
 
     // --- Helper: detect JSON ---
@@ -77,12 +126,12 @@ export const LoggingProvider = ({ children }) => {
             throw new Error("Server URL must start with http:// or https://");
         }
 
-        const token = Cookies.get("jwtToken");
+        const token = requireJwtOrLogout(jwt);
 
         const headers = {
             "Content-Type": "application/json",
             Accept: "application/json, application/vnd.apache.arrow.stream",
-            Authorization: token,
+            Authorization: token ? token : jwt,
         };
 
         // Prepare request body with queryId (as number)
@@ -194,12 +243,19 @@ export const LoggingProvider = ({ children }) => {
                 ? finalResults
                 : parseResponseData(finalResults);
 
+            // Update connection info with splitSize
+            if (connectionInfo) {
+                const updated = { ...connectionInfo, splitSize: numericSplitSize };
+                setConnectionInfo(updated);
+                Cookies.set("connectionInfo", JSON.stringify(updated), { path: "/" });
+            }
+
             return { data: normalized, queryId };
         } catch (err) {
             const msg = err?.message || String(err);
             throw new Error(`Query execution failed: ${msg}`);
         }
-    }, []);
+    }, [connectionInfo]);
 
     // --- Cancel Query ---
     const cancelQuery = useCallback(async (serverUrl, query, queryId) => {
@@ -207,7 +263,7 @@ export const LoggingProvider = ({ children }) => {
             throw new Error("Server URL and Query ID are required to cancel.");
         }
 
-        const token = Cookies.get("jwtToken");
+        const token = requireJwtOrLogout();
 
         const headers = {
             "Content-Type": "application/json",
@@ -241,12 +297,88 @@ export const LoggingProvider = ({ children }) => {
         }
     }, []);
 
+    // --- Save Session ---
+    const saveSession = useCallback((currentQueries = []) => {
+        if (!connectionInfo) {
+            throw new Error("No active connection to save");
+        }
+
+        return {
+            version: "1.0",
+            savedAt: new Date().toISOString(),
+            connection: {
+                serverUrl: connectionInfo.serverUrl,
+                username: connectionInfo.username,
+                claims: connectionInfo.claims,
+                splitSize: connectionInfo.splitSize || 0
+            },
+            queries: currentQueries.map(q => ({
+                query: q.query
+            }))
+        };
+    }, [connectionInfo]);
+
+    // --- Load Session ---
+    const loadSession = useCallback((file) => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const sessionData = JSON.parse(e.target.result);
+
+                    // Validate session data structure
+                    if (!sessionData.connection || !sessionData.queries) {
+                        throw new Error("Invalid session file format");
+                    }
+
+                    resolve(sessionData);
+                } catch (err) {
+                    reject(new Error("Failed to parse session file: " + err.message));
+                }
+            };
+
+            reader.onerror = () => {
+                reject(new Error("Failed to read session file"));
+            };
+
+            reader.readAsText(file);
+        });
+    }, []);
+
+    // --- Restore Session ---
+    const restoreSession = useCallback(async (sessionData) => {
+        const { connection, queries } = sessionData;
+
+        // Just restore UI state, NOT authentication
+        const connInfo = {
+            serverUrl: connection.serverUrl,
+            username: connection.username,
+            claims: connection.claims,
+            splitSize: connection.splitSize,
+            loginTime: new Date().toISOString()
+        };
+
+        setConnectionInfo(connInfo);
+        Cookies.set("connectionInfo", JSON.stringify(connInfo), { path: "/" });
+
+        return {
+            connection: connInfo,
+            queriesRestored: queries?.length || 0
+        };
+    }, []);
+
     return (
         <LoggingContext.Provider
             value={{
                 executeQuery,
                 login,
+                logout,
                 cancelQuery,
+                saveSession,
+                loadSession,
+                restoreSession,
+                connectionInfo,
             }}>
             {children}
         </LoggingContext.Provider>
