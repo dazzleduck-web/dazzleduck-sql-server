@@ -500,6 +500,49 @@ public class HttpServerTest {
         var cancelResp = cancelFuture.get(5, TimeUnit.SECONDS);
         assertTrue(Set.of(200, 202, 409).contains(cancelResp.statusCode()), "unexpected cancel status");
     }
+    @Test
+    public void testIngestionWithJwt() throws Exception {
+        // 1. Login to get JWT (your helper method)
+        var jwt = login();
+        String auth = jwt.tokenType() + " " + jwt.accessToken();
+
+        // 2. Build Arrow payload
+        String query = "select * from generate_series(9)";
+        byte[] arrowBytes;
+        try (BufferAllocator allocator = new RootAllocator();
+             DuckDBConnection connection = ConnectionPool.getConnection();
+             var reader = ConnectionPool.getReader(connection, allocator, query, 1000);
+             var baos = new ByteArrayOutputStream();
+             var writer = new ArrowStreamWriter(reader.getVectorSchemaRoot(), null, baos)) {
+
+            writer.start();
+            while (reader.loadNextBatch()) {
+                writer.writeBatch();
+            }
+            writer.end();
+            arrowBytes = baos.toByteArray();
+        }
+
+
+        var authorizedReq = HttpRequest.newBuilder(
+                        URI.create("http://localhost:%s/ingest?path=secure.parquet".formatted(TEST_PORT2)))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(arrowBytes))
+                .header("Content-Type", ContentTypes.APPLICATION_ARROW)
+                .header(HeaderNames.AUTHORIZATION.defaultCase(), auth)
+                .build();
+
+        var authorizedResp = client.send(authorizedReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, authorizedResp.statusCode(),
+                "Valid JWT token should allow ingestion");
+
+        // 5. Verify file exists by reading parquet
+        long count = ConnectionPool.collectFirst(
+                "select count(*) from read_parquet('%s/secure.parquet')".formatted(warehousePath),
+                Long.class);
+
+        assertEquals(10, count);
+    }
+
 
     private LoginResponse login() throws IOException, InterruptedException {
         var loginRequest = HttpRequest.newBuilder(URI.create("http://localhost:%s/login".formatted(TEST_PORT2)))
