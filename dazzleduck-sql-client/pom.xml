@@ -38,13 +38,6 @@
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-login</artifactId>
             <version>0.0.13-SNAPSHOT</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-http</artifactId>
-            <version>0.0.13-SNAPSHOT</version>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -60,15 +53,19 @@
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-login</artifactId>
+            <artifactId>dazzleduck-sql-runtime</artifactId>
             <version>0.0.13-SNAPSHOT</version>
-            <scope>compile</scope>
+            <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-flight</artifactId>
-            <version>0.0.13-SNAPSHOT</version>
-            <scope>compile</scope>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>flight-core</artifactId>
+            <version>${arrow.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>flight-sql</artifactId>
+            <version>${arrow.version}</version>
         </dependency>
     </dependencies>
 

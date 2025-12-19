@@ -4,7 +4,7 @@ package io.dazzleduck.sql.client;
 
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.ingestion.FlightSender;
-import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
+import io.dazzleduck.sql.client.auth.AuthUtils;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.sql.FlightSqlClient;

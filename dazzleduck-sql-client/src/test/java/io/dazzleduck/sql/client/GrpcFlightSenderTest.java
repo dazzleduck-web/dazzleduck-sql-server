@@ -1,16 +1,9 @@
 package io.dazzleduck.sql.client;
 
-
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.types.JavaRow;
 import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.flight.FlightRecorder;
-import io.dazzleduck.sql.flight.MicroMeterFlightRecorder;
-import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
-import io.dazzleduck.sql.flight.server.DuckDBFlightSqlProducer;
-import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
-import io.dazzleduck.sql.commons.authorization.AccessMode;
-import io.dazzleduck.sql.commons.ingestion.PostIngestionTaskFactoryProvider;
+import io.dazzleduck.sql.runtime.Main;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.RootAllocator;
@@ -22,7 +15,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -33,19 +25,25 @@ class GrpcFlightSenderTest {
     private static final int PORT = 55620;
 
     private static final String USER = "admin";
-    private static final String PASSWORD = "password";
+    private static final String PASSWORD = "admin";
     private static final String CATALOG = "test_catalog";
     private static final String SCHEMA = "test_schema";
 
-    private FlightServer server;
-    private FlightSqlClient client;
     private RootAllocator allocator;
+    private FlightSqlClient client;
     private String warehouse;
 
     @BeforeAll
-    void startServer() throws Exception {
+    void setup() throws Exception {
         allocator = new RootAllocator(Long.MAX_VALUE);
         warehouse = Files.createTempDirectory("grpc-test").toString();
+        Main.main(new String[]{
+                "--conf", "dazzleduck_server.flight_sql.port=" + PORT,
+                "--conf", "dazzleduck_server.flight_sql.host=localhost",
+                "--conf", "dazzleduck_server.use_encryption=false",
+                "--conf", "dazzleduck_server.warehouse=\"" + warehouse.replace("\\", "\\\\") + "\"",
+        });
+
 
         ConnectionPool.executeBatch(new String[]{
                 "INSTALL arrow FROM community",
@@ -54,49 +52,21 @@ class GrpcFlightSenderTest {
                 "CREATE SCHEMA test_catalog.test_schema"
         });
 
-        Location location = Location.forGrpcInsecure(HOST, PORT);
-        FlightRecorder recorder = new MicroMeterFlightRecorder(new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), UUID.randomUUID().toString()
-        );
-        DuckDBFlightSqlProducer producer =
-                new DuckDBFlightSqlProducer(
-                        location,
-                        UUID.randomUUID().toString(),
-                        "secret",
+        client = new FlightSqlClient(
+                FlightClient.builder(
                         allocator,
-                        warehouse,
-                        AccessMode.COMPLETE,
-                        DuckDBFlightSqlProducer.newTempDir(),
-                        PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(),
-                        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(),
-                        Duration.ofMinutes(1),
-                        Clock.systemUTC(),
-                        recorder,
-                        QueryOptimizer.NOOP_QUERY_OPTIMIZER
-                );
-
-        server = FlightServer.builder(allocator, location, producer)
-                .headerAuthenticator(AuthUtils.getTestAuthenticator())
-                .build()
-                .start();
-
-        client = new FlightSqlClient(FlightClient.builder(allocator, location)
-                .intercept(AuthUtils.createClientMiddlewareFactory(
-                                USER,
-                                PASSWORD,
-                                Map.of(
-                                        Headers.HEADER_DATABASE, CATALOG,
-                                        Headers.HEADER_SCHEMA, SCHEMA
+                        Location.forGrpcInsecure(HOST, PORT))
+                        .intercept(io.dazzleduck.sql.flight.server.auth2.AuthUtils
+                        .createClientMiddlewareFactory(
+                                        USER,
+                                        PASSWORD,
+                                        Map.of(
+                                                Headers.HEADER_DATABASE, CATALOG,
+                                                Headers.HEADER_SCHEMA, SCHEMA
+                                        )
                                 )
-                        ))
-                        .build()
+                ).build()
         );
-    }
-
-    @AfterAll
-    void stopServer() throws Exception {
-        client.close();
-        server.close();
-        allocator.close();
     }
 
     @Test
@@ -107,7 +77,7 @@ class GrpcFlightSenderTest {
         try (GrpcFlightSender sender = new GrpcFlightSender(
                 schema,
                 1024,
-                Duration.ofSeconds(5),
+                Duration.ofSeconds(1),
                 Clock.systemUTC(),
                 5_000_000,
                 20_000_000,

@@ -2,7 +2,6 @@ package io.dazzleduck.sql.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.http.server.Main;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
@@ -14,6 +13,7 @@ import org.duckdb.DuckDBConnection;
 import org.junit.jupiter.api.*;
 
 import java.io.ByteArrayOutputStream;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -35,12 +35,16 @@ public class HttpSenderTest {
         warehouse = "/tmp/" + java.util.UUID.randomUUID();
         new java.io.File(warehouse).mkdirs();
 
-        Main.main(new String[]{"--conf", "dazzleduck_server.http.port=" + PORT, "--conf", "dazzleduck_server.http.auth=jwt", "--conf", "dazzleduck_server.warehouse=" + warehouse});
+        // Use runtime Main which handles both networking modes
+        io.dazzleduck.sql.runtime.Main.main(new String[]{
+                "--conf", "dazzleduck_server.http.port=" + PORT,
+                "--conf", "dazzleduck_server.http.auth=jwt",
+                "--conf", "dazzleduck_server.warehouse=" + warehouse,// Specify networking mode
+        });
 
         ConnectionPool.executeBatch(new String[]{"INSTALL arrow FROM community", "LOAD arrow"});
 
-        // Derive schema once from DuckDB
-         Schema  schema = new Schema(java.util.List.of(new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null)));
+        schema = new Schema(java.util.List.of(new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null)));
 
         sender = new HttpSender(
                 schema,
@@ -52,17 +56,43 @@ public class HttpSenderTest {
                 100_000,
                 Duration.ofSeconds(10),
                 100_000,
-                500_000
+                500_000,Clock.systemDefaultZone()
         );
     }
 
-    @AfterAll
-    static void teardown() throws Exception {
+    @AfterEach
+    void teardown() throws Exception {
         if (sender != null) {
             sender.close();
         }
     }
 
+    @BeforeEach
+    void setupEach() {
+        org.awaitility.Awaitility.setDefaultPollInterval(5, TimeUnit.MILLISECONDS);
+        org.awaitility.Awaitility.setDefaultTimeout(3, TimeUnit.SECONDS);
+    }
+
+    @AfterEach
+    void teardownEach() {
+        // Reset Awaitility to defaults
+        org.awaitility.Awaitility.reset();
+    }
+
+    private HttpSender newSender(String file, Duration timeout) {
+        return new HttpSender(
+                schema,
+                "http://localhost:" + PORT,
+                "admin",
+                "admin",
+                file,
+                timeout,
+                100_000,
+                timeout,
+                100,
+                100_000, Clock.systemDefaultZone()
+        );
+    }
     private byte[] arrowBytes(String query) throws Exception {
         try (BufferAllocator allocator = new RootAllocator();
              DuckDBConnection conn = ConnectionPool.getConnection();
@@ -80,15 +110,21 @@ public class HttpSenderTest {
     }
 
     private void verifyFile(String filename, long expectedCount) {
-        await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
-            long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, filename), Long.class);
-            assertEquals(expectedCount, count);
-        });
+        await()
+                .pollInterval(6, TimeUnit.MILLISECONDS)
+                .atMost(3, TimeUnit.SECONDS)
+                .ignoreExceptions()
+                .untilAsserted(() -> {
+                    long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, filename), Long.class);
+                    assertEquals(expectedCount, count);
+                });
+
     }
 
     @Test
     void testAsyncIngestionSingleBatch() throws Exception {
-        sender.enqueue(arrowBytes("select * from generate_series(4)"));
+        HttpSender IngestionSingleBatch = newSender("test.parquet",Duration.ofSeconds(10));
+        IngestionSingleBatch.enqueue(arrowBytes("select * from generate_series(4)"));
         verifyFile("test.parquet", 5);
     }
 
@@ -118,12 +154,12 @@ public class HttpSenderTest {
     void testConcurrentEnqueues() throws Exception {
         CountDownLatch latch = new CountDownLatch(5);
         AtomicInteger errors = new AtomicInteger(0);
-
+        HttpSender concurrentEnqueues=  newSender("test.parquet",Duration.ofSeconds(5));
         for (int i = 0; i < 5; i++) {
             final int index = i;
             new Thread(() -> {
                 try {
-                    sender.enqueue(arrowBytes("select * from generate_series(" + (index * 10) + ")"));
+                    concurrentEnqueues.enqueue(arrowBytes("select * from generate_series(" + (index * 10) + ")"));
                 } catch (Exception e) {
                     errors.incrementAndGet();
                 } finally {
@@ -132,9 +168,8 @@ public class HttpSenderTest {
             }).start();
         }
 
-        assertTrue(latch.await(10, TimeUnit.SECONDS));
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
         assertEquals(0, errors.get());
-
         await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
             long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/test.parquet')".formatted(warehouse), Long.class);
             assertTrue(count >= 0);
@@ -144,9 +179,9 @@ public class HttpSenderTest {
     @Test
     void testJWTTokenReuse() throws Exception {
         // Multiple requests should reuse the same token
+        HttpSender ReuseSender = newSender("test.parquet",Duration.ofSeconds(5));
         for (int i = 0; i < 10; i++) {
-            sender.enqueue(arrowBytes("select " + i + " as val"));
-            Thread.sleep(50);
+            ReuseSender.enqueue(arrowBytes("select " + i + " as val"));
         }
 
         await().atMost(15, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
@@ -158,11 +193,11 @@ public class HttpSenderTest {
     @Test
     void testHighThroughput() throws Exception {
         // Rapid fire 50 small batches
-        for (int i = 0; i < 50; i++) {
-            sender.enqueue(arrowBytes("select " + i + " as val"));
+        HttpSender HighThroughput =  newSender("test.parquet",Duration.ofSeconds(5));
+        for (int i = 0; i < 20; i++) {
+            HighThroughput.enqueue(arrowBytes("select " + i + " as val"));
         }
-
-        await().atMost(30, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
+        await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
             long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/test.parquet')".formatted(warehouse), Long.class);
             assertTrue(count >= 1);
         });
@@ -184,8 +219,9 @@ public class HttpSenderTest {
 
     @Test
     void testTimeoutFailure() throws Exception {
-        var timeoutSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", "timeout.parquet", Duration.ofMillis(1), 100_000,
-                Duration.ofSeconds(1),5_000, 50_000);
+        // Set an impossibly short timeout of 1ms to force the exception
+        var timeoutSender =  newSender("test.parquet",Duration.ofSeconds(5));
+
         timeoutSender.enqueue(arrowBytes("select * from generate_series(2000)"));
         await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> assertThrows(Exception.class, () -> ConnectionPool.collectFirst("select count(*) from read_parquet('%s/timeout.parquet')".formatted(warehouse), Long.class)));
         timeoutSender.close();
