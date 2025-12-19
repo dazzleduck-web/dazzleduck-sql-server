@@ -47,6 +47,8 @@ public class Transformations {
 
     public static final Function<JsonNode, Boolean> IS_CAST = isClassAndType(CAST_CLASS, CAST_TYPE_OPERATOR);
 
+    public static final Function<JsonNode, Boolean>  IS_BASE_TABLE   = isClassAndType(TABLE_FUNCTION_TYPE, TABLE_FUNCTION_TYPE);
+
     public static final Function<JsonNode, Boolean> IS_EMPTY_CONJUNCTION_AND = n -> {
         if (!IS_CONJUNCTION_AND.apply(n)) {
             return false;
@@ -67,6 +69,17 @@ public class Transformations {
     }
 
     public static Function<JsonNode, Boolean> isTableFunction(String functionName) {
+        return n -> {
+            var function = n.get("function");
+            if (function == null )
+                return false;
+
+            return isType(TABLE_FUNCTION_TYPE).apply(n)
+                    && functionName.equals(function.get("function_name").asText());
+        };
+    }
+
+    public static Function<JsonNode, Boolean> isBaseTable(String functionName) {
         return n -> {
             var function = n.get("function");
             if (function == null )
@@ -235,6 +248,8 @@ public class Transformations {
             var firstStatementNode = (ObjectNode) Transformations.getFirstStatementNode(query);
             ObjectNode from_table = (ObjectNode) firstStatementNode.get("from_table");
             from_table.put("table_name", statTable);
+            from_table.put("schema_name", "");
+            from_table.put("catalog_name", "");
             JsonNode where = firstStatementNode.get("where_clause");
             if (where == null || where instanceof NullNode) {
                 return query;
@@ -685,6 +700,7 @@ public class Transformations {
         }
         return extractPartition(partition);
     }
+
 
 
     private static void getAllTablesOrPathsFromSelect(JsonNode statement, String catalogName, String schemaName, List<CatalogSchemaTable> collector) {

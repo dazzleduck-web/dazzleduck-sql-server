@@ -1,12 +1,10 @@
 package io.dazzleduck.sql.commons.ingestion;
 
-import io.dazzleduck.sql.commons.ingestion.BulkIngestQueue;
-
 import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
 
-public class MockBulkIngestQueue extends BulkIngestQueue<String, MockWriteResult> {
+public class MockBulkIngestQueue extends BulkIngestQueueV2<String, MockWriteResult> {
     public MockBulkIngestQueue(String identifier,
                                long minBatchSize,
                                Duration maxDelay,
@@ -16,7 +14,7 @@ public class MockBulkIngestQueue extends BulkIngestQueue<String, MockWriteResult
     }
 
     @Override
-    protected void write(WriteTask<String, MockWriteResult> writeTask) {
+    public void write(WriteTask<String, MockWriteResult> writeTask) {
         for (var future : writeTask.bucket().futures()) {
             future.complete(new MockWriteResult(writeTask.taskId(), writeTask.size()));
         }

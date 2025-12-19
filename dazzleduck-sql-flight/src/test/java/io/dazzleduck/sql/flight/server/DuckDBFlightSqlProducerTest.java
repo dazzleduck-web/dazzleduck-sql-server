@@ -208,36 +208,7 @@ public class DuckDBFlightSqlProducerTest {
         }
     }
 
-    @Test
-    @Disabled
-    public void testStatementSplittableDucklake() throws Exception {
-        setupDuckDb();
-        var serverLocation = Location.forGrpcInsecure(LOCALHOST, 55571);
-        try (var clientServer = createRestrictedServerClient(serverLocation, "admin")) {
-            try (var splittableClient = new FlightSqlClient(FlightClient.builder(clientServer.clientAllocator(), serverLocation)
-                    .intercept(AuthUtils.createClientMiddlewareFactory(USER,
-                            PASSWORD,
-                            Map.of("function", "read_ducklake",
-                                    "path", "%s.%s.%s".formatted(CATALOG, TEST_SCHEMA, TEST_TABLE),
-                                    "catalog", CATALOG,
-                                    "schema", TEST_SCHEMA)))
-                    .build())) {
-                var flightCallHeaders = new FlightCallHeaders();
-                flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
-                var flightInfo = splittableClient.execute(SUPPORTED_DUCKLAKE_QUERY, new HeaderCallOption(flightCallHeaders));
-                var size = 0;
-                assertEquals(5, flightInfo.getEndpoints().size()); // 5 rows = 5 endpoints with split size 1
-                for (var endpoint : flightInfo.getEndpoints()) {
-                    try (final FlightStream stream = splittableClient.getStream(endpoint.getTicket(), new HeaderCallOption(flightCallHeaders))) {
-                        while (stream.next()) {
-                            size += stream.getRoot().getRowCount();
-                        }
-                    }
-                }
-                assertEquals(5, size); // Total 5 rows
-            }
-        }
-    }
+
 
     @Test
     public void testBadStatement() throws Exception {
@@ -328,11 +299,7 @@ public class DuckDBFlightSqlProducerTest {
     public void testGetSchema() throws Exception {
         try (final FlightStream stream = sqlClient.getStream(
                 sqlClient.getSchemas(null, null).getEndpoints().get(0).getTicket())) {
-            int count = 0;
-            while (stream.next()) {
-                count += stream.getRoot().getRowCount();
-            }
-            assertEquals(7, count);
+            TestUtils.isEqual( "SELECT catalog_name, schema_name  FROM information_schema.schemata", clientAllocator, FlightStreamReader.of(stream,  clientAllocator));
         }
     }
 
@@ -447,24 +414,7 @@ public class DuckDBFlightSqlProducerTest {
 
     private ServerClient createRestrictedServerClient(Location serverLocation,
                                                       String user) throws IOException, NoSuchAlgorithmException {
-
-        var testUtil = new FlightTestUtils() {
-            @Override
-            public String testSchema() {
-                return TEST_SCHEMA;
-            }
-
-            @Override
-            public String testCatalog() {
-                return TEST_CATALOG;
-            }
-
-            @Override
-            public String testUser() {
-                return user;
-            }
-        };
-
+        var testUtil = FlightTestUtils.createForDatabaseSchema(user, "",  TEST_CATALOG, TEST_SCHEMA);
         return testUtil.createRestrictedServerClient(serverLocation, Map.of());
     }
 
@@ -491,7 +441,7 @@ public class DuckDBFlightSqlProducerTest {
                         PASSWORD,
                         Map.of(Headers.HEADER_DATABASE, TEST_CATALOG,
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA,
-                                "path", path)))
+                                Headers.HEADER_PATH, path)))
                 .build());
     }
 
@@ -501,37 +451,7 @@ public class DuckDBFlightSqlProducerTest {
                         PASSWORD,
                         Map.of(Headers.HEADER_DATABASE, TEST_CATALOG,
                                 Headers.HEADER_SCHEMA, TEST_SCHEMA,
-                        "path", path, "filter", filter)))
+                        Headers.HEADER_PATH, path, Headers.HEADER_FILTER, filter)))
                 .build());
-    }
-
-    private void setupDuckDb() throws IOException, SQLException {
-        catalogFile = projectTempDir.resolve(CATALOG + ".ducklake");
-        dataPath = projectTempDir.resolve("data");
-        Files.createDirectories(dataPath);
-        String absCatalog = catalogFile.toAbsolutePath().toString();
-        String absDataPath = dataPath.toAbsolutePath().toString();
-        String[] sql = getStrings(absCatalog, absDataPath);
-        try(Connection conn = ConnectionPool.getConnection()) {
-            ConnectionPool.executeBatch(conn, sql);
-            ConnectionPool.printResult("SELECT * FROM %s.%s.%s;".formatted(CATALOG, TEST_SCHEMA, TEST_TABLE));
-        }
-    }
-
-    private String[] getStrings(String absCatalog, String absDataPath) {
-        String attachDB = "ATTACH 'ducklake:%s' AS %s (DATA_PATH '%s');".formatted(absCatalog, CATALOG, absDataPath);
-        String createSchema = "CREATE SCHEMA IF NOT EXISTS %s.%s;".formatted(CATALOG, TEST_SCHEMA);
-        String createTable = "CREATE TABLE %s.%s.%s (key VARCHAR, value VARCHAR);".formatted(CATALOG, TEST_SCHEMA, TEST_TABLE);
-        String insertValues = """
-        INSERT INTO %s.%s.%s (key, value) VALUES
-            ('k1', 'value1'),
-            ('k2', 'value2'),
-            ('k3', 'value3'),
-            ('k4', 'value4'),
-            ('k5', 'value5');
-        """.formatted(CATALOG, TEST_SCHEMA, TEST_TABLE);
-        return new String[]{
-                attachDB, createSchema, createTable, insertValues
-        };
     }
 }

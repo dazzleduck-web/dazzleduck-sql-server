@@ -28,5 +28,6 @@ public class ExpressionConstants {
     public static final String FUNCTION_TYPE = "FUNCTION";
 
     public static final String TABLE_FUNCTION_TYPE = "TABLE_FUNCTION";
+    public static final String BASE_TABLE_TYPE = "BASE_TABLE";
 
 }

@@ -24,10 +24,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class HivePartitionPruning extends PartitionPruning {
@@ -147,6 +144,7 @@ public class HivePartitionPruning extends PartitionPruning {
                     }
                 }
             }
+            result.sort(Comparator.comparing(FileStatus::lastModified));
             return result;
         }
     }
@@ -155,6 +153,7 @@ public class HivePartitionPruning extends PartitionPruning {
     public static List<FileStatus> pruneFiles(String basePath,
                                               JsonNode tree,
                                               String[][] partitionDataTypes) throws SQLException, IOException {
+
         return pruneFiles(basePath, getFilterSql(tree), partitionDataTypes);
     }
     /**

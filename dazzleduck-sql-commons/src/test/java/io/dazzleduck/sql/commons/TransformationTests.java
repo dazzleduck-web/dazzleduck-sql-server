@@ -18,6 +18,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static io.dazzleduck.sql.commons.ExpressionConstants.*;
+import static io.dazzleduck.sql.commons.ExpressionFactory.createFunction;
 
 public class TransformationTests {
 

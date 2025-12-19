@@ -21,36 +21,6 @@ import static org.junit.Assert.assertEquals;
 
 public class ConnectionPoolTest {
 
-    @Test
-    public void testPreConnectionSql() throws SQLException, IOException, InterruptedException {
-        String tempLocation = newTempDir();
-        try (Connection c = ConnectionPool.getConnection()) {
-            ConnectionPool.execute(c, String.format("ATTACH '%s/file1.db' AS db1", tempLocation));
-            ConnectionPool.execute(c, String.format("ATTACH '%s/file2.db' AS db2", tempLocation));
-            ConnectionPool.execute(c, "use db1");
-            ConnectionPool.execute(c, "create table t(id int)");
-        }
-        try {
-            // This should fail
-            test();
-            throw new AssertionError("it should have failed");
-        } catch (RuntimeException e) {
-            // ignore the exception
-        }
-        ConnectionPool.addPreGetConnectionStatement("use db1");
-        Thread.sleep(10);
-        // This should pass now
-        test();
-        ConnectionPool.removePreGetConnectionStatement("use db1");
-        try {
-            // This should fail again
-            test();
-            throw new AssertionError("it should have failed");
-        } catch (RuntimeException e) {
-            // ignore the exception
-        }
-    }
-
     private void test() {
         try {
             TestUtils.isEqual("select 't' as name", "select * from (show tables)");
@@ -66,12 +36,11 @@ public class ConnectionPoolTest {
 
     @Test
     public void testArrowReader() throws SQLException, IOException {
+        var sql = "select * from generate_series(10)";
         try(DuckDBConnection connection = ConnectionPool.getConnection();
             BufferAllocator allocator = new RootAllocator();
-        ArrowReader reader = ConnectionPool.getReader(connection, allocator, "select * from generate_series(10)", 100)) {
-            while (reader.loadNextBatch()){
-                System.out.println(reader.getVectorSchemaRoot().contentToTSVString());
-            }
+            ArrowReader reader = ConnectionPool.getReader(connection, allocator, sql, 100)) {
+            TestUtils.isEqual(sql, allocator, reader);
         }
     }
 
@@ -101,13 +70,19 @@ public class ConnectionPoolTest {
     }
 
     @Test
-    public void testCollectAll() throws SQLException, NoSuchMethodException {
-        record LongAndString( String s, Long l){};
-        String sql = "select 's' as s, cast(1 as bigint) as l";
+    public void testCollectAll() throws SQLException {
+        record LongAndString( String s, long l, long[] longArray, Long nullLong,  long[] nullLongArray, String[] stringArray, String[] nullStringArray){};
+        String sql = "select 's' as s, cast(1 as bigint) as l, [cast(1 as bigint)], null, null, ['one', null, 'two'], null";
         try( var c = ConnectionPool.getConnection()) {
             var it = ConnectionPool.collectAll(c, sql, LongAndString.class);
             it.forEach( i -> {
-                Assertions.assertEquals(new LongAndString( "s", 1L), i);
+                Assertions.assertEquals("s", i.s());
+                Assertions.assertEquals(1L, i.l());
+                Assertions.assertArrayEquals(new long[]{1L}, i.longArray());
+                Assertions.assertNull(i.nullLong());
+                Assertions.assertNull(i.nullLongArray());
+                Assertions.assertArrayEquals(new String[]{"one", null, "two"}, i.stringArray);
+                Assertions.assertNull(i.nullStringArray());
             });
         }
     }

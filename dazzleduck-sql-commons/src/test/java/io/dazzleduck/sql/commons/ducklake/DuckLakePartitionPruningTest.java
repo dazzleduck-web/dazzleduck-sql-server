@@ -2,81 +2,54 @@ package io.dazzleduck.sql.commons.ducklake;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import io.dazzleduck.sql.commons.ConnectionPool;
+import io.dazzleduck.sql.commons.FileStatus;
 import org.jetbrains.annotations.NotNull;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
-import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.SQLException;
-import java.util.List;
 
-import static io.dazzleduck.sql.commons.ducklake.DucklakePartitionPruning.constructQuery;
-import static org.junit.Assert.assertEquals;
 
 public class DuckLakePartitionPruningTest {
 
-    public static String WORKSPACE;
-    public static final String DATABASE = "test_ducklake_partition";
-    public static final String METADATA_DATABASE = "__ducklake_metadata_%s".formatted(DATABASE);
-    public static final String FILE_COLUMN_STAT_TABLE = "%s.ducklake_file_column_stats".formatted(METADATA_DATABASE);
-    public static final String PARTITIONED_TABLE = "tt_p";
-    public static final String NO_PARTITIONED_TABLE = "tt";
-    public static final String QUALIFIED_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, PARTITIONED_TABLE);
-    public static final String QUALIFIED_NO_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, NO_PARTITIONED_TABLE);
-    public static final String COLUMN_MAPPING_TABLE = "ducklake_column_mapping";
-    public static final String QUALIFIED_COLUMN_MAPPING_TABLE = "%s.%s".formatted(METADATA_DATABASE, COLUMN_MAPPING_TABLE);
+    // Expected file counts after partition pruning
+    private static final int EXPECTED_FILES_WITH_FILTER = 2; // Files matching key = 'k52' filter
+    private static final int EXPECTED_FILES_NO_FILTER = 8; // Total files without any filter
 
-    static {
-        try {
-            WORKSPACE = Files.createTempDirectory("my-temp-dir-").toString();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
+    @TempDir
+    static Path WORKSPACE;
+
+    public static final String DATABASE = "my_ducklake";
+    public static final String METADATA_DATABASE = "__ducklake_metadata_%s".formatted(DATABASE);
+    public static final String PARTITIONED_TABLE = "tt_p";
+    public static final String NON_PARTITIONED_TABLE = "tt";
+    public static final String QUALIFIED_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, PARTITIONED_TABLE);
+    public static final String QUALIFIED_NON_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, NON_PARTITIONED_TABLE);
 
     @BeforeAll
     public static void setup() {
+        String workspacePath = WORKSPACE.toString();
         String[] setups = {
                 "INSTALL ducklake",
                 "LOAD ducklake",
-                "ATTACH 'ducklake:%s/metadata' AS %s (DATA_PATH '%s/data')".formatted(WORKSPACE, DATABASE, WORKSPACE),
+                "ATTACH 'ducklake:%s/metadata' AS %s (DATA_PATH '%s/data')".formatted(workspacePath, DATABASE, workspacePath),
         };
         ConnectionPool.executeBatch(setups);
         createTestTable(QUALIFIED_PARTITIONED_TABLE, true);
         addDataFile(PARTITIONED_TABLE);
-        createTestTable(QUALIFIED_NO_PARTITIONED_TABLE, false);
-        addDataFile(NO_PARTITIONED_TABLE);
+        createTestTable(QUALIFIED_NON_PARTITIONED_TABLE, false);
+        addDataFile(NON_PARTITIONED_TABLE);
     }
 
     private static void addDataFile(String table) {
-        String path = WORKSPACE + "/data/main/" + table + "/manual.parquet";
+        String path = WORKSPACE.toString() + "/data/main/" + table + "/manual.parquet";
         String sql = "COPY (SELECT * FROM (VALUES('k119', 'v119', 9),('k118', 'v118', 8)) AS my_value(key, value, partition)) TO '%s' (FORMAT parquet)".formatted(path);
         String addTableSql = "CALL ducklake_add_data_files('%s', '%s', '%s', allow_missing => true)".formatted(DATABASE, table, path);
         String[] batch = {sql, addTableSql};
         ConnectionPool.executeBatch(batch);
     }
 
-    @Test
-    @Disabled
-    public void testPartitioned() {
-        String  tableName = "";
-        var tableId = getTableId(tableName);
-        String query = constructQuery(METADATA_DATABASE, 1, List.of(1L, 2L, 3L, 4L));
-        ConnectionPool.printResult(query);
-    }
-
-    private Object getTableId(String tableName) {
-        return null;
-    }
-
-    @Test
-    public void testUnPartitioned() {
-
-
-    }
 
     public static void createTestTable(String table , boolean partitioned) {
         String[] statements = getStatements(table, partitioned);
@@ -113,27 +86,49 @@ public class DuckLakePartitionPruningTest {
     }
 
     @Test
-    public void testTransformation() throws SQLException, JsonProcessingException, NoSuchMethodException {
+    public void testTransformation() throws SQLException, JsonProcessingException {
         var sql = "select * from %s where key = 'k52'".formatted(PARTITIONED_TABLE);
-        var files = DucklakePartitionPruning.pruneFiles("main", PARTITIONED_TABLE, sql, METADATA_DATABASE );
-        Assertions.assertEquals(2, files.size());
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        var files = pruning.pruneFiles("main", PARTITIONED_TABLE, sql);
+        Assertions.assertEquals(EXPECTED_FILES_WITH_FILTER, files.size(), "Expected 2 files matching key = 'k52' filter");
     }
 
-
-
-    public static void createNonPartitionedTable() {
-        // create table
-        // add rows with nulls
-        // add column
-        // add rows with few null
-        // add external parquet file
+    @Test
+    public void testTransformationNoFilter() throws SQLException, JsonProcessingException {
+        var sql = "select * from %s".formatted(PARTITIONED_TABLE);
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        var files = pruning.pruneFiles("main", PARTITIONED_TABLE, sql);
+        Assertions.assertEquals(EXPECTED_FILES_NO_FILTER, files.size(), "Expected all 8 files without filter");
     }
 
-    public static void createPartitionedTable() {
-        // create table
-        // add rows with nulls
-        // add column
-        // add rows with few null
-        // add external parquet file
+    @Test
+    public void testTransformationFakeFilter() throws SQLException, JsonProcessingException {
+        var sql = "select * from %s where true".formatted(PARTITIONED_TABLE);
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        var files = pruning.pruneFiles("main", PARTITIONED_TABLE, sql);
+        Assertions.assertEquals(EXPECTED_FILES_NO_FILTER, files.size(), "Expected all 8 files for 'where true' filter");
     }
+
+    @Test
+    public void testTransformationNoConstantsFilter() throws SQLException, JsonProcessingException {
+        var sql = "select * from %s where key = value and key = 'k52'".formatted(PARTITIONED_TABLE);
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        var files = pruning.pruneFiles("main", PARTITIONED_TABLE, sql);
+        Assertions.assertEquals(EXPECTED_FILES_WITH_FILTER, files.size(), "Expected 2 files for complex filter with key = 'k52'");
+    }
+
+    @Test
+    public void testNonExistentTable() {
+        var sql = "select * from non_existent_table where key = 'k52'";
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        Assertions.assertThrows(SQLException.class, () -> pruning.pruneFiles("main", "non_existent_table", sql), "Should throw SQLException for non-existent table");
+    }
+
+    @Test
+    public void testInvalidSQL() {
+        var sql = "this is not valid SQL";
+        var pruning = new DucklakePartitionPruning(METADATA_DATABASE);
+        Assertions.assertThrows(Exception.class, () -> pruning.pruneFiles("main", PARTITIONED_TABLE, sql), "Should throw exception for invalid SQL syntax");
+    }
+
 }

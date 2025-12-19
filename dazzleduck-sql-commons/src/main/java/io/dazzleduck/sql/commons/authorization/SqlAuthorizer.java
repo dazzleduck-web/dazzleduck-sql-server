@@ -129,6 +129,10 @@ public interface SqlAuthorizer {
         return true;
     }
 
+    static boolean hasAccessToTableFunction(String authorizedFunction, String function) {
+        return authorizedFunction.equalsIgnoreCase(function);
+    }
+
     static boolean hasAccessToTable(String database, String schema, String table, Transformations.CatalogSchemaTable queried) {
         return table.equals(queried.tableOrPath()) &&
                 schema.equals(queried.schema()) &&

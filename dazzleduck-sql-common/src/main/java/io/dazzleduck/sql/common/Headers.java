@@ -17,6 +17,10 @@ public class Headers {
     public static final String HEADER_FETCH_SIZE = "fetch_size";
     public static final String HEADER_DATABASE = "database";
     public static final String HEADER_SCHEMA = "schema";
+    public static final String HEADER_TABLE = "table";
+    public static final String HEADER_PATH = "path";
+    public static final String HEADER_FUNCTION = "function";
+    public static final String HEADER_FILTER = "filter";
     public static final String HEADER_SPLIT_SIZE = "split_size";
     public static final String HEADER_DATA_PARTITION = "partition";
     public static final String HEADER_DATA_FORMAT = "format";
@@ -28,6 +32,7 @@ public class Headers {
     public static final String HEADER_APP_DATA_TRANSFORMATION ="udf_transformation";
 
     public static final Set<String> SUPPORTED_HEADERS = Set.of(HEADER_FETCH_SIZE, HEADER_DATABASE, HEADER_SCHEMA,  HEADER_SPLIT_SIZE,
-            HEADER_DATA_PARTITION, HEADER_DATA_FORMAT, HEADER_PRODUCER_ID, HEADER_PRODUCER_BATCH_ID, HEADER_SORT_ORDER, HEADER_DATA_TRANSFORMATION, HEADER_APP_DATA_TRANSFORMATION);
+            HEADER_DATA_PARTITION, HEADER_DATA_FORMAT, HEADER_PRODUCER_ID, HEADER_PRODUCER_BATCH_ID, HEADER_SORT_ORDER,
+            HEADER_DATA_TRANSFORMATION, HEADER_APP_DATA_TRANSFORMATION, HEADER_PATH, HEADER_TABLE, HEADER_FUNCTION, HEADER_FILTER);
 
 }

@@ -23,7 +23,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-public abstract class BulkIngestQueue<T, R> {
+public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<T, R> {
     private final ScheduledExecutorService executorService;
     private final Duration maxDelay;
     private final String identifier;
@@ -41,29 +41,38 @@ public abstract class BulkIngestQueue<T, R> {
     private long writeTaskId;
     private long scheduledWriteCount;
 
+    private boolean terminating;
+
     /**
      * Thw write will be performed as soon as bucket is full or after the maxDelay is exported since the first batch is inserted
      *
      * @param identifier      identify the queue. Generally this will the path of the bucket
-     * @param maxBucketSize   size of the bucket. Write will be performed as soon as bucket is full or overflowing
+     * @param minBucketSize   size of the bucket. Write will be performed as soon as bucket is full or overflowing
      * @param maxDelay        write will be performed just after this delay.
      * @param executorService Executor service.
      * @param clock
      */
     public BulkIngestQueue(String identifier,
-                           long maxBucketSize,
+                           long minBucketSize,
                            Duration maxDelay,
                            ScheduledExecutorService executorService,
                            Clock clock) {
-        this.maxBucketSize = maxBucketSize;
+        this.maxBucketSize = minBucketSize;
         this.identifier = identifier;
         this.executorService = executorService;
         this.maxDelay = maxDelay;
         this.clock = clock;
-        this.currentBucket = new Bucket<>(maxBucketSize, maxDelay);
+        this.currentBucket = new Bucket<>(minBucketSize, maxDelay);
+    }
+
+    public String identifier() {
+        return identifier;
     }
 
     public synchronized Future<R> addToQueue(Batch<T> batch) {
+        if (terminating) {
+            throw new IllegalStateException("Queue is terminating");
+        }
         if (batch.producerId() != null) {
             var progressBatch = inProgressBatchIds.get(batch.producerId());
             if (progressBatch != null && progressBatch >= batch.producerBatchId()) {
@@ -147,23 +156,8 @@ public abstract class BulkIngestQueue<T, R> {
     }
 
     public synchronized Stats getStats() {
-        return new Stats(identifier, totalWrite, totalWriteBatches, totalTimeSpentWriting, scheduledWriteCount, writeInProgressSize);
-    }
-
-    protected abstract void write(WriteTask<T, R> writeTask);
-
-    protected record WriteTask<T,R>(long taskId, Instant startTime, Bucket<T, R> bucket) {
-        public long size() {
-            return bucket.size();
-        }
-    }
-
-    public record Stats(String identifier,
-                        long totalWrite,
-                        long totalWriteBatches,
-                        long timeSpendWriting,
-                        long scheduledWrite,
-                        long writeInProgress) {
+        return null;
+        //return new Stats(identifier, totalWrite, totalWriteBatches, totalTimeSpentWriting, scheduledWriteCount);
     }
 
     private static class ScheduledCheckTask {
@@ -206,5 +200,10 @@ public abstract class BulkIngestQueue<T, R> {
         Path tempFilePath = tempDir.resolve(uniqueFileName);
         ConnectionPool.bulkIngestToFile(reader, allocator, tempFilePath.toString(), List.of(),"parquet");
         return tempFilePath;
+    }
+
+    @Override
+    public void close() {
+        terminating = true;
     }
 }

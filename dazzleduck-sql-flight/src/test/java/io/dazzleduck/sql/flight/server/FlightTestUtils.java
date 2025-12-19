@@ -2,15 +2,15 @@ package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.Headers;
-import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.common.util.ConfigUtils;
+import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ingestion.NOOPPostIngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
-import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceJWTTokenAuthenticator;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
+import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.BufferAllocator;
@@ -22,11 +22,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 public interface FlightTestUtils {
 
@@ -41,16 +41,12 @@ public interface FlightTestUtils {
         return PASSWORD;
     }
 
+
     default ServerClient createRestrictedServerClient(Location serverLocation,
                                                       Map<String, String> additionalClientHeaders) throws IOException, NoSuchAlgorithmException {
         return createRestrictedServerClient(serverLocation, additionalClientHeaders, getTestJWTTokenAuthenticator());
     }
 
-    default ServerClient createRestrictedServerClient(ProducerFactory producerFactory,
-                                                      Location serverLocation,
-                                                      Map<String, String> additionalClientHeaders) throws IOException, NoSuchAlgorithmException {
-        return createRestrictedServerClient(producerFactory, serverLocation, additionalClientHeaders, getTestJWTTokenAuthenticator());
-    }
 
 
     interface ProducerFactory {
@@ -99,7 +95,7 @@ public interface FlightTestUtils {
                 serverLocation, additionalClientHeaders, testAuthenticator);
     }
 
-    default AdvanceJWTTokenAuthenticator getTestJWTTokenAuthenticator() throws NoSuchAlgorithmException {
+    static AdvanceJWTTokenAuthenticator getTestJWTTokenAuthenticator() throws NoSuchAlgorithmException {
         var jwtGenerateConfigString = """
                 jwt_token.claims.generate.headers=[database,catalog,schema,table,filter,path,function]
                 jwt_token.claims.validate.headers=[database,schema]
@@ -150,27 +146,102 @@ public interface FlightTestUtils {
     }
 
 
+    public static Location findNextLocation(){
+        var port = findFreePortInRange(3200, 65000);
+        return Location.forGrpcInsecure("localhost", port);
+    }
 
     /**
-     * Finds the first available TCP port within a specified range.
+     * Finds an available TCP port within a specified range.
+     * Uses randomization to reduce conflicts when running parallel tests.
      *
      * @param startPort The starting port number of the range (inclusive).
      * @param endPort The ending port number of the range (inclusive).
-     * @return The first available port number found, or -1 if no port is available in the range.
+     * @return An available port number within the specified range.
+     * @throws IllegalArgumentException if the port range is invalid.
+     * @throws RuntimeException if no available port is found in the range.
      */
     static int findFreePortInRange(int startPort, int endPort) {
         if (startPort < 1 || endPort > 65535 || startPort > endPort) {
-            throw new IllegalArgumentException("Invalid port range. Ports must be between 1 and 65535, and startPort <= endPort.");
+            throw new IllegalArgumentException(
+                String.format("Invalid port range [%d, %d]. Ports must be between 1 and 65535, and startPort <= endPort.",
+                    startPort, endPort));
         }
 
-        for (int port = startPort; port <= endPort; port++) {
-            try (ServerSocket socket = new ServerSocket(port)) {
-                // If a ServerSocket can be created and bound, the port is available.
+        // Create a shuffled list of ports to try in random order
+        // This reduces conflicts when multiple tests run concurrently
+        List<Integer> ports = new ArrayList<>();
+        IntStream.rangeClosed(startPort, endPort).forEach(ports::add);
+        Collections.shuffle(ports, ThreadLocalRandom.current());
+
+        int attemptedPorts = 0;
+        for (int port : ports) {
+            attemptedPorts++;
+            if (isPortAvailable(port)) {
                 return port;
-            } catch (IOException e) {
-                // Port is likely in use or unavailable for other reasons, continue to the next port.
             }
         }
-        throw new RuntimeException("No open port found");
+
+        throw new RuntimeException(
+            String.format("No available port found in range [%d, %d] after trying %d ports",
+                startPort, endPort, attemptedPorts));
+    }
+
+    /**
+     * Checks if a specific port is available for binding.
+     *
+     * @param port The port number to check.
+     * @return true if the port is available, false otherwise.
+     */
+    static boolean isPortAvailable(int port) {
+        try (ServerSocket socket = new ServerSocket()) {
+            // Set SO_REUSEADDR to allow immediate reuse of ports
+            socket.setReuseAddress(true);
+            socket.bind(new java.net.InetSocketAddress(port));
+            return true;
+        } catch (IOException e) {
+            // Port is not available
+            return false;
+        }
+    }
+
+    static FlightTestUtils createForDatabaseSchema(String user, String password, String database, String schema){
+        return new Default(user, password, database, schema);
+    }
+
+    class Default implements FlightTestUtils {
+
+        private final String user;
+        private final String password;
+        private final String database;
+        private final String schema;
+
+        public Default(String user, String password, String database, String schema) {
+            this.user = user;
+            this.password = password;
+            this.database = database;
+            this.schema = schema;
+        }
+        @Override
+        public String testSchema() {
+            return schema;
+        }
+
+        @Override
+        public String testCatalog() {
+            return database;
+        }
+
+        @Override
+        public String testUser() {
+            return this.user;
+        }
+
+        @Override
+        public String testUserPassword() {
+            return this.password;
+        }
     }
 }
+
+

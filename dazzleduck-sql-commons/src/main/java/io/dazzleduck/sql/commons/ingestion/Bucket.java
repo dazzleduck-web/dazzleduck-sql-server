@@ -22,11 +22,16 @@ public class Bucket<T, R> {
     private boolean scheduleWrite;
     private final Map<String, Long> producerMaxBatchId = new HashMap<>();
 
+    private boolean finalized = false;
+
     public Bucket(long capacity, Duration maxWriteDelay) {
         this.capacity = capacity;
         this.maxWriteDelay = maxWriteDelay;
     }
     void add(Batch<T> batch, CompletableFuture<R> future) {
+        if(finalized){
+            throw new IllegalStateException("Bucket is already finalized: No add is allowed");
+        }
         batches.add(batch);
         futures.add(future);
         if (batch.producerId() != null) {
@@ -54,6 +59,8 @@ public class Bucket<T, R> {
         return size >= capacity;
     }
 
+    boolean isEmpty() {return size == 0;}
+
     public boolean timeExpired(Instant now) {
         return minReceiveInstance.plus(maxWriteDelay).isBefore(now);
     }
@@ -73,5 +80,9 @@ public class Bucket<T, R> {
 
     public Map<String, Long> getProducerMaxBatchId() {
         return Collections.unmodifiableMap(producerMaxBatchId);
+    }
+
+    public void markFinalized(){
+        this.finalized =  true;
     }
 }

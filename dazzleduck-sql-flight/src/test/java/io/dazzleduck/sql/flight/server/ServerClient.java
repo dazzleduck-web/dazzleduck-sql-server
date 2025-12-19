@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.flight.server;
 
 import org.apache.arrow.flight.FlightServer;
+import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.RootAllocator;
 
@@ -16,5 +17,9 @@ public record ServerClient(FlightServer flightServer, FlightSqlClient flightSqlC
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public Location location(){
+        return flightServer.getLocation();
     }
 }

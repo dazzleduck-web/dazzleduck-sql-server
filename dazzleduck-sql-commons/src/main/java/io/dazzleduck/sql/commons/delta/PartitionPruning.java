@@ -90,6 +90,7 @@ public class PartitionPruning {
                     }
                 }
             }
+            result.sort(Comparator.comparing(io.dazzleduck.sql.commons.FileStatus::lastModified));
             return result;
         }
     }

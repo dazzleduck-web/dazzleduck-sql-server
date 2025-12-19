@@ -28,26 +28,7 @@ public class JwtClaimBasedAuthorizerTest {
     static Location SERVER_TEST_LOCATION = Location.forGrpcInsecure("localhost", 38889);
     @BeforeAll
     public static void setup() throws IOException, NoSuchAlgorithmException {
-        var flightTestUtils = new FlightTestUtils() {
-            @Override
-            public String testSchema() {
-                return TEST_SCHEMA;
-            }
-
-            @Override
-            public String testCatalog() {
-                return TEST_CATALOG;
-            }
-
-            @Override
-            public String testUser() {
-                return TEST_USER;
-            }
-
-            @Override
-            public String  testUserPassword() {return "password"; }
-        };
-
+        var flightTestUtils = FlightTestUtils.createForDatabaseSchema(TEST_USER, "password", TEST_CATALOG, TEST_SCHEMA);
         var  tableName = "%s.%s.%s".formatted(TEST_CATALOG, TEST_SCHEMA, TEST_TABLE);
         var  unauthorizedTableName = "%s.%s.%s".formatted(TEST_CATALOG, TEST_SCHEMA, UNAUTHORIZED_TABLE);
 
@@ -103,7 +84,7 @@ public class JwtClaimBasedAuthorizerTest {
     })
     public void testAuthorizedPath(String testQuery) throws Exception {
         var expectedQuery = "%s where key =  'k2'".formatted(TestConstants.SUPPORTED_HIVE_PATH_QUERY);
-        FlightTestUtils.testQuery(expectedQuery,  testQuery, SERVER_CLIENT.flightSqlClient(), SERVER_CLIENT.clientAllocator());
+        FlightTestUtils.testQuery(expectedQuery, testQuery, SERVER_CLIENT.flightSqlClient(), SERVER_CLIENT.clientAllocator());
     }
 
     @ParameterizedTest
