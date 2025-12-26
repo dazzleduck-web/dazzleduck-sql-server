@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.stream.Collectors;
 
@@ -24,7 +25,7 @@ public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionRe
      * Thw write will be performed as soon as bucket is full or after the maxDelay is exported since the first batch is inserted
      * @param applicationId
      * @param inputFormat
-     * @param path
+     * @param path            The directory where files will be written (not a file path)
      * @param identifier      identify the queue. Generally this will the path of the bucket
      * @param minBucketSize   size of the bucket. Write will be performed as soon as bucket is reached to this size  or more
      * @param maxDelay        write will be performed just after this delay.
@@ -68,12 +69,16 @@ public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionRe
         // Search for return File and stats during the copy statement.
         // Need to create correct postIngestionTaskFactory so that you create correct IngestionTask which will be executed
         // The ingestion task will essentially insert the data into the database which will complete our implementation
+
+        // Generate unique filename within the target directory
+        String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
+        String fullFilePath = this.path + "/" + uniqueFileName;
         var sql = """
                 COPY
                     (SELECT %s FROM read_%s([%s]) %s)
                     TO '%s'
                     (FORMAT %s %s, RETURN_FILES);
-                """.formatted(selectClause, this.inputFormat, arrowFiles, lastSortOrder, this.path, outputFormat, lastPartition);
+                """.formatted(selectClause, this.inputFormat, arrowFiles, lastSortOrder, fullFilePath, outputFormat, lastPartition);
         List<String> files = new ArrayList<>();
         long count = 0;
         try(var conn = ConnectionPool.getConnection();
