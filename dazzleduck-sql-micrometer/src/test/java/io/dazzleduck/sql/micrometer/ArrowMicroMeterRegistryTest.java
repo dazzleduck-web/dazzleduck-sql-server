@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-@Disabled
+
 class ArrowMicroMeterRegistryTest {
 
     private ArrowMicroMeterRegistry registry;

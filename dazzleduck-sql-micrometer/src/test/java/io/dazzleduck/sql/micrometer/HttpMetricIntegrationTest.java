@@ -1,8 +1,5 @@
 package io.dazzleduck.sql.micrometer;
 
-import com.typesafe.config.Config;
-import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import io.dazzleduck.sql.micrometer.metrics.MetricsRegistryFactory;
 import io.micrometer.core.instrument.Counter;
@@ -16,27 +13,28 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class HttpMetricIntegrationTest {
 
-    private Thread serverThread;
+    private static final int PORT = 8081;
+    private String warehouse;
 
     @BeforeAll
-    void startServers() throws Exception {
-        Config config = ConfigFactory.load().getConfig(ConfigUtils.CONFIG_PATH);
+    void startServer() throws Exception {
+        warehouse = "/tmp/" + java.util.UUID.randomUUID();
+        Files.createDirectories(Path.of(warehouse));
 
-        serverThread = new Thread(() -> {
-            try {
-                io.dazzleduck.sql.runtime.Main.start(config);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        io.dazzleduck.sql.runtime.Main.main(new String[]{
+                "--conf", "dazzleduck_server.networking_modes=[http]",
+                "--conf", "dazzleduck_server.http.port=" + PORT,
+                "--conf", "dazzleduck_server.http.auth=jwt",
+                "--conf", "dazzleduck_server.warehouse=" + warehouse,
+                "--conf", "dazzleduck_server.ingestion.max_delay_ms=500"
         });
 
-        serverThread.setDaemon(true);
-        serverThread.start();
 
-        waitForHttpServer();
     }
 
     @Test
@@ -57,14 +55,13 @@ public class HttpMetricIntegrationTest {
                 timer.record(100, TimeUnit.MILLISECONDS);
                 counter.increment();
             }
-            Thread.sleep(100);
 
         } finally {
             registry.close();
         }
 
-        String warehousePath = ConfigUtils.getWarehousePath(ConfigFactory.load().getConfig(ConfigUtils.CONFIG_PATH));
-        Path metricFile = waitForMetricFile(warehousePath);
+        Path metricFile = waitForMetricFile(Path.of(warehouse));
+        assertNotNull(metricFile, "Metric parquet file was not created");
 
         TestUtils.isEqual("""
                 select 'records.processed' as name,
@@ -84,50 +81,25 @@ public class HttpMetricIntegrationTest {
 
     @AfterAll
     void cleanupWarehouse() throws Exception {
-        String warehousePath = ConfigUtils.getWarehousePath(ConfigFactory.load().getConfig(ConfigUtils.CONFIG_PATH));
-
-        Path path = Path.of(warehousePath);
+        Path path = Path.of(warehouse);
         if (Files.exists(path)) {
-            Files.walk(path).sorted(Comparator.reverseOrder())
+            Files.walk(path)
+                    .sorted(Comparator.reverseOrder())
                     .forEach(p -> {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {}
                     });
         }
-
-        Files.createDirectories(path);
     }
 
-    private void waitForHttpServer() throws Exception {
-        int port = 8081;
-        long deadline = System.currentTimeMillis() + 10_000;
+    private Path waitForMetricFile(Path warehouseDir) throws Exception {
+        Thread.sleep(400); // > ingestion.max_delay_ms
 
-        while (System.currentTimeMillis() < deadline) {
-            try (var socket = new java.net.Socket("localhost", port)) {
-                return;
-            } catch (IOException e) {
-                Thread.sleep(100);
-            }
+        try (var files = Files.list(warehouseDir)) {
+            return files.filter(Files::isRegularFile)
+                    .findFirst()
+                    .orElse(null);
         }
-        throw new IllegalStateException("HTTP server did not start");
-    }
-
-    private Path waitForMetricFile(String warehousePath) throws Exception {
-
-        Path dir = Path.of(warehousePath);
-        long deadline = System.currentTimeMillis() + 15_000;
-
-        while (System.currentTimeMillis() < deadline) {
-            try (var stream = Files.list(dir)) {
-                var file = stream.filter(Files::isRegularFile).findFirst();
-                if (file.isPresent()) {
-                    return file.get();
-                }
-            }
-            Thread.sleep(200);
-        }
-
-        throw new IllegalStateException("No metric file found in " + dir);
     }
 }
