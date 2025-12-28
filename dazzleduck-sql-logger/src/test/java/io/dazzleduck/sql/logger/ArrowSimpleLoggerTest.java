@@ -3,6 +3,7 @@ package io.dazzleduck.sql.logger;
 import io.dazzleduck.sql.common.ingestion.FlightSender;
 import org.apache.arrow.vector.types.pojo.*;
 import org.junit.jupiter.api.*;
+import org.slf4j.event.SubstituteLoggingEvent;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -52,12 +53,10 @@ class ArrowSimpleLoggerTest {
 
     @Test
     void testLogWithLoggingEvent() throws Exception {
-        var event = org.mockito.Mockito.mock(org.slf4j.event.LoggingEvent.class);
-        org.mockito.Mockito.when(event.getLevel())
-                .thenReturn(org.slf4j.event.Level.INFO);
-        org.mockito.Mockito.when(event.getMessage())
-                .thenReturn("event-message");
-
+        var event = new SubstituteLoggingEvent();
+        event.setLevel(org.slf4j.event.Level.INFO);
+        event.setMessage("event-message");
+        event.setLoggerName("test-logger");
         logger.log(event);
 
         assertTrue(sender.awaitRows(1));
