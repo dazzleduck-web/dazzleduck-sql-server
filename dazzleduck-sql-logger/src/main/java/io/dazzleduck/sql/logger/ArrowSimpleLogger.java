@@ -18,54 +18,91 @@ import java.io.StringWriter;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 
-public class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoCloseable {
+public final class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoCloseable {
 
     @Serial
     private static final long serialVersionUID = 1L;
 
-    private static final Schema schema = new Schema(java.util.List.of(
-            new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("level", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("logger", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("thread", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("message", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("applicationId", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("applicationName", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("host", FieldType.nullable(new ArrowType.Utf8()), null)
-    ));
-
-    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logger");
-    private static final String CONFIG_APPLICATION_ID = config.getString("application_id");
-    private static final String CONFIG_APPLICATION_NAME = config.getString("application_name");
-    private static final String CONFIG_HOST = config.getString("host");
-
     private static final DateTimeFormatter TS_FORMAT = DateTimeFormatter.ISO_INSTANT;
 
+    // Static shared resources
+    private static volatile Config config;
+    private static volatile Schema SCHEMA;
+
+    // Instance fields
     private final String name;
-    private final FlightSender flightSender;
-    private final String applicationId;
-    private final String applicationName;
-    private final String host;
+    private volatile FlightSender flightSender;
+    private String applicationId;
+    private String applicationName;
+    private String host;
+    private volatile boolean initialized = false;
 
     public ArrowSimpleLogger(String name) {
-        this(name, createSenderFromConfig());
-    }
-
-    public ArrowSimpleLogger(String name, FlightSender sender) {
         this.name = name;
-        this.flightSender = sender;
-        this.applicationId = CONFIG_APPLICATION_ID;
-        this.applicationName = CONFIG_APPLICATION_NAME;
-        this.host = CONFIG_HOST;
+        // Optimization: Do NOT initialize flightSender here.
+        // Initialization in the constructor causes the Circular Dependency Error
+        // during Netty/Arrow startup.
     }
 
-    private static FlightSender createSenderFromConfig() {
+    /**
+     * Lazy-init for the FlightSender and Config.
+     * This ensures Arrow's RootAllocator is created only when the first log message arrives.
+     */
+    private FlightSender getSender() {
+        if (flightSender == null) {
+            synchronized (this) {
+                if (flightSender == null) {
+                    ensureConfigLoaded();
+                    this.flightSender = createSenderFromConfig();
+                    this.initialized = true;
+                }
+            }
+        }
+        return flightSender;
+    }
+
+    private void ensureConfigLoaded() {
+        if (config == null) {
+            synchronized (ArrowSimpleLogger.class) {
+                if (config == null) {
+                    config = ConfigFactory.load().getConfig("dazzleduck_logger");
+                }
+            }
+        }
+        // Load instance-specific config values
+        this.applicationId = config.getString("application_id");
+        this.applicationName = config.getString("application_name");
+        this.host = config.getString("host");
+    }
+
+    private static Schema schema() {
+        if (SCHEMA == null) {
+            synchronized (ArrowSimpleLogger.class) {
+                if (SCHEMA == null) {
+                    SCHEMA = new Schema(java.util.List.of(
+                            new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("level", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("logger", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("thread", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("message", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("applicationId", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("applicationName", FieldType.nullable(new ArrowType.Utf8()), null),
+                            new Field("host", FieldType.nullable(new ArrowType.Utf8()), null)
+                    ));
+                }
+            }
+        }
+        return SCHEMA;
+    }
+
+    private FlightSender createSenderFromConfig() {
         Config http = config.getConfig("http");
-        String prefix = http.getString("target_path");
-        String file = prefix + java.util.UUID.randomUUID() + ".parquet";
+        String file = http.getString("target_path") + UUID.randomUUID() + ".parquet";
+
         return new HttpSender(
-                schema,
+                schema(),
                 http.getString("base_url"),
                 http.getString("username"),
                 http.getString("password"),
@@ -80,7 +117,7 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoClose
 
     @Override
     protected String getFullyQualifiedCallerName() {
-        return name;
+        return ArrowSimpleLogger.class.getName();
     }
 
     @Override
@@ -100,14 +137,18 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoClose
         }
         writeArrowAsync(level, message);
     }
-    private String format(String pattern, Object[] args) {
-        if (args == null || args.length == 0)
-            return pattern;
+
+    private static String format(String pattern, Object[] args) {
+        if (pattern == null) return "null";
+        if (args == null || args.length == 0) return pattern;
         return MessageFormatter.arrayFormat(pattern, args).getMessage();
     }
     /** Collect logs in batches of 10 and send to Flight */
     private void writeArrowAsync(Level level, String message) {
         try {
+            // Lazy access triggers sender creation
+            FlightSender sender = getSender();
+
             JavaRow row = new JavaRow(new Object[]{
                     TS_FORMAT.format(Instant.now()),
                     level.toString(),
@@ -119,35 +160,36 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoClose
                     host
             });
 
-            // FlightSender handles batching, serialization, and sending
-            flightSender.addRow(row);
+            sender.addRow(row);
 
         } catch (Exception e) {
-            System.err.println("[ArrowSimpleLogger] Failed to log:");
-            e.printStackTrace(System.err);
+            // NEVER use a Logger here (Circular recursion)
+            System.err.println("[ArrowSimpleLogger] Failed to write log: " + e.getMessage());
         }
     }
 
-    public void close() {
-        if (flightSender instanceof FlightSender.AbstractFlightSender afs) {
-            afs.close();
+    @Override
+    public void close() throws Exception {
+        if (flightSender != null) {
+            synchronized (this) {
+                if (flightSender instanceof AutoCloseable ac) {
+                    ac.close();
+                }
+                flightSender = null;
+            }
         }
     }
 
     public void log(LoggingEvent event) {
-        if (isLevelEnabled(event.getLevel().toInt())) {
             writeArrowAsync(event.getLevel(), event.getMessage());
-        }
     }
 
-    // === Log level controls ===
-    @Override public boolean isTraceEnabled() { return isLevelEnabled(0); }
-    @Override public boolean isDebugEnabled() { return isLevelEnabled(10); }
-    @Override public boolean isInfoEnabled()  { return isLevelEnabled(20); }
-    @Override public boolean isWarnEnabled()  { return isLevelEnabled(30); }
-    @Override public boolean isErrorEnabled() { return isLevelEnabled(40); }
+    @Override public boolean isTraceEnabled() { return true; }
+    @Override public boolean isDebugEnabled() { return true; }
+    @Override public boolean isInfoEnabled()  { return true; }
+    @Override public boolean isWarnEnabled()  { return true; }
+    @Override public boolean isErrorEnabled() { return true; }
 
-    protected boolean isLevelEnabled(int levelInt) {
-        return true; // let backend decide
-    }
+
+    public String getName() { return name; }
 }
