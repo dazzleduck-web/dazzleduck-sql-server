@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.helpers.NOPLogger;
 
 import java.util.concurrent.ConcurrentHashMap;
+
 public final class ArrowSimpleLoggerFactory implements ILoggerFactory {
 
     private final ConcurrentHashMap<String, Logger> map = new ConcurrentHashMap<>();
@@ -33,10 +34,14 @@ public final class ArrowSimpleLoggerFactory implements ILoggerFactory {
     }
 
     public void closeAll() {
-        try {
-            ArrowSimpleLogger.closeSharedResources();
-        } catch (Exception ignored) {
+        map.values().forEach(logger -> {
+            if (logger instanceof ArrowSimpleLogger asl) {
+                try {
+                    asl.close();
+                } catch (Exception ignored) {
 
-        }
+                }
+            }
+        });
     }
 }

@@ -49,7 +49,7 @@ public class HttpLoggerIntegrationTest {
                     """
                     select 'INFO'              as level,
                            'io.dazzleduck.sql.logger.HttpLoggerIntegrationTest'  as logger,
-                           'arrow-logger-async'              as thread,
+                           'main'              as thread,
                            'Test 0'            as message,
                            'ap101'             as applicationId,
                            'MyApplication'     as applicationName,
