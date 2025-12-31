@@ -19,7 +19,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
-
 public final class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoCloseable {
 
     @Serial
@@ -30,51 +29,41 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
     // Static shared resources
     private static volatile Config config;
     private static volatile Schema SCHEMA;
+    private static volatile FlightSender flightSender;
+    private static String applicationId;
+    private static String applicationName;
+    private static String host;
 
     // Instance fields
     private final String name;
-    private volatile FlightSender flightSender;
-    private String applicationId;
-    private String applicationName;
-    private String host;
-    private volatile boolean initialized = false;
 
     public ArrowSimpleLogger(String name) {
         this.name = name;
-        // Optimization: Do NOT initialize flightSender here.
-        // Initialization in the constructor causes the Circular Dependency Error
-        // during Netty/Arrow startup.
     }
 
-    /**
-     * Lazy-init for the FlightSender and Config.
-     * This ensures Arrow's RootAllocator is created only when the first log message arrives.
-     */
-    private FlightSender getSender() {
+    private static FlightSender getSender() {
         if (flightSender == null) {
-            synchronized (this) {
+            synchronized (ArrowSimpleLogger.class) {
                 if (flightSender == null) {
                     ensureConfigLoaded();
-                    this.flightSender = createSenderFromConfig();
-                    this.initialized = true;
+                    flightSender = createSenderFromConfig();
                 }
             }
         }
         return flightSender;
     }
 
-    private void ensureConfigLoaded() {
+    private static void ensureConfigLoaded() {
         if (config == null) {
             synchronized (ArrowSimpleLogger.class) {
                 if (config == null) {
                     config = ConfigFactory.load().getConfig("dazzleduck_logger");
+                    applicationId = config.getString("application_id");
+                    applicationName = config.getString("application_name");
+                    host = config.getString("host");
                 }
             }
         }
-        // Load instance-specific config values
-        this.applicationId = config.getString("application_id");
-        this.applicationName = config.getString("application_name");
-        this.host = config.getString("host");
     }
 
     private static Schema schema() {
@@ -97,7 +86,7 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
         return SCHEMA;
     }
 
-    private FlightSender createSenderFromConfig() {
+    private static FlightSender createSenderFromConfig() {
         Config http = config.getConfig("http");
         String file = http.getString("target_path") + UUID.randomUUID() + ".parquet";
 
@@ -130,7 +119,7 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
             StringWriter sw = new StringWriter();
             PrintWriter pw = new PrintWriter(sw);
             throwable.printStackTrace(pw);
-            message += "\n" + sw.toString();
+            message += "\n" + sw;
         }
         if (marker != null) {
             message = "[Marker:" + marker.getName() + "] " + message;
@@ -143,10 +132,9 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
         if (args == null || args.length == 0) return pattern;
         return MessageFormatter.arrayFormat(pattern, args).getMessage();
     }
-    /** Collect logs in batches of 10 and send to Flight */
+
     private void writeArrowAsync(Level level, String message) {
         try {
-            // Lazy access triggers sender creation
             FlightSender sender = getSender();
 
             JavaRow row = new JavaRow(new Object[]{
@@ -163,25 +151,26 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
             sender.addRow(row);
 
         } catch (Exception e) {
-            // NEVER use a Logger here (Circular recursion)
             System.err.println("[ArrowSimpleLogger] Failed to write log: " + e.getMessage());
         }
     }
 
     @Override
     public void close() throws Exception {
-        if (flightSender != null) {
-            synchronized (this) {
-                if (flightSender instanceof AutoCloseable ac) {
-                    ac.close();
-                }
-                flightSender = null;
-            }
-        }
+        // Individual loggers don't close the shared sender
     }
 
-    public void log(LoggingEvent event) {
-            writeArrowAsync(event.getLevel(), event.getMessage());
+    static void closeSharedResources() throws Exception {
+        if (flightSender != null) {
+            synchronized (ArrowSimpleLogger.class) {
+                if (flightSender != null) {
+                    if (flightSender instanceof AutoCloseable ac) {
+                        ac.close();
+                    }
+                    flightSender = null;
+                }
+            }
+        }
     }
 
     @Override public boolean isTraceEnabled() { return true; }
@@ -189,7 +178,6 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
     @Override public boolean isInfoEnabled()  { return true; }
     @Override public boolean isWarnEnabled()  { return true; }
     @Override public boolean isErrorEnabled() { return true; }
-
 
     public String getName() { return name; }
 }
