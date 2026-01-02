@@ -4,11 +4,11 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import org.junit.jupiter.api.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.UUID;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class HttpLoggerIntegrationTest {
@@ -20,7 +20,7 @@ public class HttpLoggerIntegrationTest {
 
     @BeforeAll
     void startServer() throws Exception {
-        warehousePath = "/tmp/" + UUID.randomUUID();
+        warehousePath = "/tmp/log" ;
         new java.io.File(warehousePath).mkdirs();
 
         io.dazzleduck.sql.runtime.Main.main(new String[]{
@@ -36,22 +36,25 @@ public class HttpLoggerIntegrationTest {
 
     @Test
     void testLoggerCanPostLogs() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("integration-test");
+        Logger logger = LoggerFactory.getLogger(HttpLoggerIntegrationTest.class.getName());
 
         try {
             for (int i = 0; i < 10; i++) {
                 logger.info("Test {}", i);
             }
         } finally {
-            logger.close();
+            ArrowSimpleLoggerFactory factory = (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
 
-            Path logFile = findFirstLogFile(warehousePath,"integration-test");
+        // Wait for server-side ingestion
+
+            Path logFile = findFirstLogFile(warehousePath,HttpLoggerIntegrationTest.class.getName());
 
             TestUtils.isEqual(
                     """
                     select 'INFO'              as level,
-                           'integration-test'  as logger,
+                           'io.dazzleduck.sql.logger.HttpLoggerIntegrationTest'  as logger,
                            'main'              as thread,
                            'Test 0'            as message,
                            'ap101'             as application_id,
@@ -64,14 +67,15 @@ public class HttpLoggerIntegrationTest {
 
     @Test
     void testMultipleLogLevels() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("multi-level-test");
-
+       // ArrowSimpleLogger logger = new ArrowSimpleLogger("multi-level-test");
+        Logger logger = LoggerFactory.getLogger("multi-level-test");
         try {
             logger.trace("Trace message");
             logger.debug("Debug message");
             logger.info("Info message");
         } finally {
-            logger.close();
+             ArrowSimpleLoggerFactory factory = (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
 
         // Verify all levels are persisted correctly
@@ -82,13 +86,15 @@ public class HttpLoggerIntegrationTest {
 
     @Test
     void testExceptionLogging() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("exception-test");
-
+       // ArrowSimpleLogger logger = new ArrowSimpleLogger("exception-test");
+        Logger logger = LoggerFactory.getLogger("exception-test");
         try {
             Exception ex = new RuntimeException("Test exception");
             logger.error("Error occurred", ex);
         } finally {
-            logger.close();
+            ArrowSimpleLoggerFactory factory =
+                    (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
 
         Path logFile = findFirstLogFile(warehousePath,"exception-test");
@@ -102,23 +108,25 @@ public class HttpLoggerIntegrationTest {
 
     @Test
     void testEmptyAndNullMessages() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("empty-test");
-
+       // ArrowSimpleLogger logger = new ArrowSimpleLogger("empty-test");
+        Logger logger = LoggerFactory.getLogger("empty-test");
         try {
             logger.info("");
             logger.info(null);
         } finally {
-            logger.close();
+            ArrowSimpleLoggerFactory factory = (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
     }
     @Test
     void testParameterizedMessages() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("param-test");
-
+       // ArrowSimpleLogger logger = new ArrowSimpleLogger("param-test");
+        Logger logger = LoggerFactory.getLogger("param-test");
         try {
             logger.info("User {} logged in from {}", "john.doe", "192.168.1.1");
         } finally {
-            logger.close();
+            ArrowSimpleLoggerFactory factory = (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
 
         Path logFile = findFirstLogFile(warehousePath,"param-test");
@@ -131,8 +139,8 @@ public class HttpLoggerIntegrationTest {
     }
     @Test
     void testConcurrentLogging() throws Exception {
-        ArrowSimpleLogger logger = new ArrowSimpleLogger("concurrent-test");
-
+       // ArrowSimpleLogger logger = new ArrowSimpleLogger("concurrent-test");
+        Logger logger = LoggerFactory.getLogger("concurrent-test");
         try {
             Thread[] threads = new Thread[5];
             for (int t = 0; t < threads.length; t++) {
@@ -149,7 +157,8 @@ public class HttpLoggerIntegrationTest {
                 thread.join();
             }
         } finally {
-            logger.close();
+            ArrowSimpleLoggerFactory factory = (ArrowSimpleLoggerFactory) LoggerFactory.getILoggerFactory();
+            factory.closeAll();
         }
 
         Path logFile = findFirstLogFile(warehousePath,"concurrent-test");

@@ -60,7 +60,11 @@ public interface FlightSender extends Closeable {
 
 
         public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock){
-            this(minBatchSize, maxDataSendInterval, schema, clock, Executors.newSingleThreadScheduledExecutor());
+            this(minBatchSize, maxDataSendInterval, schema, clock,  Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "flight-sender-scheduler");
+                t.setDaemon(true);
+                return t;
+            }));
         }
         public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock, ScheduledExecutorService scheduledExecutorService ){
             logger.info("FlightSender started at {} with send interval {}", clock.instant(), maxDataSendInterval);
