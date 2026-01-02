@@ -1,58 +1,53 @@
 package io.dazzleduck.sql.example;
 
-import io.dazzleduck.sql.logger.ArrowSimpleLogger;
-import io.dazzleduck.sql.micrometer.metrics.MetricsRegistryFactory;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.*;
+import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class SampleApplication {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(SampleApplication.class);
 
-
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         String warehousePath = "/tmp/dazzleduckWarehouse/metric";
         new java.io.File(warehousePath).mkdirs();
         String warehousePath2 = "/tmp/dazzleduckWarehouse/log";
         new java.io.File(warehousePath2).mkdirs();
-        MeterRegistry registry = MetricsRegistryFactory.create();
-        ArrowSimpleLogger logger = new ArrowSimpleLogger(SampleApplication.class.getName());
-        Counter processedCounter = Counter.builder("records.processed")
-                .description("Number of records processed")
-                .register(registry);
-
-        Timer processingTimer = Timer.builder("record.processing.duration")
-                .description("Time spent processing records")
-                .register(registry);
+        // Simple logging registry (prints to console)
+        var registry = new LoggingMeterRegistry();
 
         try {
-            logger.info("Sample application started");
-            simulateWork(processedCounter, processingTimer);
-            logger.info("Sample application finished successfully");
+            LOGGER.info("Sample application started");
+            simulateWork(LOGGER, registry);
+            LOGGER.info("Sample application finished successfully");
+            Thread.sleep(2000);
+
         } finally {
-            registry.close(); // flush metrics
+            registry.close();
         }
     }
 
-    private static void simulateWork(
-            Counter processedCounter,
-            Timer processingTimer
-    ) {
+    private static void simulateWork(Logger logger, MeterRegistry registry) {
+
+        Counter processedCounter = Counter.builder("records.count")
+                .description("Number of records processed")
+                .register(registry);
+
+        Timer processingTimer = Timer.builder("record.time")
+                .description("Time spent processing records")
+                .register(registry);
 
         for (int i = 1; i <= 10; i++) {
-            final int recordNumber = i;
+            int recordNumber = i;
 
             processingTimer.record(() -> {
                 try {
-                 //   logger.info("Processing record {}", recordNumber);
-                    // Simulate I/O-bound work
+                    logger.info("Processing record {}", recordNumber);
                     Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    //logger.error("Record processing interrupted", e);
-                    throw new IllegalStateException("Processing interrupted", e);
+                    logger.error("Processing interrupted", e);
                 }
             });
 
