@@ -40,7 +40,7 @@ public final class MetricsRegistryFactory {
                         Duration.ofMillis(config.getLong("max_send_interval_ms")),
                         config.getString("application_id"),
                         config.getString("application_name"),
-                        config.getString("host")
+                        config.getString("application_host")
                 );
 
         CompositeMeterRegistry composite = new CompositeMeterRegistry();

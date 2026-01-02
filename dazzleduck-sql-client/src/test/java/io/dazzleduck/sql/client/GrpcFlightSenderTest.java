@@ -11,6 +11,7 @@ import org.apache.arrow.vector.types.pojo.*;
 import org.junit.jupiter.api.*;
 
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -74,7 +75,8 @@ class GrpcFlightSenderTest {
     @Test
     void ingestAndVerifyValues() throws Exception {
         Schema schema = new Schema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
-        String path = warehouse + "/names.parquet";
+        String path =  "names";
+        Files.createDirectories(Path.of(warehouse, path));
 
         try (GrpcFlightSender sender = new GrpcFlightSender(
                 schema,
@@ -97,7 +99,9 @@ class GrpcFlightSenderTest {
             sender.addRow(new JavaRow(new Object[]{"Sid"}));
         }
 
-        FlightInfo flightInfo = client.execute("SELECT name FROM '" + path + "' ORDER BY name");
+        var query = "SELECT name FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path) + " ORDER BY name";
+
+        FlightInfo flightInfo = client.execute(query);
         List<String> values = new java.util.ArrayList<>();
 
         try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {

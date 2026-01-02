@@ -9,8 +9,6 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.sql.SQLException;
 
-import static org.junit.Assert.assertNotNull;
-
 public class TransformationsTest {
     @Test
     public void testTransformation() throws SQLException, IOException {

@@ -29,6 +29,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.*;
@@ -288,6 +290,8 @@ public class HttpServerTest {
     @ParameterizedTest
     @ValueSource(strings = {"parquet", "arrow"})
     public void testIngestionPostNoPartition(String format) throws IOException, InterruptedException, SQLException {
+        var path = "abc";
+        Files.createDirectories(Path.of(warehousePath, "%s.%s".formatted(path, format)));
         String query = "select * from generate_series(10)";
         try (BufferAllocator allocator = new RootAllocator();
              DuckDBConnection connection = ConnectionPool.getConnection();
@@ -299,7 +303,7 @@ public class HttpServerTest {
                 streamWrite.writeBatch();
             }
             streamWrite.end();
-            var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=abc.%s".formatted(TEST_PORT1, format)))
+            var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=%s.%s".formatted(TEST_PORT1, path, format)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                     .header("Content-Type", ContentTypes.APPLICATION_ARROW)
@@ -308,7 +312,7 @@ public class HttpServerTest {
 
             var res = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, res.statusCode());
-            var testSql = String.format("select count(*) from read_%s('%s/abc.%s')", format, warehousePath, format);
+            var testSql = String.format("select count(*) from read_%s('%s/%s.%s/*.%s')", format, warehousePath, path, format, format);
             var lines = ConnectionPool.collectFirst(testSql, Long.class);
             assertEquals(11, lines);
         }
@@ -327,7 +331,9 @@ public class HttpServerTest {
                 streamWrite.writeBatch();
             }
             streamWrite.end();
-            var table = "table-single";
+            var table = "table_single";
+
+            Files.createDirectories(Path.of(warehousePath, table));
             var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=%s".formatted(TEST_PORT1, table)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
@@ -340,6 +346,7 @@ public class HttpServerTest {
             assertEquals(200, res.statusCode());
             var testSql = "select generate_series, a, b from read_parquet('%s/%s/*/*.parquet')".formatted(warehousePath, table);
             var expected = "select generate_series, generate_series a, (a+1) as b from generate_series(10) order by b desc";
+            System.out.println(testSql);
             TestUtils.isEqual(expected, testSql);
         }
     }
@@ -347,7 +354,9 @@ public class HttpServerTest {
 
     @Test
     public void testIngestionPostFromFile() throws SQLException, IOException, InterruptedException {
-        var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=file1.parquet".formatted(TEST_PORT1)))
+        var path = "file1";
+        Files.createDirectories(Path.of(warehousePath, path));
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=%s".formatted(TEST_PORT1, path)))
                 .POST(HttpRequest.BodyPublishers.ofInputStream(() -> {
                     try {
                         return new FileInputStream("example/arrow_ipc/file1.arrow");
@@ -357,7 +366,7 @@ public class HttpServerTest {
                 })).header("Content-Type", ContentTypes.APPLICATION_ARROW).build();
         var res = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, res.statusCode());
-        var testSql = String.format("select count(*) from read_parquet('%s/file1.parquet')", warehousePath);
+        var testSql = String.format("select count(*) from read_parquet('%s/%s/*.parquet')", warehousePath, path);
         var lines = ConnectionPool.collectFirst(testSql, Long.class);
         assertEquals(11, lines);
     }
@@ -388,6 +397,8 @@ public class HttpServerTest {
         final int totalRequests = 100;
         final int parallelism = 100;
         String query = "select generate_series, generate_series a from generate_series(10)";
+        var path = "table";
+        Files.createDirectories(Path.of(warehousePath, path));
         // Prepare Arrow payload once
         try (BufferAllocator allocator = new RootAllocator();
              DuckDBConnection connection = ConnectionPool.getConnection();
@@ -407,7 +418,7 @@ public class HttpServerTest {
                 int final1 = i;
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     try {
-                        var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=table".formatted(TEST_PORT1)))
+                        var request = HttpRequest.newBuilder(URI.create("http://localhost:%s/ingest?path=%s".formatted(TEST_PORT1, path)))
                                 .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                                         new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                                 .header("Content-Type", ContentTypes.APPLICATION_ARROW)
@@ -574,8 +585,10 @@ public class HttpServerTest {
         }
 
 
+        var path = "secure";
+        Files.createDirectories(Path.of(warehousePath, path));
         var authorizedReq = HttpRequest.newBuilder(
-                        URI.create("http://localhost:%s/ingest?path=secure.parquet".formatted(TEST_PORT2)))
+                        URI.create("http://localhost:%s/ingest?path=%s".formatted(TEST_PORT2, path)))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(arrowBytes))
                 .header("Content-Type", ContentTypes.APPLICATION_ARROW)
                 .header(HeaderNames.AUTHORIZATION.defaultCase(), auth)
@@ -587,7 +600,7 @@ public class HttpServerTest {
 
         // 5. Verify file exists by reading parquet
         long count = ConnectionPool.collectFirst(
-                "select count(*) from read_parquet('%s/secure.parquet')".formatted(warehousePath),
+                "select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehousePath, path),
                 Long.class);
 
         assertEquals(10, count);

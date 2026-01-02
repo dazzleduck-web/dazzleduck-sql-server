@@ -4,14 +4,11 @@ import io.dazzleduck.sql.commons.ConnectionPool;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.stream.Collectors;
 
-public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionResult> {
+public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResult> {
 
     private final String path;
     private final PostIngestionTaskFactory postIngestionTaskFactory;
@@ -50,6 +47,7 @@ public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionRe
 
     @Override
     public void write(WriteTask<String, IngestionResult> writeTask) {
+
         var batches = writeTask.bucket().batches();
         // All Arrow files
         var arrowFiles = batches.stream().map(Batch::record).map("'%s'"::formatted).collect(Collectors.joining(","));
@@ -63,6 +61,14 @@ public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionRe
         var selectClause = lastTransformation.isEmpty() ? "*" : "*, " + lastTransformation;
         // Last format
         var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
+        String fullFilePath;
+        if (lastPartition.isEmpty()) {
+            String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
+            fullFilePath = this.path + "/" + uniqueFileName;
+        } else {
+            fullFilePath = this.path;
+        }
+
         // Build SQL
         // https://duckdb.org/docs/stable/sql/statements/copy
         // Search for return File and stats during the copy statement.
@@ -73,7 +79,7 @@ public class ParquetIngestionQueue extends BulkIngestQueueV2<String, IngestionRe
                     (SELECT %s FROM read_%s([%s]) %s)
                     TO '%s'
                     (FORMAT %s %s, RETURN_FILES);
-                """.formatted(selectClause, this.inputFormat, arrowFiles, lastSortOrder, this.path, outputFormat, lastPartition);
+                """.formatted(selectClause, this.inputFormat, arrowFiles, lastSortOrder, fullFilePath, outputFormat, lastPartition);
         List<String> files = new ArrayList<>();
         long count = 0;
         try(var conn = ConnectionPool.getConnection();

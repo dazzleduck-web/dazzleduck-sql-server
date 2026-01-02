@@ -57,7 +57,6 @@ public class ParquetIngestionQueueTest {
     public void testBasicIngestion() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("output.parquet").toString();
 
         AtomicBoolean postTaskExecuted = new AtomicBoolean(false);
         var postTaskFactory = createPostTaskFactory(postTaskExecuted, false);
@@ -65,7 +64,7 @@ public class ParquetIngestionQueueTest {
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -79,7 +78,7 @@ public class ParquetIngestionQueueTest {
             service.tick(1, TimeUnit.MILLISECONDS);
             var result = future.get(2, SECONDS);
 
-            assertEquals(outputFile, result.queueName());
+            assertEquals(targetPath.toString(), result.queueName());
             assertEquals(TEST_APP_ID, result.applicationId());
             assertEquals(100, result.rowCount());
             assertFalse(result.filesCreated().isEmpty());
@@ -92,14 +91,13 @@ public class ParquetIngestionQueueTest {
     public void testIngestionWithTransformations() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("transformed.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -131,14 +129,13 @@ public class ParquetIngestionQueueTest {
     public void testIngestionWithSortOrder() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("sorted.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -170,14 +167,13 @@ public class ParquetIngestionQueueTest {
     public void testIngestionWithPartitioning() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("partitioned").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -211,7 +207,6 @@ public class ParquetIngestionQueueTest {
     public void testMultipleBatches() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("multi-batch.parquet").toString();
 
         AtomicInteger postTaskCount = new AtomicInteger(0);
         var postTaskFactory = new PostIngestionTaskFactory() {
@@ -224,7 +219,7 @@ public class ParquetIngestionQueueTest {
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_SMALL_BATCH_SIZE,  // Small batch size to trigger multiple writes
                 DEFAULT_MAX_DELAY,
@@ -251,14 +246,13 @@ public class ParquetIngestionQueueTest {
     public void testPostIngestionTaskFailure() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("post-fail.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), true);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -281,14 +275,13 @@ public class ParquetIngestionQueueTest {
     public void testCancellationDuringWrite() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("cancelled.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -318,14 +311,13 @@ public class ParquetIngestionQueueTest {
     public void testProducerSequenceTracking() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("sequence.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -352,14 +344,13 @@ public class ParquetIngestionQueueTest {
     public void testEmptyBatchHandling() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("empty.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_MIN_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,
@@ -382,14 +373,13 @@ public class ParquetIngestionQueueTest {
     public void testMultipleProducers() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
-        var outputFile = targetPath.resolve("multi-producer.parquet").toString();
 
         var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false);
 
         try (var queue = new ParquetIngestionQueue(
                 TEST_APP_ID,
                 INPUT_FORMAT,
-                outputFile,
+                targetPath.toString(),
                 "test-queue",
                 DEFAULT_SMALL_BATCH_SIZE,
                 DEFAULT_MAX_DELAY,

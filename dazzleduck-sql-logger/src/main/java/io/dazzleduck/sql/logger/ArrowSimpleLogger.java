@@ -24,6 +24,22 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
     @Serial
     private static final long serialVersionUID = 1L;
 
+    private static final Schema schema = new Schema(java.util.List.of(
+            new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("level", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("logger", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("thread", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("message", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_id", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_name", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_host", FieldType.nullable(new ArrowType.Utf8()), null)
+    ));
+
+    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logger");
+    private static final String CONFIG_APPLICATION_ID = config.getString("application_id");
+    private static final String CONFIG_APPLICATION_NAME = config.getString("application_name");
+    private static final String CONFIG_APPLICATION_HOST = config.getString("application_host");
+
     private static final DateTimeFormatter TS_FORMAT = DateTimeFormatter.ISO_INSTANT;
 
     // Static shared resources
@@ -36,54 +52,21 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
 
     // Instance fields
     private final String name;
+    private final FlightSender flightSender;
+    private final String application_id;
+    private final String application_name;
+    private final String application_host;
 
     public ArrowSimpleLogger(String name) {
         this.name = name;
     }
 
-    private static FlightSender getSender() {
-        if (flightSender == null) {
-            synchronized (ArrowSimpleLogger.class) {
-                if (flightSender == null) {
-                    ensureConfigLoaded();
-                    flightSender = createSenderFromConfig();
-                }
-            }
-        }
-        return flightSender;
-    }
-
-    private static void ensureConfigLoaded() {
-        if (config == null) {
-            synchronized (ArrowSimpleLogger.class) {
-                if (config == null) {
-                    config = ConfigFactory.load().getConfig("dazzleduck_logger");
-                    applicationId = config.getString("application_id");
-                    applicationName = config.getString("application_name");
-                    host = config.getString("host");
-                }
-            }
-        }
-    }
-
-    private static Schema schema() {
-        if (SCHEMA == null) {
-            synchronized (ArrowSimpleLogger.class) {
-                if (SCHEMA == null) {
-                    SCHEMA = new Schema(java.util.List.of(
-                            new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("level", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("logger", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("thread", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("message", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("applicationId", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("applicationName", FieldType.nullable(new ArrowType.Utf8()), null),
-                            new Field("host", FieldType.nullable(new ArrowType.Utf8()), null)
-                    ));
-                }
-            }
-        }
-        return SCHEMA;
+    public ArrowSimpleLogger(String name, FlightSender sender) {
+        this.name = name;
+        this.flightSender = sender;
+        this.application_id = CONFIG_APPLICATION_ID;
+        this.application_name = CONFIG_APPLICATION_NAME;
+        this.application_host = CONFIG_APPLICATION_HOST;
     }
 
     private static FlightSender createSenderFromConfig() {
@@ -95,7 +78,7 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
                 http.getString("base_url"),
                 http.getString("username"),
                 http.getString("password"),
-                file,
+                targetPath,
                 Duration.ofMillis(http.getLong("http_client_timeout_ms")),
                 config.getLong("min_batch_size"),
                 Duration.ofMillis(config.getLong("max_send_interval_ms")),
@@ -143,9 +126,9 @@ public final class ArrowSimpleLogger extends LegacyAbstractLogger implements Aut
                     name,
                     Thread.currentThread().getName(),
                     message,
-                    applicationId,
-                    applicationName,
-                    host
+                    application_id,
+                    application_name,
+                    application_host
             });
 
             sender.addRow(row);

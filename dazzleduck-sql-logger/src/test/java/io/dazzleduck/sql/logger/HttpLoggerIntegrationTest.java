@@ -1,5 +1,7 @@
 package io.dazzleduck.sql.logger;
 
+import com.typesafe.config.Config;
+import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import org.junit.jupiter.api.*;
 import org.slf4j.Logger;
@@ -13,6 +15,8 @@ public class HttpLoggerIntegrationTest {
 
     private static final int PORT = 8081;
     static String warehousePath;
+    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logger");
+    private static final String CONFIG_HTTP_TARGET_PATH = config.getString("http.target_path");
 
     @BeforeAll
     void startServer() throws Exception {
@@ -26,6 +30,8 @@ public class HttpLoggerIntegrationTest {
                 "--conf", "dazzleduck_server.warehouse=" + warehousePath,
                 "--conf", "dazzleduck_server.ingestion.max_delay_ms=200"
         });
+
+        Files.createDirectories(Path.of(warehousePath + "/" + CONFIG_HTTP_TARGET_PATH));
     }
 
     @Test
@@ -51,10 +57,10 @@ public class HttpLoggerIntegrationTest {
                            'io.dazzleduck.sql.logger.HttpLoggerIntegrationTest'  as logger,
                            'arrow-logger-async'              as thread,
                            'Test 0'            as message,
-                           'ap101'             as applicationId,
-                           'MyApplication'     as applicationName,
-                           'localhost'         as host
-                    """, "select level, logger, thread, message, applicationId, applicationName, host\n" +
+                           'ap101'             as application_id,
+                           'MyApplication'     as application_name,
+                           'localhost'         as application_host
+                    """, "select level, logger, thread, message, application_id, application_name, application_host\n" +
                             "from read_parquet('%s') where message = 'Test 0'".formatted(logFile.toAbsolutePath())
             );
     }
@@ -164,7 +170,7 @@ public class HttpLoggerIntegrationTest {
     }
 
     private Path findFirstLogFile(String warehousePath, String loggerName) throws Exception {
-        try (var stream = Files.list(Path.of(warehousePath))) {
+        try (var stream = Files.walk(Path.of(warehousePath))) {
             for (Path file : stream.filter(p -> p.toString().endsWith(".parquet")).toList()) {
                 try {
                     TestUtils.isEqual(

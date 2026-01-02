@@ -265,9 +265,9 @@ public class BulkIngestQueueV2Test {
                 executorService, clock);
     }
 
-    private BulkIngestQueueV2<String, MockWriteResult> createMockQueueWithLongRunningDuckDBWrite(ScheduledExecutorService executorService, Clock clock) {
+    private BulkIngestQueue<String, MockWriteResult> createMockQueueWithLongRunningDuckDBWrite(ScheduledExecutorService executorService, Clock clock) {
 
-        return new BulkIngestQueueV2<String, MockWriteResult>("test", DEFAULT_MIN_BATCH_SIZE, DEFAULT_MAX_DELAY,
+        return new BulkIngestQueue<String, MockWriteResult>("test", DEFAULT_MIN_BATCH_SIZE, DEFAULT_MAX_DELAY,
                 executorService, clock) {
             @Override
             public void write(WriteTask<String, MockWriteResult> writeTask) {
@@ -332,7 +332,7 @@ public class BulkIngestQueueV2Test {
     }
 
     // Helper class to test exception handling
-    static class MockBulkIngestQueueWithException extends BulkIngestQueueV2<String, MockWriteResult> {
+    static class MockBulkIngestQueueWithException extends BulkIngestQueue<String, MockWriteResult> {
         public MockBulkIngestQueueWithException(String identifier,
                                                long minBatchSize,
                                                Duration maxDelay,
@@ -348,7 +348,7 @@ public class BulkIngestQueueV2Test {
     }
 
     // Helper class to test partial exception handling (future already completed)
-    static class MockBulkIngestQueueWithPartialException extends BulkIngestQueueV2<String, MockWriteResult> {
+    static class MockBulkIngestQueueWithPartialException extends BulkIngestQueue<String, MockWriteResult> {
         public MockBulkIngestQueueWithPartialException(String identifier,
                                                        long minBatchSize,
                                                        Duration maxDelay,

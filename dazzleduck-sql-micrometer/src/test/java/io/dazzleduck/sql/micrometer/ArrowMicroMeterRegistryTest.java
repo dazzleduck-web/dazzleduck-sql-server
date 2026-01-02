@@ -34,18 +34,18 @@ class ArrowMicroMeterRegistryTest {
     private MockClock testClock;
     private static final Logger log = LoggerFactory.getLogger(ArrowMicroMeterRegistryTest.class);
     private File tempFile;
-    private String applicationId;
-    private String applicationName;
-    private String host;
+    private String application_id;
+    private String application_name;
+    private String application_host;
     static Schema schema;
     @BeforeEach
     void setup() {
 
         // Load test metadata EXACTLY like production
         Config dazzConfig = ConfigFactory.load().getConfig("dazzleduck_micrometer");
-        applicationId = dazzConfig.getString("application_id");
-        applicationName = dazzConfig.getString("application_name");
-        host = dazzConfig.getString("host");
+        application_id = dazzConfig.getString("application_id");
+        application_name = dazzConfig.getString("application_name");
+        application_host = dazzConfig.getString("application_host");
 
         testClock = new MockClock();
 
@@ -69,9 +69,9 @@ class ArrowMicroMeterRegistryTest {
                 sender,
                 testClock,
                 Duration.ofSeconds(5),      // step interval
-                applicationId,
-                applicationName,
-                host
+                application_id,
+                application_name,
+                application_host
         );
 
     }
@@ -93,9 +93,9 @@ class ArrowMicroMeterRegistryTest {
             ArrowFileWriterUtil.writeMetersToFile(
                     new ArrayList<>(registry.getMeters()),
                     tempFile.getAbsolutePath(),
-                    applicationId,
-                    applicationName,
-                    host
+                    application_id,
+                    application_name,
+                    application_host
             );
 
             TestUtils.isEqual(
@@ -143,9 +143,9 @@ class ArrowMicroMeterRegistryTest {
             ArrowFileWriterUtil.writeMetersToFile(
                     new ArrayList<>(registry.getMeters()),
                     tempFile.getAbsolutePath(),
-                    applicationId,
-                    applicationName,
-                    host
+                    application_id,
+                    application_name,
+                    application_host
             );
 
             TestUtils.isEqual(
@@ -168,9 +168,9 @@ class ArrowMicroMeterRegistryTest {
             ArrowFileWriterUtil.writeMetersToFile(
                     new ArrayList<>(registry.getMeters()),
                     tempFile.getAbsolutePath(),
-                    applicationId,
-                    applicationName,
-                    host
+                    application_id,
+                    application_name,
+                    application_host
             );
 
             TestUtils.isEqual(
@@ -195,9 +195,9 @@ class ArrowMicroMeterRegistryTest {
             ArrowFileWriterUtil.writeMetersToFile(
                     new ArrayList<>(registry.getMeters()),
                     tempFile.getAbsolutePath(),
-                    applicationId,
-                    applicationName,
-                    host
+                    application_id,
+                    application_name,
+                    application_host
             );
 
             TestUtils.isEqual(
@@ -224,9 +224,9 @@ class ArrowMicroMeterRegistryTest {
         ArrowFileWriterUtil.writeMetersToFile(
                 new ArrayList<>(registry.getMeters()),
                 tempFile.getAbsolutePath(),
-                applicationId,
-                applicationName,
-                host
+                application_id,
+                application_name,
+                application_host
         );
 
         Assertions.assertTrue(tempFile.exists(), "Temp file should exist after serialization");
@@ -256,11 +256,11 @@ class ArrowMicroMeterRegistryTest {
                 """
                 select 'test.summary' as name,
                        'distribution_summary' as type,
-                       'ap101' as applicationId,
-                       'MyApplication' as applicationName,
-                       'localhost' as host
+                       'ap101' as application_id,
+                       'MyApplication' as application_name,
+                       'localhost' as application_host
                 """,
-                "select name, type, applicationId, applicationName, host from read_arrow('%s')"
+                "select name, type, application_id, application_name, application_host from read_arrow('%s')"
                         .formatted(tempFile.getAbsolutePath())
         );
     }

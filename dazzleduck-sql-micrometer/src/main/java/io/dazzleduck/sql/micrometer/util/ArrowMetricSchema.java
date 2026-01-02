@@ -14,9 +14,9 @@ public final class ArrowMetricSchema {
             new Field("name", FieldType.notNullable(new ArrowType.Utf8()), null),
             new Field("type", FieldType.notNullable(new ArrowType.Utf8()), null),
 
-            new Field("applicationId", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("applicationName", FieldType.nullable(new ArrowType.Utf8()), null),
-            new Field("host", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_id", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_name", FieldType.nullable(new ArrowType.Utf8()), null),
+            new Field("application_host", FieldType.nullable(new ArrowType.Utf8()), null),
 
             // tags: Map<String, String>
             new Field("tags", FieldType.notNullable(new ArrowType.Map(false)), List.of(new Field("entries", FieldType.notNullable(new ArrowType.Struct()), List.of(new Field("key", FieldType.notNullable(new ArrowType.Utf8()), null), new Field("value", FieldType.nullable(new ArrowType.Utf8()), null))))),

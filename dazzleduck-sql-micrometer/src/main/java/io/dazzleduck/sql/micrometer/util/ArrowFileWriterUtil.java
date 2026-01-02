@@ -173,9 +173,9 @@ public final class ArrowFileWriterUtil {
 
         fields.add(new Field("name", FieldType.notNullable(new ArrowType.Utf8()), null));
         fields.add(new Field("type", FieldType.notNullable(new ArrowType.Utf8()), null));
-        fields.add(new Field("applicationId", FieldType.nullable(new ArrowType.Utf8()), null));
-        fields.add(new Field("applicationName", FieldType.nullable(new ArrowType.Utf8()), null));
-        fields.add(new Field("host", FieldType.nullable(new ArrowType.Utf8()), null));
+        fields.add(new Field("application_id", FieldType.nullable(new ArrowType.Utf8()), null));
+        fields.add(new Field("application_name", FieldType.nullable(new ArrowType.Utf8()), null));
+        fields.add(new Field("application_host", FieldType.nullable(new ArrowType.Utf8()), null));
         // tags: Map<String, String>
         Field keyField = new Field("key", FieldType.notNullable(new ArrowType.Utf8()), null);
         Field valField = new Field("value", FieldType.nullable(new ArrowType.Utf8()), null);

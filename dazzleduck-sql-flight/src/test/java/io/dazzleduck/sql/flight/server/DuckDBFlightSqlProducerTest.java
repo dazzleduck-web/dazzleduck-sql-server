@@ -419,6 +419,7 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     private void testPutStream(String filename) throws SQLException, IOException {
+        Files.createDirectories(Path.of(warehousePath, filename));
         String query = "select * from generate_series(10)";
         try(DuckDBConnection connection = ConnectionPool.getConnection();
             var reader = ConnectionPool.getReader( connection, clientAllocator, query, 1000 )) {

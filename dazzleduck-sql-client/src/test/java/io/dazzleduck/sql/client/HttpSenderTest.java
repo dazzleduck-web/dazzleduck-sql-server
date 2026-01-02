@@ -14,6 +14,7 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -93,13 +94,13 @@ public class HttpSenderTest {
         }
     }
 
-    private void verifyFile(String filename, long expectedCount) {
+    private void verifyFile(String path, long expectedCount) {
         await()
                 .pollInterval(6, TimeUnit.MILLISECONDS)
                 .atMost(3, TimeUnit.SECONDS)
                 .ignoreExceptions()
                 .untilAsserted(() -> {
-                    long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, filename), Long.class);
+                    long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse, path), Long.class);
                     assertEquals(expectedCount, count);
                 });
 
@@ -107,7 +108,8 @@ public class HttpSenderTest {
 
     @Test
     void testAsyncIngestionSingleBatch() throws Exception {
-        String file = "async-single-" + System.nanoTime() + ".parquet";
+        String file = "async-single-" + System.nanoTime();
+        Files.createDirectories(Path.of(warehouse, file));
         try (HttpSender sender = newSender(file, Duration.ofSeconds(10))) {
             sender.enqueue(arrowBytes("select * from generate_series(4)"));
         }
@@ -118,7 +120,8 @@ public class HttpSenderTest {
 
     @Test
     void testMultipleEnqueuesOverwriteBehavior() throws Exception {
-        String file = "overwrite-" + System.nanoTime() + ".parquet";
+        String file = "overwrite-" + System.nanoTime();
+        Files.createDirectories(Path.of(warehouse, file));
 
         try (HttpSender overwriteSender = new HttpSender(
                 schema,
@@ -137,12 +140,13 @@ public class HttpSenderTest {
         }
 
         // Verify after close() has flushed all data
-        verifyFile(file, 3);
+        verifyFile(file, 5);
     }
 
     @Test
     void testConcurrentEnqueues() throws Exception {
-        String file = "concurrent-" + System.nanoTime() + ".parquet";
+        String file = "concurrent-" + System.nanoTime();
+        Files.createDirectories(Path.of(warehouse, file));
         CountDownLatch latch = new CountDownLatch(5);
         AtomicInteger errors = new AtomicInteger(0);
 
@@ -163,7 +167,7 @@ public class HttpSenderTest {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
             assertEquals(0, errors.get());
             await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
-                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, file), Long.class);
+                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse, file), Long.class);
                 assertTrue(count >= 0);
             });
         }
@@ -171,7 +175,8 @@ public class HttpSenderTest {
 
     @Test
     void testJWTTokenReuse() throws Exception {
-        String file = "jwt-reuse-" + System.nanoTime() + ".parquet";
+        String file = "jwt-reuse-" + System.nanoTime() ;
+        Files.createDirectories(Path.of(warehouse, file));
 
         // Multiple requests should reuse the same token
         try (HttpSender ReuseSender = newSender(file, Duration.ofSeconds(5))) {
@@ -180,7 +185,7 @@ public class HttpSenderTest {
             }
 
             await().atMost(5, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
-                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, file), Long.class);
+                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse, file), Long.class);
                 assertTrue(count >= 1);
             });
         }
@@ -188,7 +193,8 @@ public class HttpSenderTest {
 
     @Test
     void testHighThroughput() throws Exception {
-        String file = "high-throughput-" + System.nanoTime() + ".parquet";
+        String file = "high-throughput-" + System.nanoTime();
+        Files.createDirectories(Path.of(warehouse, file));
 
         // Rapid fire 20 small batches
         try (HttpSender HighThroughput = newSender(file, Duration.ofSeconds(5))) {
@@ -196,7 +202,7 @@ public class HttpSenderTest {
                 HighThroughput.enqueue(arrowBytes("select " + i + " as val"));
             }
             await().atMost(2, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
-                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s')".formatted(warehouse, file), Long.class);
+                long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse, file), Long.class);
                 assertTrue(count >= 1);
             });
         }
@@ -233,14 +239,16 @@ public class HttpSenderTest {
 
     @Test
     void testMemoryDiskSwitching() throws Exception {
-        var spillSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", "spill.parquet", Duration.ofSeconds(10), 100_000,
+        var path = "spill";
+        Files.createDirectories(Path.of(warehouse, path));
+        var spillSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", path, Duration.ofSeconds(10), 100_000,
                 Duration.ofSeconds(2),50, 100_000);
 
 
         spillSender.enqueue(arrowBytes("select * from generate_series(30)"));
 
         await().atMost(10, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
-            long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/spill.parquet')".formatted(warehouse), Long.class);
+            long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse,path), Long.class);
             assertEquals(31, count);
         });
 

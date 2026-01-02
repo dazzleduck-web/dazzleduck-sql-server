@@ -1,185 +1,22 @@
 package io.dazzleduck.sql.commons.ingestion;
 
-import io.dazzleduck.sql.commons.ConnectionPool;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.channels.Channels;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<T, R> {
-    private final ScheduledExecutorService executorService;
-    private final Duration maxDelay;
-    private final String identifier;
-    private final long maxBucketSize;
-    private final Map<String, Long> inProgressBatchIds = new HashMap<>();
-    private final Set<ScheduledCheckTask> scheduledCheckTasks = new HashSet<>();
-    private final Clock clock;
-    private long awaitingWriteMemorySize = 0;
-    private long writeInProgressSize = 0;
-    private Instant expectedNextTrigger = Instant.ofEpochMilli(Long.MAX_VALUE);
-    private Bucket<T,R> currentBucket;
-    private long totalWrite;
-    private long totalWriteBatches;
-    private long totalTimeSpentWriting;
-    private long writeTaskId;
-    private long scheduledWriteCount;
-
-    private boolean terminating;
-
-    /**
-     * Thw write will be performed as soon as bucket is full or after the maxDelay is exported since the first batch is inserted
-     *
-     * @param identifier      identify the queue. Generally this will the path of the bucket
-     * @param minBucketSize   size of the bucket. Write will be performed as soon as bucket is full or overflowing
-     * @param maxDelay        write will be performed just after this delay.
-     * @param executorService Executor service.
-     * @param clock
-     */
-    public BulkIngestQueue(String identifier,
-                           long minBucketSize,
-                           Duration maxDelay,
-                           ScheduledExecutorService executorService,
-                           Clock clock) {
-        this.maxBucketSize = minBucketSize;
-        this.identifier = identifier;
-        this.executorService = executorService;
-        this.maxDelay = maxDelay;
-        this.clock = clock;
-        this.currentBucket = new Bucket<>(minBucketSize, maxDelay);
-    }
-
-    public String identifier() {
-        return identifier;
-    }
-
-    public synchronized Future<R> add(Batch<T> batch) {
-        if (terminating) {
-            throw new IllegalStateException("Queue is terminating");
-        }
-        if (batch.producerId() != null) {
-            var progressBatch = inProgressBatchIds.get(batch.producerId());
-            if (progressBatch != null && progressBatch >= batch.producerBatchId()) {
-                return CompletableFuture.failedFuture(
-                        new OutOfSequenceBatch(progressBatch, batch.producerBatchId()));
-            }
-        }
-        var result = new CompletableFuture<R>();
-        currentBucket.add(batch, result);
-        updateStatsWithNewBatch(batch);
-        triggerWriteIfRequired(null);
-        return result;
-    }
-
-    private synchronized void triggerWriteIfRequired(ScheduledCheckTask task) {
-        // When write is performed all task which were scheduled need tp be skipped
-        // since write has already emptied the bucket
-        if (task != null && task.isCanceled()) {
-            return;
-        }
-        var currentTime = clock.instant();
-
-
-        // scheduleNow if because bucket is full
-        if (currentBucket.readyForWrite(currentTime)){
-            scheduledCheckTasks.forEach(ScheduledCheckTask::cancel);
-            scheduledCheckTasks.clear();
-            scheduleNow(currentBucket.timeExpired(currentTime));
-            return;
-        }
-        // If it's not schedules already then schedule it.
-        if (scheduledCheckTasks.isEmpty()) {
-            var delay = expectedNextTrigger.toEpochMilli() - currentTime.toEpochMilli();
-            var scheduledTask = new ScheduledCheckTask();
-            scheduledCheckTasks.add(scheduledTask);
-            executorService.schedule(() -> triggerWriteIfRequired(scheduledTask), delay, TimeUnit.MILLISECONDS);
-        }
-    }
-
-    /**
-     * Empty the bucket. Update stats. Cancel all previously scheduled task
-     *
-     * @param isScheduledWrite is this a schedule write or because bucket is full
-     */
-    private synchronized void scheduleNow(boolean isScheduledWrite) {
-        if (isScheduledWrite) {
-            scheduledWriteCount++;
-        }
-        Bucket<T, R> toWrite = currentBucket;
-        currentBucket = new Bucket<>(maxBucketSize, maxDelay);
-        writeInProgressSize = awaitingWriteMemorySize;
-        awaitingWriteMemorySize = 0;
-        expectedNextTrigger = Instant.ofEpochMilli(Long.MAX_VALUE);
-        var writeTask = new WriteTask<T, R>(writeTaskId++, clock.instant(), toWrite);
-        writeInProgressSize += writeTask.size();
-        executorService.submit(() -> {
-            var start = clock.instant();
-            writeInProgressSize = writeTask.size();
-            write(writeTask);
-            var end = clock.instant();
-            updatePostWriteStats(writeTask, end.toEpochMilli() - start.toEpochMilli());
-        });
-    }
-
-
-    private synchronized void updatePostWriteStats(WriteTask<T, R> writeTask,
-                                                   long timeSpentWriting) {
-        totalWrite += writeTask.size();
-        writeInProgressSize = 0;
-        totalWriteBatches++;
-        totalTimeSpentWriting += timeSpentWriting;
-    }
-
-    private void updateStatsWithNewBatch(Batch<T> batch) {
-        inProgressBatchIds.put(batch.producerId(), batch.producerBatchId());
-        awaitingWriteMemorySize += batch.totalSize();
-        var n = batch.receivedTime().plus(maxDelay);
-        if (expectedNextTrigger.isAfter(n)) {
-            expectedNextTrigger = n;
-        }
-    }
-
-    public synchronized Stats getStats() {
-        return null;
-        //return new Stats(identifier, totalWrite, totalWriteBatches, totalTimeSpentWriting, scheduledWriteCount);
-    }
-
-    private static class ScheduledCheckTask {
-        private boolean canceled = false;
-
-        private boolean isCanceled() {
-            return canceled;
-        }
-
-        private void cancel() {
-            this.canceled = true;
-        }
-    }
-
-    public static Path writeAndValidateTempArrowFile(Path tempDir, InputStream inputStream) throws IOException {
-        String uniqueFileName = "ingestion_" + UUID.randomUUID() + ".arrow";
-        Path tempFilePath = tempDir.resolve(uniqueFileName);
-        try (OutputStream out = Files.newOutputStream(tempFilePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-            inputStream.transferTo(out);
-        }
-        return tempFilePath;
-    }
 
     public static Path writeAndValidateTempArrowFile(Path tempDir, ArrowReader reader) throws IOException {
         String uniqueFileName = "ingestion_" + UUID.randomUUID() + ".arrow";
@@ -193,17 +30,184 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         }
         return tempFilePath;
     }
+    private static final int MAX_PRODUCER_IDS = 10000;
+    private final Map<String, Long> inProgressBatchIds = new LinkedHashMap<String, Long>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+            return size() > MAX_PRODUCER_IDS;
+        }
+    };
+    private final long minBucketSize;
+    private final String identifier;
+    private final ScheduledExecutorService executorService;
+    private final Duration maxDelay;
+    private final Clock clock;
+    private Instant lastWrite = Instant.EPOCH;
+    private Bucket<T, R> currentBucket;
+    private volatile boolean terminating;
 
-    public static Path writeAndValidateTempParquetFile(Path tempDir, ArrowReader reader, BufferAllocator allocator) throws  SQLException {
+    private volatile WriteTask<T, R> runningWrite;
+    private long writeTaskId;
 
-        String uniqueFileName = "ingestion_" + UUID.randomUUID() + ".parquet";
-        Path tempFilePath = tempDir.resolve(uniqueFileName);
-        ConnectionPool.bulkIngestToFile(reader, allocator, tempFilePath.toString(), List.of(),"parquet");
-        return tempFilePath;
+    private final BlockingQueue<WriteTask<T, R>> writeQueue = new LinkedBlockingQueue<>();
+    private final Thread writeThread;
+    private final AtomicLong totalWriteBatches = new AtomicLong();
+    private final AtomicLong totalWriteBuckets = new AtomicLong();
+    private final AtomicLong acceptedBatches = new AtomicLong();
+    private final AtomicLong bucketsCreated =  new AtomicLong();
+
+    public BulkIngestQueue(String identifier,
+                           long minBucketSize,
+                           Duration maxDelay,
+                           ScheduledExecutorService executorService,
+                           Clock clock) {
+        this.minBucketSize = minBucketSize;
+        this.identifier = identifier;
+        this.executorService = executorService;
+        this.maxDelay = maxDelay;
+        this.clock = clock;
+        createNewBucket();
+        this.writeThread = new Thread(this::processWriteQueue, "BulkIngestQueue-" + identifier + "-writer");
+        this.writeThread.setDaemon(true);
+        this.writeThread.start();
+        executorService.schedule(this::triggerWriteIfRequired, maxDelay.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void createNewBucket(){
+        this.currentBucket = new Bucket<>(minBucketSize, maxDelay);
+        bucketsCreated.incrementAndGet();
+    }
+
+
+    private void processWriteQueue() {
+        while (!terminating) {
+            try {
+                var task = writeQueue.take();
+                runningWrite = task;
+                try {
+                    write(task);
+                    totalWriteBatches.addAndGet(task.bucket().batches().size());
+                    totalWriteBuckets.incrementAndGet();
+                } catch (Exception e) {
+                    // Complete futures with exception but continue processing remaining tasks
+                    for (var future : task.bucket().futures()) {
+                        if (!future.isDone()) {
+                            future.completeExceptionally(e);
+                        }
+                    }
+                    // Don't break - continue processing the next task in the queue
+                } finally {
+                    runningWrite = null;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
     }
 
     @Override
-    public void close() {
+    public Stats getStats(){
+        var totalWrite = totalWriteBatches.get();
+        var accepted = acceptedBatches.get();
+        return new Stats(identifier, 0, totalWriteBatches.get(), totalWriteBuckets.get(), 0,accepted - totalWrite, writeQueue.size());
+    }
+
+    @Override
+    public String identifier() {
+        return identifier;
+    }
+
+    public synchronized CompletableFuture<R> add(Batch<T> batch) {
+        if (terminating) {
+            throw new IllegalStateException("The queue is closed");
+        }
+        if (batch.producerId() != null) {
+            var progressBatch = inProgressBatchIds.get(batch.producerId());
+            if (progressBatch != null && progressBatch >= batch.producerBatchId()) {
+                return CompletableFuture.failedFuture(
+                        new OutOfSequenceBatch(progressBatch, batch.producerBatchId()));
+            }
+        }
+        var result = new CompletableFuture<R>();
+        currentBucket.add(batch, result);
+        acceptedBatches.incrementAndGet();
+        if (batch.producerId() != null) {
+            inProgressBatchIds.put(batch.producerId(), batch.producerBatchId());
+        }
+        if (currentBucket.isFull()) {
+           submitWriteTask();
+        }
+        return result;
+    }
+
+    private synchronized void triggerWriteIfRequired() {
+        if (terminating) {
+            return;
+        }
+        var now = clock.instant();
+        if (currentBucket.isEmpty()) {
+                scheduleNextTrigger(now);
+                return;
+        }
+
+        var nextWrite = lastWrite.plus(maxDelay);
+        if (currentBucket.isFull() || !nextWrite.isAfter(now)) {
+            submitWriteTask();
+        } else {
+            scheduleNextTrigger(now);
+        }
+    }
+
+    private void scheduleNextTrigger(Instant now) {
+        var nextTrigger = lastWrite.plus(maxDelay);
+        var timeRemaining = Duration.between(now, nextTrigger);
+        executorService.schedule(this::triggerWriteIfRequired, Math.max(0, timeRemaining.toMillis()), TimeUnit.MILLISECONDS);
+    }
+
+    private synchronized void submitWriteTask() {
+        if (currentBucket.isEmpty()) {
+            return;
+        }
+        var toWrite = currentBucket;
+        toWrite.markFinalized();
+        createNewBucket();
+        var writeTask = new WriteTask<T, R>(writeTaskId++, clock.instant(), toWrite);
+        lastWrite = clock.instant();
+        writeQueue.offer(writeTask);
+        if (!terminating) {
+            scheduleNextTrigger(clock.instant());
+        }
+    }
+    @Override
+    public synchronized void close() throws Exception {
         terminating = true;
+        var c = runningWrite;
+        if (c != null) {
+            c.cancel();
+        }
+
+        // Interrupt and wait for write thread to finish processing
+        // The write thread will exit the loop when it sees terminating=true,
+        // or when interrupted if it's blocked waiting for a task
+        writeThread.interrupt();
+        writeThread.join();
+
+        // Fail any futures in the current bucket
+        var exception = new IllegalStateException("Server shutting down before batch could be written");
+        if (!currentBucket.isEmpty()) {
+            for (var future : currentBucket.futures()) {
+                future.completeExceptionally(exception);
+            }
+        }
+
+
+        // Fail any remaining tasks that weren't processed
+        WriteTask<T, R> remaining;
+        while ((remaining = writeQueue.poll()) != null) {
+            for (var future : remaining.bucket().futures()) {
+                future.completeExceptionally(exception);
+            }
+        }
     }
 }

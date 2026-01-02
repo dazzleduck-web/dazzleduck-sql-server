@@ -11,23 +11,11 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Array;
-import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.*;
-
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
+import java.util.List;
 
 public class ConnectionPoolTest {
 
-    private void test() {
-        try {
-            TestUtils.isEqual("select 't' as name", "select * from (show tables)");
-        } catch (SQLException | IOException | AssertionError e) {
-            throw new RuntimeException(e);
-        }
-    }
 
     private static String newTempDir() throws IOException {
         Path tempDir = Files.createTempDirectory("duckdb-sql-commons-");
@@ -71,7 +59,7 @@ public class ConnectionPoolTest {
 
     @Test
     public void testCollectAll() throws SQLException {
-        record LongAndString( String s, long l, long[] longArray, Long nullLong,  long[] nullLongArray, String[] stringArray, String[] nullStringArray){};
+        record LongAndString( String s, long l, long[] longArray, Long nullLong,  long[] nullLongArray, String[] stringArray, String[] nullStringArray){}
         String sql = "select 's' as s, cast(1 as bigint) as l, [cast(1 as bigint)], null, null, ['one', null, 'two'], null";
         try( var c = ConnectionPool.getConnection()) {
             var it = ConnectionPool.collectAll(c, sql, LongAndString.class);
@@ -124,7 +112,7 @@ public class ConnectionPoolTest {
     }
 
     @Test
-    public void testExecuteBatchInTxnFailure() throws SQLException, IOException {
+    public void testExecuteBatchInTxnFailure(){
         String[] sqls = {
                 "CREATE TABLE batch_in_txn(key int)",
                 // Incorrect statement for txn rollback

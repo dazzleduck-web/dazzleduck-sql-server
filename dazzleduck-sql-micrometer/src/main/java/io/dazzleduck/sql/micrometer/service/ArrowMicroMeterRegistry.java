@@ -21,9 +21,9 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
             LoggerFactory.getLogger(ArrowMicroMeterRegistry.class);
 
     private final FlightSender sender;
-    private final String applicationId;
-    private final String applicationName;
-    private final String host;
+    private final String application_id;
+    private final String application_name;
+    private final String application_host;
 
     public ArrowMicroMeterRegistry(
             FlightSender sender,
@@ -31,7 +31,7 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
             Duration step,
             String applicationId,
             String applicationName,
-            String host
+            String applicationHost
     ) {
         super(new StepRegistryConfig() {
             @Override public String prefix() { return "arrow"; }
@@ -40,9 +40,9 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
         }, clock);
 
         this.sender = sender;
-        this.applicationId = applicationId;
-        this.applicationName = applicationName;
-        this.host = host;
+        this.application_id = applicationId;
+        this.application_name = applicationName;
+        this.application_host = applicationHost;
     }
 
     @Override
@@ -120,9 +120,9 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
         return new JavaRow(new Object[]{
                 id.getName(),
                 id.getType().name().toLowerCase(),
-                applicationId,
-                applicationName,
-                host,
+                application_id,
+                application_name,
+                application_host,
                 tags,
                 value,
                 min,

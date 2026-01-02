@@ -70,12 +70,12 @@ public class HttpMetricIntegrationTest {
                 select 'records.processed' as name,
                        'counter'           as type,
                        10.0                as value,
-                       'ap101'             as applicationId,
-                       'MyApplication'     as applicationName,
-                       'localhost'         as host
+                       'ap101'             as application_id,
+                       'MyApplication'     as application_name,
+                       'localhost'         as application_host
                 """,
                 """
-                select name, type, value, applicationId, applicationName, host
+                select name, type, value, application_id, application_name, hostapplication_host
                 from read_parquet('%s')
                 where name = 'records.processed'
                 """.formatted(metricFile.toAbsolutePath())

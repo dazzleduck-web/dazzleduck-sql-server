@@ -34,7 +34,6 @@ import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.WriteChannel;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.parquet.filter2.predicate.Operators;
 import org.duckdb.DuckDBConnection;
 import org.duckdb.DuckDBResultSetMetaData;
 import org.duckdb.StatementReturnType;
@@ -227,7 +226,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
     private final SqlInfoBuilder sqlInfoBuilder;
 
     private final IngestionConfig bulkIngestionConfig;
-    private final ConcurrentHashMap<String, BulkIngestQueueV2<String, IngestionResult>> ingestionQueueMap =
+    private final ConcurrentHashMap<String, BulkIngestQueue<String, IngestionResult>> ingestionQueueMap =
             new ConcurrentHashMap<>();
 
     private final PostIngestionTaskFactory postIngestionTaskFactory;
@@ -342,7 +341,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
         this.scheduledExecutorService = scheduledExecutorService;
         this.queryTimeout = queryTimeout;
         this.recorder = recorder;
-        if(AccessMode.RESTRICTED ==  accessMode) {
+        if (AccessMode.RESTRICTED == accessMode) {
             this.sqlAuthorizer = SqlAuthorizer.JWT_AUTHORIZER;
         } else {
             this.sqlAuthorizer = SqlAuthorizer.NOOP_AUTHORIZER;
@@ -987,6 +986,17 @@ public class DuckDBFlightSqlProducer implements FlightSqlProducer, AutoCloseable
             scheduledExecutorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
+
+        for (var entry : ingestionQueueMap.entrySet()) {
+            try {
+                logger.atDebug().log("Closing ingestion queue for path: {}", entry.getKey());
+                entry.getValue().close();
+            } catch (Exception e) {
+                logger.atWarn().setCause(e).log("Failed to close ingestion queue for path: {}", entry.getKey());
+            }
+        }
+        ingestionQueueMap.clear();
+
         allocator.close();
     }
 

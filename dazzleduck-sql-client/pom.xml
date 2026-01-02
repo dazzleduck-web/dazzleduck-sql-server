@@ -61,6 +61,13 @@
             <artifactId>flight-sql</artifactId>
             <version>${arrow.version}</version>
         </dependency>
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>7.4</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
 </project>

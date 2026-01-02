@@ -4,7 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
 
-public class MockBulkIngestQueue extends BulkIngestQueueV2<String, MockWriteResult> {
+public class MockBulkIngestQueue extends BulkIngestQueue<String, MockWriteResult> {
     public MockBulkIngestQueue(String identifier,
                                long minBatchSize,
                                Duration maxDelay,
