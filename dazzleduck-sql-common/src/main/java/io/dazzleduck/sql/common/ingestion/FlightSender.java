@@ -50,6 +50,14 @@ public interface FlightSender extends Closeable {
 
         private final Duration maxDataSendInterval;
 
+        private final int retryCount;
+
+        private final long retryIntervalMillis;
+
+        private final java.util.List<String> transformations;
+
+        private final java.util.List<String> partitionBy;
+
         private Instant lastSent;
         private Bucket currentBucket;
         final Schema schema;
@@ -59,13 +67,17 @@ public interface FlightSender extends Closeable {
         private final ScheduledExecutorService executorService;
 
 
-        public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock){
-            this(minBatchSize, maxDataSendInterval, schema, clock, Executors.newSingleThreadScheduledExecutor());
+        public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock, int retryCount, long retryIntervalMillis, java.util.List<String> transformations, java.util.List<String> partitionBy){
+            this(minBatchSize, maxDataSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy, Executors.newSingleThreadScheduledExecutor());
         }
-        public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock, ScheduledExecutorService scheduledExecutorService ){
-            logger.info("FlightSender started at {} with send interval {}", clock.instant(), maxDataSendInterval);
+        public AbstractFlightSender(long minBatchSize, Duration maxDataSendInterval, Schema schema, Clock clock, int retryCount, long retryIntervalMillis, java.util.List<String> transformations, java.util.List<String> partitionBy, ScheduledExecutorService scheduledExecutorService ){
+            logger.info("FlightSender started at {} with send interval {}, retryCount {}, retryIntervalMillis {}, transformations {}, partitionBy {}", clock.instant(), maxDataSendInterval, retryCount, retryIntervalMillis, transformations, partitionBy);
             this.minBatchSize = minBatchSize;
             this.maxDataSendInterval = maxDataSendInterval;
+            this.retryCount = retryCount;
+            this.retryIntervalMillis = retryIntervalMillis;
+            this.transformations = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(transformations));
+            this.partitionBy = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(partitionBy));
             this.clock = clock;
             this.schema = schema;
             this.lastSent = clock.instant();
@@ -76,7 +88,7 @@ public interface FlightSender extends Closeable {
                         var current = queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
                         if (current != null) {
                             try {
-                                doSend(current);
+                                doSendWithRetry(current);
                                 updateState(current);
                             } finally {
                                 // Always close the element after sending (successful or not)
@@ -89,7 +101,7 @@ public interface FlightSender extends Closeable {
                             SendElement element;
                             while ((element = queue.poll()) != null) {
                                 try {
-                                    doSend(element);
+                                    doSendWithRetry(element);
                                     updateState(element);
                                 } catch (InterruptedException ex) {
                                     // If interrupted again, exit
@@ -195,8 +207,67 @@ public interface FlightSender extends Closeable {
             }
         }
 
+        private void doSendWithRetry(SendElement element) throws InterruptedException {
+            int attempt = 0;
+            Exception lastException = null;
+
+            while (attempt <= retryCount) {
+                try {
+                    doSend(element);
+                    if (attempt > 0) {
+                        logger.info("Successfully sent element after {} retries", attempt);
+                    }
+                    return; // Success, exit the retry loop
+                } catch (InterruptedException e) {
+                    // Don't retry on interruption, propagate immediately
+                    throw e;
+                } catch (Exception e) {
+                    lastException = e;
+                    attempt++;
+
+                    // Don't retry if we're shutting down
+                    if (shutdown) {
+                        logger.warn("Sender is shutting down, skipping retry for failed send: {}", e.getMessage());
+                        return;
+                    }
+
+                    if (attempt <= retryCount) {
+                        logger.warn("Failed to send element (attempt {}/{}): {}", attempt, retryCount + 1, e.getMessage());
+                        try {
+                            Thread.sleep(retryIntervalMillis);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw ie;
+                        }
+                    } else {
+                        logger.error("Failed to send element after {} attempts", attempt, e);
+                    }
+                }
+            }
+
+            // If we exhausted all retries, log the final failure
+            if (lastException != null) {
+                logger.error("Exhausted all {} retry attempts, element will be dropped", retryCount + 1, lastException);
+            }
+        }
+
         abstract protected void doSend(SendElement element) throws InterruptedException;
 
+        protected int getRetryCount() {
+            return retryCount;
+        }
+
+        protected long getRetryIntervalMillis() {
+            return retryIntervalMillis;
+        }
+
+        protected java.util.List<String> getTransformations() {
+            return transformations;
+        }
+
+        protected java.util.List<String> getPartitionBy() {
+            return partitionBy;
+        }
 
         @Override
         public void close()  {

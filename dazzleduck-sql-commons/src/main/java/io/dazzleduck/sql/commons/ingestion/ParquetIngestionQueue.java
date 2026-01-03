@@ -2,6 +2,7 @@ package io.dazzleduck.sql.commons.ingestion;
 
 import io.dazzleduck.sql.commons.ConnectionPool;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.*;
@@ -47,22 +48,39 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
     @Override
     public void write(WriteTask<String, IngestionResult> writeTask) {
+        try {
+            IngestionResult ingestionResult = tryWrite(writeTask);
+            var postIngestionTask = postIngestionTaskFactory.create(ingestionResult);
+            postIngestionTask.execute();
+            writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
+        }  catch (Exception e) {
+            writeTask.bucket().futures().forEach(action -> action.completeExceptionally(e));
+        }
+    }
 
+    private String getClause(String[] values, String clause){
+        if(values == null || values.length == 0){
+            return "";
+        } else {
+            var nested = Arrays.stream(values).filter(Objects::nonNull).map(String::trim).collect(Collectors.joining(","));
+            return clause.formatted(nested);
+        }
+    }
+
+    private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask) throws Exception {
         var batches = writeTask.bucket().batches();
         // All Arrow files
         var arrowFiles = batches.stream().map(Batch::record).map("'%s'"::formatted).collect(Collectors.joining(","));
-        // Last transformation
-        var lastTransformation = batches.stream().map(Batch::transformations).filter(Objects::nonNull).flatMap(Arrays::stream).map(String::trim).filter(s -> !s.isEmpty()).distinct().toList().stream().reduce((a, b) -> b).orElse("");
-        // Last sort order
-        var lastSortOrder = batches.stream().map(Batch::sortOrder).filter(Objects::nonNull).flatMap(Arrays::stream).map(String::trim).filter(s -> !s.isEmpty()).distinct().reduce((a, b) -> b).map(s -> " ORDER BY " + s).orElse("");
-        // Last partition
-        var lastPartition = batches.stream().map(Batch::partitions).filter(Objects::nonNull).flatMap(Arrays::stream).map(String::trim).filter(s -> !s.isEmpty()).distinct().reduce((a, b) -> b).map(s -> ", PARTITION_BY (" + s + ")").orElse("");
+        String firstTransformationString = getClause(batches.get(0).transformations(), "%s");
+        String firstPartitionString = getClause(batches.get(0).partitions(), ", PARTITION_BY(%s)");
+        var firstSortOrder = getClause(batches.get(0).sortOrder(), "ORDER BY %s ");
+
         // Select clause
-        var selectClause = lastTransformation.isEmpty() ? "*" : "*, " + lastTransformation;
+        var selectClause = firstTransformationString.isEmpty() ? "*" : "*, " + firstTransformationString;
         // Last format
         var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
         String fullFilePath;
-        if (lastPartition.isEmpty()) {
+        if (firstPartitionString.isEmpty()) {
             String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
             fullFilePath = this.path + "/" + uniqueFileName;
         } else {
@@ -79,11 +97,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     (SELECT %s FROM read_%s([%s]) %s)
                     TO '%s'
                     (FORMAT %s %s, RETURN_FILES);
-                """.formatted(selectClause, this.inputFormat, arrowFiles, lastSortOrder, fullFilePath, outputFormat, lastPartition);
+                """.formatted(selectClause, this.inputFormat, arrowFiles, firstSortOrder, fullFilePath, outputFormat, firstPartitionString);
         List<String> files = new ArrayList<>();
         long count = 0;
-        try(var conn = ConnectionPool.getConnection();
-            var stmt = conn.createStatement()){
+        try (var conn = ConnectionPool.getConnection();
+             var stmt = conn.createStatement()) {
 
             // Set up cancellation hook
             var cancelHookSet = writeTask.setCancelHook(() -> {
@@ -96,9 +114,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
             // If cancel was already called, don't execute the query
             if (!cancelHookSet) {
-                writeTask.bucket().futures().forEach(action ->
-                    action.completeExceptionally(new IllegalStateException("Write task was cancelled")));
-                return;
+                throw new IllegalStateException("Write task was cancelled");
             }
 
             // Execute the query using our statement so the cancel hook works
@@ -114,21 +130,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     }
                 }
             }
-        } catch (Exception e ) {
-            writeTask.bucket().futures().forEach(action -> action.completeExceptionally(e));
-            return;
         }
-        var ingestionResult = new IngestionResult(this.path, writeTask.taskId(), this.applicationId,
+        return new IngestionResult(this.path, writeTask.taskId(), this.applicationId,
                 writeTask.bucket().getProducerMaxBatchId(),
                 count,
                 files);
-        try {
-            var postIngestionTask = postIngestionTaskFactory.create(ingestionResult);
-            postIngestionTask.execute();
-            writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
-        }  catch (Exception e) {
-            writeTask.bucket().futures().forEach(action -> action.completeExceptionally(e));
-        }
     }
-
 }

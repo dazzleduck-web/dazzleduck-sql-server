@@ -54,6 +54,10 @@ public final class LogProcessorMain {
                 Duration.ofMillis(CONFIG_HTTP_TIMEOUT_MS),
                 CONFIG_MIN_BATCH_SIZE,
                 Duration.ofMillis(CONFIG_MAX_SEND_INTERVAL_MS),
+                config.getInt("retry_count"),
+                config.getLong("retry_interval_ms"),
+                config.getStringList("transformations"),
+                config.getStringList("partition_by"),
                 CONFIG_MAX_IN_MEMORY_BYTES,
                 CONFIG_MAX_ON_DISK_BYTES
         );

@@ -72,6 +72,10 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger implements AutoClose
                 Duration.ofMillis(http.getLong("http_client_timeout_ms")),
                 config.getLong("min_batch_size"),
                 Duration.ofMillis(config.getLong("max_send_interval_ms")),
+                config.getInt("retry_count"),
+                config.getLong("retry_interval_ms"),
+                config.getStringList("transformations"),
+                config.getStringList("partition_by"),
                 config.getLong("max_in_memory_bytes"),
                 config.getLong("max_on_disk_bytes")
         );

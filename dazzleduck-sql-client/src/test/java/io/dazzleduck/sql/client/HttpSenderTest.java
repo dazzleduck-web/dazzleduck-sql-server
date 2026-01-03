@@ -74,6 +74,10 @@ public class HttpSenderTest {
                 timeout,
                 100_000,
                 Duration.ofSeconds(1),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of(),
                 100,
                 100_000, Clock.systemDefaultZone()
         );
@@ -132,6 +136,10 @@ public class HttpSenderTest {
                 Duration.ofSeconds(3),
                 100_000,
                 Duration.ofSeconds(2),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of(),
                 100_000,
                 500_000)) {
 
@@ -211,7 +219,7 @@ public class HttpSenderTest {
     @Test
     void testQueueFullBehavior() throws Exception {
         var limitedSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", "full.parquet", Duration.ofSeconds(3), 100_000,
-                Duration.ofSeconds(2),100, 200);
+                Duration.ofSeconds(2), 3, 1000, java.util.List.of(), java.util.List.of(), 100, 200);
 
         byte[] largeData = arrowBytes("select * from generate_series(200)");
 
@@ -242,7 +250,7 @@ public class HttpSenderTest {
         var path = "spill";
         Files.createDirectories(Path.of(warehouse, path));
         var spillSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", path, Duration.ofSeconds(10), 100_000,
-                Duration.ofSeconds(2),50, 100_000);
+                Duration.ofSeconds(2), 3, 1000, java.util.List.of(), java.util.List.of(), 50, 100_000);
 
 
         spillSender.enqueue(arrowBytes("select * from generate_series(30)"));
@@ -253,6 +261,98 @@ public class HttpSenderTest {
         });
 
         spillSender.close();
+    }
+
+    @Test
+    void testTransformationsHeader() throws Exception {
+        String path = "transformations-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        try (HttpSender sender = new HttpSender(
+                schema,
+                "http://localhost:" + PORT,
+                "admin",
+                "admin",
+                path,
+                Duration.ofSeconds(3),
+                100_000,
+                Duration.ofSeconds(1),
+                3,
+                1000,
+                java.util.List.of("'c1' as c1", "'c2' as c2"),
+                java.util.List.of(),
+                100_000,
+                500_000)) {
+
+            sender.enqueue(arrowBytes("select * from generate_series(5)"));
+        }
+
+        long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet') where c1 = 'c1' and c2 = 'c2'".formatted(warehouse, path), Long.class);
+        assertEquals(6, count);
+
+    }
+
+
+    @Test
+    void testTransformationsAndPartitionByHeaders() throws Exception {
+        String path = "both-headers-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        try (HttpSender sender = new HttpSender(
+                schema,
+                "http://localhost:" + PORT,
+                "admin",
+                "admin",
+                path,
+                Duration.ofSeconds(3),
+                100_000,
+                Duration.ofSeconds(1),
+                3,
+                1000,
+                java.util.List.of("'c1' as c1", "'c2' as  c2"),
+                java.util.List.of("c1", "c2"),
+                100_000,
+                500_000)) {
+
+            sender.enqueue(arrowBytes("select * from generate_series(5)"));
+        }
+
+        await().atMost(5, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
+            long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*/*/*.parquet')".formatted(warehouse, path), Long.class);
+            assertEquals(6, count);
+        });
+    }
+
+
+    @Test
+    void testEmptyListsDoNotSendHeaders() throws Exception {
+        String path = "empty-lists-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        // Empty lists should work fine and not send headers
+        try (HttpSender sender = new HttpSender(
+                schema,
+                "http://localhost:" + PORT,
+                "admin",
+                "admin",
+                path,
+                Duration.ofSeconds(3),
+                100_000,
+                Duration.ofSeconds(1),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of(),
+                100_000,
+                500_000)) {
+
+            sender.enqueue(arrowBytes("select * from generate_series(5)"));
+        }
+
+        await().atMost(5, TimeUnit.SECONDS).ignoreExceptions().untilAsserted(() -> {
+            long count = ConnectionPool.collectFirst("select count(*) from read_parquet('%s/%s/*.parquet')".formatted(warehouse, path), Long.class);
+            assertEquals(6, count);
+        });
     }
 
 }

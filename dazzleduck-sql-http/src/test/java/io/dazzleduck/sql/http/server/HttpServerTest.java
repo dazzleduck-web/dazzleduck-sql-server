@@ -28,6 +28,7 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -338,9 +339,9 @@ public class HttpServerTest {
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                     .header("Content-Type", ContentTypes.APPLICATION_ARROW)
-                    .header(HEADER_DATA_PARTITION, "a")
-                    .header(HEADER_DATA_TRANSFORMATION, "(a + 1) as b")
-                    .header(HEADER_SORT_ORDER, "b desc")
+                    .header(HEADER_DATA_PARTITION, urlEncode("a"))
+                    .header(HEADER_DATA_TRANSFORMATION, urlEncode("(a + 1) as b"))
+                    .header(HEADER_SORT_ORDER, urlEncode("b desc"))
                     .build();
             var res = client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, res.statusCode());
@@ -422,9 +423,9 @@ public class HttpServerTest {
                                 .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                                         new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                                 .header("Content-Type", ContentTypes.APPLICATION_ARROW)
-                                .header(HEADER_DATA_PARTITION, "a")
-                                .header(HEADER_DATA_TRANSFORMATION, "a + " + final1 + " as b")
-                                .header(HEADER_SORT_ORDER, "b desc")
+                                .header(HEADER_DATA_PARTITION, urlEncode("a"))
+                                .header(HEADER_DATA_TRANSFORMATION, urlEncode("a + " + final1 + " as b"))
+                                .header(HEADER_SORT_ORDER, urlEncode("b desc"))
                                 .build();
 
                         HttpResponse<String> res = client.send(request, HttpResponse.BodyHandlers.ofString());
@@ -438,6 +439,10 @@ public class HttpServerTest {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             executor.shutdown();
         }
+    }
+
+    private String urlEncode(String s){
+        return URLEncoder.encode(s, Charset.defaultCharset());
     }
 
     @Test

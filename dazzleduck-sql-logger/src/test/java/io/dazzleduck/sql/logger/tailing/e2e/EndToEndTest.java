@@ -108,6 +108,10 @@ public class EndToEndTest {
                     Duration.ofSeconds(5),
                     1024, // 1 KB min batch
                     Duration.ofSeconds(10),
+                    3, // retry count
+                    1000, // retry interval ms
+                    java.util.List.of(), // transformations
+                    java.util.List.of(), // partitionBy
                     10 * 1024 * 1024, // 10 MB in memory
                     100 * 1024 * 1024 // 100 MB on disk
             );

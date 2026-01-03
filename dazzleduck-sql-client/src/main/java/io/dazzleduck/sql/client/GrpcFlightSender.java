@@ -38,6 +38,10 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
             long minBatchSize,
             Duration maxSendInterval,
             Clock clock,
+            int retryCount,
+            long retryIntervalMillis,
+            java.util.List<String> transformations,
+            java.util.List<String> partitionBy,
             long maxInMemorySize,
             long maxOnDiskSize,
             BufferAllocator allocator,
@@ -49,7 +53,7 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
             Map<String, String> ingestParams,
             Duration grpcTimeout
     ) {
-        super(minBatchSize, maxSendInterval, schema, clock);
+        super(minBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
 
         // Validate parameters (Issue #6)
         this.allocator = Objects.requireNonNull(allocator, "allocator must not be null");
@@ -93,6 +97,17 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
                         .build()
         );
 
+        // Add transformations and partitionBy to ingestParams (URL encoded)
+        Map<String, String> enrichedParams = new java.util.HashMap<>(ingestParams);
+        if (!getTransformations().isEmpty()) {
+            String transformationsValue = String.join(",", getTransformations());
+            enrichedParams.put(Headers.HEADER_DATA_TRANSFORMATION, java.net.URLEncoder.encode(transformationsValue, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        if (!getPartitionBy().isEmpty()) {
+            String partitionByValue = String.join(",", getPartitionBy());
+            enrichedParams.put(Headers.HEADER_DATA_PARTITION, java.net.URLEncoder.encode(partitionByValue, java.nio.charset.StandardCharsets.UTF_8));
+        }
+
         this.ingestOptions = new FlightSqlClient.ExecuteIngestOptions("", FlightSql.CommandStatementIngest
                                 .TableDefinitionOptions
                                 .newBuilder()
@@ -100,7 +115,7 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
                         false,
                         catalog,
                         schemaName,
-                        ingestParams
+                        enrichedParams
                 );
     }
 

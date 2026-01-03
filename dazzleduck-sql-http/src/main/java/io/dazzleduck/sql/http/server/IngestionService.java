@@ -20,7 +20,9 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
 import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -62,17 +64,29 @@ public class IngestionService implements HttpService, ParameterUtils, Controller
         var path = query.get("path");
         final String completePath = warehousePath + "/" + path;
         String format = ParameterUtils.getParameterValue(HEADER_DATA_FORMAT, serverRequest, "parquet", String.class);
-        var partitionString = ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class);
-        var tranformationString = ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class);
+        var partitionString = urlDecode(
+                ParameterUtils.getParameterValue(HEADER_DATA_PARTITION, serverRequest, null, String.class));
+        var tranformationString = urlDecode(
+                ParameterUtils.getParameterValue(HEADER_DATA_TRANSFORMATION, serverRequest, null, String.class));
         var producerId = ParameterUtils.getParameterValue(HEADER_PRODUCER_ID, serverRequest, null, String.class);
         var producerBatchId = ParameterUtils.getParameterValue(HEADER_PRODUCER_BATCH_ID, serverRequest, -1L, Long.class);
-        var sortOrderString = ParameterUtils.getParameterValue(HEADER_SORT_ORDER, serverRequest, null, String.class);
+        var sortOrderString = urlDecode(
+                ParameterUtils.getParameterValue(HEADER_SORT_ORDER, serverRequest, null, String.class));
         return new IngestionParameters(completePath, format, getArray(partitionString),
                 getArray(tranformationString), getArray(sortOrderString), producerId, producerBatchId, Map.of());
     }
 
     private String[] getArray(String stringValue) {
         return stringValue == null? new String[0]: stringValue.split(",");
+    }
+
+    private String urlDecode(String string){
+        if (string == null) {
+            return null;
+        }
+        else {
+            return URLDecoder.decode(string, StandardCharsets.UTF_8);
+        }
     }
 
     private void handlePost(ServerRequest serverRequest, ServerResponse serverResponse) throws ExecutionException, InterruptedException, IOException {

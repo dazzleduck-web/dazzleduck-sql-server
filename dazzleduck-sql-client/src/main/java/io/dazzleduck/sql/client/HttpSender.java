@@ -53,10 +53,14 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             Duration httpClientTimeout,
             long minBatchSize,
             Duration maxSendInterval,
+            int retryCount,
+            long retryIntervalMillis,
+            java.util.List<String> transformations,
+            java.util.List<String> partitionBy,
             long maxInMemorySize,
             long maxOnDiskSize
     ) {
-        this(schema, baseUrl, username, password, targetPath, httpClientTimeout, minBatchSize, maxSendInterval, maxInMemorySize, maxOnDiskSize, Clock.systemUTC());
+        this(schema, baseUrl, username, password, targetPath, httpClientTimeout, minBatchSize, maxSendInterval, retryCount, retryIntervalMillis, transformations, partitionBy, maxInMemorySize, maxOnDiskSize, Clock.systemUTC());
     }
     public HttpSender(
             Schema schema,
@@ -67,11 +71,15 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             Duration httpClientTimeout,
             long minBatchSize,
             Duration maxSendInterval,
+            int retryCount,
+            long retryIntervalMillis,
+            java.util.List<String> transformations,
+            java.util.List<String> partitionBy,
             long maxInMemorySize,
             long maxOnDiskSize,
             Clock clock
     ) {
-        super(minBatchSize, maxSendInterval, schema, clock);
+        super(minBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
 
         // Issue #3: Parameter validation
         Objects.requireNonNull(baseUrl, "baseUrl must not be null");
@@ -275,14 +283,26 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
     }
 
     private HttpResponse<String> post(byte[] payload) throws IOException, InterruptedException {
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/ingest?path=" + targetPath))
                 .timeout(httpClientTimeout)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .header("Authorization", getJwt())
-                .header("Content-Type", "application/vnd.apache.arrow.stream")
-                .build();
+                .header("Content-Type", "application/vnd.apache.arrow.stream");
 
+        // Add transformations and partitionBy headers if present (URL encoded)
+        if (!getTransformations().isEmpty()) {
+            String transformationsValue = String.join(",", getTransformations());
+            requestBuilder.header(io.dazzleduck.sql.common.Headers.HEADER_DATA_TRANSFORMATION,
+                java.net.URLEncoder.encode(transformationsValue, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        if (!getPartitionBy().isEmpty()) {
+            String partitionByValue = String.join(",", getPartitionBy());
+            requestBuilder.header(io.dazzleduck.sql.common.Headers.HEADER_DATA_PARTITION,
+                java.net.URLEncoder.encode(partitionByValue, java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        HttpRequest req = requestBuilder.build();
         return client.send(req, HttpResponse.BodyHandlers.ofString());
     }
 

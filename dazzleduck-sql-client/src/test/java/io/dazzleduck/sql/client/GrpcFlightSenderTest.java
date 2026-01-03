@@ -83,6 +83,10 @@ class GrpcFlightSenderTest {
                 1024,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of(),
                 5_000_000,
                 20_000_000,
                 allocator,
@@ -117,5 +121,222 @@ class GrpcFlightSenderTest {
             }
         }
         assertEquals(List.of("Aman", "Sid", "Yash"), values);
+    }
+
+    @Test
+    void testTransformationsParameter() throws Exception {
+        Schema schema = new Schema(List.of(new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+        String path = "transformations-grpc-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        try (GrpcFlightSender sender = new GrpcFlightSender(
+                schema,
+                1024,
+                Duration.ofSeconds(2),
+                Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of("transform1", "transform2"),
+                java.util.List.of(),
+                5_000_000,
+                20_000_000,
+                allocator,
+                Location.forGrpcInsecure(HOST, PORT),
+                USER,
+                PASSWORD,
+                CATALOG,
+                SCHEMA,
+                Map.of("path", path),
+                Duration.ofSeconds(30)
+        )) {
+            sender.addRow(new JavaRow(new Object[]{1}));
+            sender.addRow(new JavaRow(new Object[]{2}));
+            sender.addRow(new JavaRow(new Object[]{3}));
+        }
+
+        var query = "SELECT count(*) as cnt FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path);
+        FlightInfo flightInfo = client.execute(query);
+
+        try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) {
+                var root = stream.getRoot();
+                var countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("cnt");
+                assertEquals(3L, countVector.get(0));
+            }
+        }
+    }
+
+    @Test
+    void testPartitionByParameter() throws Exception {
+        Schema schema = new Schema(List.of(new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+        String path = "partitionby-grpc-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        try (GrpcFlightSender sender = new GrpcFlightSender(
+                schema,
+                1024,
+                Duration.ofSeconds(2),
+                Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of("column1", "column2"),
+                5_000_000,
+                20_000_000,
+                allocator,
+                Location.forGrpcInsecure(HOST, PORT),
+                USER,
+                PASSWORD,
+                CATALOG,
+                SCHEMA,
+                Map.of("path", path),
+                Duration.ofSeconds(30)
+        )) {
+            sender.addRow(new JavaRow(new Object[]{1}));
+            sender.addRow(new JavaRow(new Object[]{2}));
+            sender.addRow(new JavaRow(new Object[]{3}));
+        }
+
+        var query = "SELECT count(*) as cnt FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path);
+        FlightInfo flightInfo = client.execute(query);
+
+        try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) {
+                var root = stream.getRoot();
+                var countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("cnt");
+                assertEquals(3L, countVector.get(0));
+            }
+        }
+    }
+
+    @Test
+    void testTransformationsAndPartitionByParameters() throws Exception {
+        Schema schema = new Schema(List.of(new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+        String path = "both-params-grpc-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        try (GrpcFlightSender sender = new GrpcFlightSender(
+                schema,
+                1024,
+                Duration.ofSeconds(2),
+                Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of("transform1", "transform2"),
+                java.util.List.of("column1", "column2"),
+                5_000_000,
+                20_000_000,
+                allocator,
+                Location.forGrpcInsecure(HOST, PORT),
+                USER,
+                PASSWORD,
+                CATALOG,
+                SCHEMA,
+                Map.of("path", path),
+                Duration.ofSeconds(30)
+        )) {
+            sender.addRow(new JavaRow(new Object[]{1}));
+            sender.addRow(new JavaRow(new Object[]{2}));
+            sender.addRow(new JavaRow(new Object[]{3}));
+        }
+
+        var query = "SELECT count(*) as cnt FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path);
+        FlightInfo flightInfo = client.execute(query);
+
+        try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) {
+                var root = stream.getRoot();
+                var countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("cnt");
+                assertEquals(3L, countVector.get(0));
+            }
+        }
+    }
+
+    @Test
+    void testUrlEncodingInParameters() throws Exception {
+        Schema schema = new Schema(List.of(new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+        String path = "url-encoding-grpc-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        // Test with special characters that need URL encoding
+        try (GrpcFlightSender sender = new GrpcFlightSender(
+                schema,
+                1024,
+                Duration.ofSeconds(2),
+                Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of("transform with spaces", "transform+plus"),
+                java.util.List.of("col=equal", "col&ampersand"),
+                5_000_000,
+                20_000_000,
+                allocator,
+                Location.forGrpcInsecure(HOST, PORT),
+                USER,
+                PASSWORD,
+                CATALOG,
+                SCHEMA,
+                Map.of("path", path),
+                Duration.ofSeconds(30)
+        )) {
+            sender.addRow(new JavaRow(new Object[]{1}));
+            sender.addRow(new JavaRow(new Object[]{2}));
+            sender.addRow(new JavaRow(new Object[]{3}));
+        }
+
+        var query = "SELECT count(*) as cnt FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path);
+        FlightInfo flightInfo = client.execute(query);
+
+        try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) {
+                var root = stream.getRoot();
+                var countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("cnt");
+                assertEquals(3L, countVector.get(0));
+            }
+        }
+    }
+
+    @Test
+    void testEmptyListsDoNotSendParameters() throws Exception {
+        Schema schema = new Schema(List.of(new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+        String path = "empty-lists-grpc-test";
+        Files.createDirectories(Path.of(warehouse, path));
+
+        // Empty lists should work fine and not send parameters
+        try (GrpcFlightSender sender = new GrpcFlightSender(
+                schema,
+                1024,
+                Duration.ofSeconds(2),
+                Clock.systemUTC(),
+                3,
+                1000,
+                java.util.List.of(),
+                java.util.List.of(),
+                5_000_000,
+                20_000_000,
+                allocator,
+                Location.forGrpcInsecure(HOST, PORT),
+                USER,
+                PASSWORD,
+                CATALOG,
+                SCHEMA,
+                Map.of("path", path),
+                Duration.ofSeconds(30)
+        )) {
+            sender.addRow(new JavaRow(new Object[]{1}));
+            sender.addRow(new JavaRow(new Object[]{2}));
+            sender.addRow(new JavaRow(new Object[]{3}));
+        }
+
+        var query = "SELECT count(*) as cnt FROM read_parquet('%s/%s/*.parquet')".formatted(warehouse, path);
+        FlightInfo flightInfo = client.execute(query);
+
+        try (FlightStream stream = client.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
+            while (stream.next()) {
+                var root = stream.getRoot();
+                var countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("cnt");
+                assertEquals(3L, countVector.get(0));
+            }
+        }
     }
 }

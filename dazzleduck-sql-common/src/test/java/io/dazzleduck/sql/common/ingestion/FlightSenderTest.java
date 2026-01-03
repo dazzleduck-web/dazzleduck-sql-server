@@ -116,7 +116,7 @@ class FlightSenderTest {
     private final CountDownLatch sendDone;
 
         OnDemandSender(long maxInMemorySize, long maxOnDiskSize, Clock clock, CountDownLatch blockLatch, CountDownLatch sendDone) {
-            super(1024 * 1024, Duration.ofSeconds(1),  new Schema(java.util.List.of(new Field("ts", FieldType.nullable(new ArrowType.Utf8()), null))), clock);
+            super(1024 * 1024, Duration.ofSeconds(1),  new Schema(java.util.List.of(new Field("ts", FieldType.nullable(new ArrowType.Utf8()), null))), clock, 3, 1000, java.util.List.of(), java.util.List.of());
             this.maxInMemorySize = maxInMemorySize;
             this.maxOnDiskSize = maxOnDiskSize;
             this.latch = blockLatch;

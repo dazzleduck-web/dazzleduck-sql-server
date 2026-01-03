@@ -104,7 +104,11 @@ class ArrowSimpleLoggerTest {
                                     FieldType.nullable(new ArrowType.Utf8()),
                                     null
                             )
-                    )), Clock.systemUTC()
+                    )), Clock.systemUTC(),
+                    3,
+                    1000,
+                    java.util.List.of(),
+                    java.util.List.of()
             );
         }
 
