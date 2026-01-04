@@ -2,7 +2,7 @@ package io.dazzleduck.sql.logger.tailing;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.client.HttpSender;
+import io.dazzleduck.sql.client.HttpProducer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,6 +32,7 @@ public final class LogProcessorMain {
     private static final long CONFIG_HTTP_TIMEOUT_MS = config.getLong("http.http_client_timeout_ms");
     // Batch and memory config
     private static final long CONFIG_MIN_BATCH_SIZE = config.getLong("min_batch_size");
+    private static final long CONFIG_MAX_BATCH_SIZE = config.getLong("max_batch_size");
     private static final long CONFIG_MAX_SEND_INTERVAL_MS = config.getLong("max_send_interval_ms");
     private static final long CONFIG_MAX_IN_MEMORY_BYTES = config.getLong("max_in_memory_bytes");
     private static final long CONFIG_MAX_ON_DISK_BYTES = config.getLong("max_on_disk_bytes");
@@ -45,7 +46,7 @@ public final class LogProcessorMain {
         );
 
         // Create HttpSender with configuration
-        HttpSender httpSender = new HttpSender(
+        HttpProducer httpSender = new HttpProducer(
                 converter.getSchema(),
                 CONFIG_HTTP_BASE_URL,
                 CONFIG_HTTP_USERNAME,
@@ -53,6 +54,7 @@ public final class LogProcessorMain {
                 CONFIG_HTTP_TARGET_PATH,
                 Duration.ofMillis(CONFIG_HTTP_TIMEOUT_MS),
                 CONFIG_MIN_BATCH_SIZE,
+                CONFIG_MAX_BATCH_SIZE,
                 Duration.ofMillis(CONFIG_MAX_SEND_INTERVAL_MS),
                 config.getInt("retry_count"),
                 config.getLong("retry_interval_ms"),

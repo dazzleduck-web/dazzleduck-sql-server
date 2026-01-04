@@ -86,13 +86,19 @@ public class JwtAuthenticationFilter implements Filter {
                 req.context().register(SUBJECT_KEY, subject);
                 chain.proceed();
             } catch (UnauthorizedException unauthorizedException) {
+                String errorMsg = unauthorizedException.getMessage() != null
+                    ? unauthorizedException.getMessage()
+                    : "Unauthorized";
                 res.status(Status.UNAUTHORIZED_401);
-                res.send(unauthorizedException.getMessage().getBytes());
+                res.send(errorMsg.getBytes());
             }
         }
     }
 
     private static String removeBearer(String input) {
+        if (input == null || input.length() <= BEARER_LENGTH || !input.startsWith("Bearer ")) {
+            throw new UnauthorizedException("Invalid Authorization header format: must start with 'Bearer '");
+        }
         return input.substring(BEARER_LENGTH);
     }
 }

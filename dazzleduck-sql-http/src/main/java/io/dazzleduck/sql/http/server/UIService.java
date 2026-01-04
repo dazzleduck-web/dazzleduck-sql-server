@@ -83,17 +83,17 @@ public class UIService implements HttpService {
     private void serveScriptJS(ServerRequest req, ServerResponse res) {
         sendResponse(res, "application/javascript", """
                     const API_BASE_URL = '';
-                
+
                     async function fetchMetrics() {
                         const r = await fetch('/ui/api/metrics');
                         return await r.text();
                     }
-                
+
                     function parse(html) {
                         return new DOMParser().parseFromString(html, 'text/html')
                             .querySelectorAll('table');
                     }
-                
+
                     function render(tables) {
                         const c = document.getElementById('metricsContainer');
                         c.innerHTML = '';
@@ -103,14 +103,23 @@ public class UIService implements HttpService {
                             w.appendChild(t.cloneNode(true));
                             c.appendChild(w);
                         });
+
+                        // Add event listeners to all cancel buttons using event delegation
+                        c.addEventListener('click', async (e) => {
+                            if (e.target.classList.contains('cancel-query-btn')) {
+                                const query = e.target.getAttribute('data-query');
+                                const id = e.target.getAttribute('data-id');
+                                await cancelQuery(query, id);
+                            }
+                        });
                     }
-                
+
                     async function refreshMetrics() {
                         const tables = parse(await fetchMetrics());
                         render(tables);
                         document.getElementById('lastUpdate').innerText = new Date().toLocaleString();
                     }
-                
+
                     async function cancelQuery(query, id) {
                         try {
                             const resp = await fetch('/cancel', {
@@ -121,10 +130,11 @@ public class UIService implements HttpService {
                                 body: JSON.stringify({ query: query, id: id })
                             });
                         } catch (e) {
-                            throw new Error("error canceling query : ", e);
+                            console.error("Error canceling query:", e);
                         }
-                        refreshMetrics();
+                        await refreshMetrics();
                     }
+
                     window.onload = refreshMetrics;
                 """);
     }
@@ -288,8 +298,8 @@ public class UIService implements HttpService {
         String startTime = info.startInstant() != null ? TIME_FORMATTER.format(info.startInstant()) : "N/A";
         String duration = calculateDuration(info.startInstant());
         String action = withCancelButton
-                ? "<button class=\"action-btn\" onclick=\"cancelQuery(`%s`, %s)\">Cancel</button>"
-                .formatted(escapeHtml(info.query()), Long.parseLong(info.statementId()))
+                ? "<button class=\"action-btn cancel-query-btn\" data-query=\"%s\" data-id=\"%s\">Cancel</button>"
+                .formatted(escapeHtml(info.query()), escapeHtml(info.statementId()))
                 : escapeHtml(info.action());
 
         return """

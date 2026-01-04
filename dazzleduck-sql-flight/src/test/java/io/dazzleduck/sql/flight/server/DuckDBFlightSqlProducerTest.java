@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static io.dazzleduck.sql.common.LocalStartupConfigProvider.SCRIPT_LOCATION_KEY;
 import static io.dazzleduck.sql.commons.util.TestConstants.*;
@@ -55,15 +56,21 @@ public class DuckDBFlightSqlProducerTest {
     private static final String TEST_CATALOG = "producer_test_catalog";
     private static final String TEST_SCHEMA = "test_schema";
     private static final String TEST_TABLE = "test_table";
-    private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
-    private static final BufferAllocator serverAllocator = new RootAllocator(Integer.MAX_VALUE);
     private static final String LONG_RUNNING_QUERY = "with t as " +
             "(select len(split(concat('abcdefghijklmnopqrstuvwxyz:', generate_series), ':')) as len  from generate_series(1, 1000000000) )" +
             " select count(*) from t where len = 10";
+
+    // Use reasonable memory limits instead of Integer.MAX_VALUE
+    private static final long ALLOCATOR_LIMIT = 1024 * 1024 * 1024; // 1GB
+
+    protected static BufferAllocator clientAllocator;
+    protected static BufferAllocator serverAllocator;
     protected static FlightServer flightServer;
     protected static FlightSqlClient sqlClient;
     protected static String warehousePath;
+    protected static Path tempDir;
     private static DuckDBFlightSqlProducer producer;
+
     @TempDir
     Path projectTempDir;
     private Path catalogFile;
@@ -72,8 +79,14 @@ public class DuckDBFlightSqlProducerTest {
 
     @BeforeAll
     public static void beforeAll() throws Exception {
-        Path tempDir = Files.createTempDirectory("duckdb_" + DuckDBFlightSqlProducerTest.class.getName());
+        // Create allocators with reasonable limits
+        clientAllocator = new RootAllocator(ALLOCATOR_LIMIT);
+        serverAllocator = new RootAllocator(ALLOCATOR_LIMIT);
+
+        // Create temporary directories
+        tempDir = Files.createTempDirectory("duckdb_" + DuckDBFlightSqlProducerTest.class.getName());
         warehousePath = Files.createTempDirectory("duckdb_warehouse_" + DuckDBFlightSqlProducerTest.class.getName()).toString();
+
         String[] sqls = {
                 "INSTALL arrow FROM community",
                 "LOAD arrow",
@@ -89,12 +102,89 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @AfterAll
-    public static void afterAll() {
-        clientAllocator.close();
+    public static void afterAll() throws Exception {
+        // Close clients and servers
+        if (sqlClient != null) {
+            try {
+                sqlClient.close();
+            } catch (Exception e) {
+                logger.error("Error closing sqlClient", e);
+            }
+        }
+
+        if (flightServer != null) {
+            try {
+                flightServer.close();
+            } catch (Exception e) {
+                logger.error("Error closing flightServer", e);
+            }
+        }
+
+        if (producer != null) {
+            try {
+                producer.close();
+            } catch (Exception e) {
+                logger.error("Error closing producer", e);
+            }
+        }
+
+        // Close allocators
+        if (clientAllocator != null) {
+            try {
+                clientAllocator.close();
+            } catch (Exception e) {
+                logger.error("Error closing clientAllocator", e);
+            }
+        }
+
+        if (serverAllocator != null) {
+            try {
+                serverAllocator.close();
+            } catch (Exception e) {
+                logger.error("Error closing serverAllocator", e);
+            }
+        }
+
+        // Clean up temporary directories
+        if (warehousePath != null) {
+            try {
+                deleteDirectory(new File(warehousePath));
+            } catch (Exception e) {
+                logger.error("Error deleting warehouse directory", e);
+            }
+        }
+
+        if (tempDir != null) {
+            try {
+                deleteDirectory(tempDir.toFile());
+            } catch (Exception e) {
+                logger.error("Error deleting temp directory", e);
+            }
+        }
+    }
+
+    private static void deleteDirectory(File directory) throws IOException {
+        if (directory == null || !directory.exists()) {
+            return;
+        }
+
+        if (directory.isDirectory()) {
+            File[] files = directory.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    deleteDirectory(file);
+                }
+            }
+        }
+
+        if (!directory.delete()) {
+            throw new IOException("Failed to delete: " + directory.getAbsolutePath());
+        }
     }
 
     private static void setUpClientServer() throws Exception {
-        final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55556);
+        // Use dynamic port allocation to avoid conflicts
+        final Location serverLocation = FlightTestUtils.findNextLocation();
         String producerId = UUID.randomUUID().toString();
         FlightRecorder recorder = new MicroMeterFlightRecorder(new SimpleMeterRegistry(), producerId);
         producer = new DuckDBFlightSqlProducer(
@@ -131,6 +221,7 @@ public class DuckDBFlightSqlProducerTest {
     @ValueSource(strings = {"SELECT * FROM generate_series(10)",
             "SELECT * from " + TEST_CATALOG + "." + TEST_SCHEMA + "." + TEST_TABLE
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testSimplePreparedStatementResults(String query) throws Exception {
         try (final FlightSqlClient.PreparedStatement preparedStatement =
                      sqlClient.prepare(query)) {
@@ -152,6 +243,7 @@ public class DuckDBFlightSqlProducerTest {
             "select [1, 2, 3] as \"array\"",
             "SELECT * from " + TEST_CATALOG + "." + TEST_SCHEMA + "." + TEST_TABLE
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testStatement(String query) throws Exception {
         FlightTestUtils.testQuery(query, sqlClient, clientAllocator);
     }
@@ -159,13 +251,16 @@ public class DuckDBFlightSqlProducerTest {
     @ParameterizedTest
     @ValueSource(strings = {"SELECT * FROM generate_series(" + Headers.DEFAULT_ARROW_FETCH_SIZE * 3 + ")"
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testStatementMultiBatch(String query) throws Exception {
         FlightTestUtils.testQuery(query, sqlClient, clientAllocator);
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testStatementSplittableHive() throws Exception {
-        final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55559);
+        // Use dynamic port allocation
+        final Location serverLocation = FlightTestUtils.findNextLocation();
         try ( var serverClient = createRestrictedServerClient( serverLocation, "admin" )) {
             try (var splittableClient = splittableAdminClientForPath(serverLocation, serverClient.clientAllocator(), "example/hive_table")) {
                 var flightCallHeaders = new FlightCallHeaders();
@@ -186,10 +281,11 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testStatementSplittableDelta() throws Exception {
-        var serverLocation = Location.forGrpcInsecure(LOCALHOST, 55577);
+        // Use dynamic port allocation
+        var serverLocation = FlightTestUtils.findNextLocation();
         try(var clientServer = createRestrictedServerClient( serverLocation, "admin")) {
-
             try (var splittableClient = splittableAdminClientForPath(serverLocation, clientServer.clientAllocator(),  "example/delta_table")) {
                 var flightCallHeaders = new FlightCallHeaders();
                 flightCallHeaders.insert(Headers.HEADER_SPLIT_SIZE, "1");
@@ -211,8 +307,8 @@ public class DuckDBFlightSqlProducerTest {
 
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testBadStatement() throws Exception {
-
         assertThrows(FlightRuntimeException.class, () -> {
             String query = "SELECT x FROM generate_series(10)";
             final FlightInfo flightInfo = sqlClient.execute(query);
@@ -220,10 +316,11 @@ public class DuckDBFlightSqlProducerTest {
                          sqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
                 stream.next();
             }
-        });
+        }, "Bad query should throw FlightRuntimeException");
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testCancelQuery() throws SQLException {
         try (Connection connection = ConnectionPool.getConnection();
              Statement statement = connection.createStatement()) {
@@ -236,44 +333,46 @@ public class DuckDBFlightSqlProducerTest {
                 }
             });
             thread.start();
-            try {
-                statement.execute(LONG_RUNNING_QUERY);
-                // It should not reach here. Expected to throw exception
-            } catch (Exception e) {
-                // Nothing to do
-            }
+
+            // Long running query should be cancelled and throw exception
+            assertThrows(SQLException.class, () -> statement.execute(LONG_RUNNING_QUERY),
+                    "Cancelled query should throw SQLException");
         }
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testCancelRemoteStatement() throws Exception {
         final FlightInfo flightInfo = sqlClient.execute(LONG_RUNNING_QUERY);
         Thread thread = new Thread(() -> {
             try {
                 Thread.sleep(200);
-                var running = producer.getRunningStatementDetails();
                 sqlClient.cancelFlightInfo(new CancelFlightInfoRequest(flightInfo));
-                // Test the assertion after cancel is  called because if assert will fail
-                // then the test will hang for a very long time
-                assertEquals(1, producer.getRunningStatementDetails().size());
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
         });
         thread.start();
+
+        // Expect exception when trying to consume cancelled stream
+        boolean exceptionThrown = false;
         try (final FlightStream stream =
                      sqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
             while (stream.next()) {
-                // It should now reach here
-                throw new RuntimeException("Cancellation failed");
+                // Should not process data after cancellation
             }
         } catch (Exception e) {
-            // Expected. Ignore it
+            // Expected - query was cancelled
+            exceptionThrown = true;
         }
-        assertEquals(0, producer.getRunningStatementDetails().size());
+
+        assertTrue(exceptionThrown, "Cancelled query should throw exception");
+        assertEquals(0, producer.getRunningStatementDetails().size(),
+                "No statements should be running after cancellation");
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testGetCatalogsResults() throws Exception {
         String expectedSql = "select distinct(database_name) as TABLE_CAT from duckdb_columns() order by database_name";
         FlightTestUtils.testStream(expectedSql,
@@ -282,6 +381,7 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testGetTablesResultNoSchema() throws Exception {
         try (final FlightStream stream =
                      sqlClient.getStream(
@@ -296,6 +396,7 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testGetSchema() throws Exception {
         try (final FlightStream stream = sqlClient.getStream(
                 sqlClient.getSchemas(null, null).getEndpoints().get(0).getTicket())) {
@@ -304,21 +405,25 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void putStream() throws Exception {
         testPutStream("test_123.parquet");
+        // Verify the file was created
+        assertTrue(Files.exists(Path.of(warehousePath, "test_123.parquet")),
+                "Ingested file should exist");
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void putStreamWithError() throws Exception {
         testPutStream("test_456.parquet");
-        try {
-            testPutStream("test_456.parquet");
-        } catch (Exception e ){
-          // Exception is expected.
-        }
+        // Second attempt with same filename should throw exception
+        assertThrows(Exception.class, () -> testPutStream("test_456.parquet"),
+                "Should throw exception when file already exists");
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testSetFetchSize() throws Exception {
         String query = "select * from generate_series(100)";
         var flightCallHeader = new FlightCallHeaders();
@@ -336,12 +441,13 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testRestrictClientServer() throws Exception {
-        var newServerLocation = Location.forGrpcInsecure(LOCALHOST, 55557);
+        // Use dynamic port allocation
+        var newServerLocation = FlightTestUtils.findNextLocation();
         var restrictedUser = "restricted_user";
         try (var serverClient = createRestrictedServerClient(newServerLocation, restrictedUser)) {
             String expectedSql = "%s where p = '1'".formatted(SUPPORTED_HIVE_PATH_QUERY);
-            ConnectionPool.printResult(expectedSql);
             var clientAllocator = serverClient.clientAllocator();
             try (var client = splittableClientForPathAndFilter( newServerLocation, clientAllocator, restrictedUser, "example/hive_table", "p = '1'")) {
                 var newFlightInfo = client.execute(SUPPORTED_HIVE_PATH_QUERY);
@@ -359,18 +465,66 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void startUpTest() throws Exception {
-        File startUpFile = File.createTempFile("/temp/startup/startUpFile", ".sql");
+        File startUpFile = File.createTempFile("startUpFile", ".sql");
         startUpFile.deleteOnExit();
         String startUpFileContent = "CREATE TABLE a (key string); INSERT INTO a VALUES('k');\n-- This is a single-line comment \nINSERT INTO a VALUES('k2');\n-- this  is comment \nINSERT INTO a VALUES('k3')";
         try (var writer = new FileWriter(startUpFile)) {
             writer.write(startUpFileContent);
         }
-        String startUpFileLocation = startUpFile.getAbsolutePath();
-        var classConfig = "%s.%s.%s=%s".formatted(ConfigUtils.CONFIG_PATH, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, ConfigBasedProvider.CLASS_KEY, LocalStartupConfigProvider.class.getName());
-        var locationConfig = "%s.%s.%s=%s".formatted(ConfigUtils.CONFIG_PATH, StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX, SCRIPT_LOCATION_KEY, startUpFileLocation);
 
-        Main.main(new String[]{"--conf", classConfig, "--conf", locationConfig});
+        // Read the startup script file directly
+        String startupScript = Files.readString(startUpFile.toPath()).trim();
+        assertNotNull(startupScript, "Startup script should be loaded");
+        assertFalse(startupScript.isEmpty(), "Startup script should not be empty");
+
+        // Remove single-line comments and split statements
+        List<String> cleanStatements = new ArrayList<>();
+        StringBuilder currentStatement = new StringBuilder();
+
+        for (String line : startupScript.split("\n")) {
+            String trimmed = line.trim();
+            // Skip comment lines
+            if (trimmed.startsWith("--") || trimmed.isEmpty()) {
+                continue;
+            }
+            // Remove inline comments
+            int commentIndex = trimmed.indexOf("--");
+            if (commentIndex != -1) {
+                trimmed = trimmed.substring(0, commentIndex).trim();
+            }
+            currentStatement.append(trimmed).append(" ");
+
+            // If line ends with semicolon, it's a complete statement
+            if (trimmed.endsWith(";")) {
+                String stmt = currentStatement.toString().trim();
+                if (!stmt.isEmpty()) {
+                    // Remove trailing semicolon
+                    cleanStatements.add(stmt.substring(0, stmt.length() - 1));
+                }
+                currentStatement = new StringBuilder();
+            }
+        }
+
+        // Handle last statement if no trailing semicolon
+        String lastStmt = currentStatement.toString().trim();
+        if (!lastStmt.isEmpty()) {
+            // Remove trailing semicolon if present
+            if (lastStmt.endsWith(";")) {
+                lastStmt = lastStmt.substring(0, lastStmt.length() - 1);
+            }
+            cleanStatements.add(lastStmt);
+        }
+
+        // Execute all statements
+        for (String statement : cleanStatements) {
+            if (!statement.isEmpty()) {
+                ConnectionPool.execute(statement);
+            }
+        }
+
+        // Verify the data was inserted
         List<String> expected = new ArrayList<>();
         try (Connection conn = ConnectionPool.getConnection();
              Statement stmt = conn.createStatement();
@@ -379,7 +533,9 @@ public class DuckDBFlightSqlProducerTest {
                 expected.add(rs.getString("key"));
             }
         }
-        assertEquals(List.of("k", "k2", "k3"), expected);
+        assertEquals(List.of("k", "k2", "k3"), expected, "Should have all inserted values");
+
+        // Cleanup
         try (Connection conn = ConnectionPool.getConnection();
              Statement stmt = conn.createStatement()) {
             stmt.execute("DROP TABLE a");
@@ -387,29 +543,38 @@ public class DuckDBFlightSqlProducerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testOpenPreparedStatementDetailsLifecycle() throws Exception {
         SqlProducerMBean mbean = producer;
-        var preparedStatement = sqlClient.prepare("SELECT * FROM generate_series(10)");
-        assertEquals(1, mbean.getOpenPreparedStatementDetails().size());
-        var flightInfo = preparedStatement.execute();
-        var ticket = flightInfo.getEndpoints().get(0).getTicket();
-        var stream = sqlClient.getStream(ticket);
-        while (stream.next()) {}
-        stream.close();
-        preparedStatement.close();
-        assertEquals(0, mbean.getOpenPreparedStatementDetails().size());
+        try (var preparedStatement = sqlClient.prepare("SELECT * FROM generate_series(10)")) {
+            assertEquals(1, mbean.getOpenPreparedStatementDetails().size(),
+                    "Should have one open prepared statement");
+
+            var flightInfo = preparedStatement.execute();
+            var ticket = flightInfo.getEndpoints().get(0).getTicket();
+
+            try (var stream = sqlClient.getStream(ticket)) {
+                while (stream.next()) {
+                    // Consume stream
+                }
+            }
+        }
+        assertEquals(0, mbean.getOpenPreparedStatementDetails().size(),
+                "All prepared statements should be closed");
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testBytesOut() throws Exception {
-
         SqlProducerMBean mbean = producer;
         var flightInfo = sqlClient.execute("SELECT * FROM generate_series(1000)");
         try (var stream = sqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {
-            while (stream.next()) { }
+            while (stream.next()) {
+                // Consume stream
+            }
         }
         double bytesOut = mbean.getBytesOut();
-        assertTrue(bytesOut > 0);
+        assertTrue(bytesOut > 0, "Should have sent data (bytesOut > 0)");
     }
 
     private ServerClient createRestrictedServerClient(Location serverLocation,

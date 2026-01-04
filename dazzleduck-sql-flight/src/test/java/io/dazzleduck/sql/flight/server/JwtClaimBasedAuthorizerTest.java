@@ -6,8 +6,11 @@ import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.Location;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.concurrent.TimeUnit;
 
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
@@ -24,10 +27,12 @@ public class JwtClaimBasedAuthorizerTest {
     public static final String TEST_TABLE =  "test_jwt_table";
     public static final String UNAUTHORIZED_TABLE = "unauthorized_"+TEST_TABLE;
     public static ServerClient SERVER_CLIENT = null;
+    private static Location SERVER_TEST_LOCATION;
 
-    static Location SERVER_TEST_LOCATION = Location.forGrpcInsecure("localhost", 38889);
     @BeforeAll
     public static void setup() throws IOException, NoSuchAlgorithmException {
+        // Use dynamic port allocation
+        SERVER_TEST_LOCATION = FlightTestUtils.findNextLocation();
         var flightTestUtils = FlightTestUtils.createForDatabaseSchema(TEST_USER, "password", TEST_CATALOG, TEST_SCHEMA);
         var  tableName = "%s.%s.%s".formatted(TEST_CATALOG, TEST_SCHEMA, TEST_TABLE);
         var  unauthorizedTableName = "%s.%s.%s".formatted(TEST_CATALOG, TEST_SCHEMA, UNAUTHORIZED_TABLE);
@@ -40,10 +45,24 @@ public class JwtClaimBasedAuthorizerTest {
     }
 
     @AfterAll
-    public static void cleanup() throws InterruptedException {
-        SERVER_CLIENT.flightServer().close();
-        ConnectionPool.execute("DROP SCHEMA %s.%s CASCADE".formatted(TEST_CATALOG, TEST_SCHEMA));
-        ConnectionPool.execute("DETACH %s".formatted(TEST_CATALOG));
+    public static void cleanup() throws Exception {
+        // Close all resources
+        if (SERVER_CLIENT != null) {
+            SERVER_CLIENT.close();
+        }
+
+        // Clean up database
+        try {
+            ConnectionPool.execute("DROP SCHEMA %s.%s CASCADE".formatted(TEST_CATALOG, TEST_SCHEMA));
+        } catch (Exception e) {
+            System.err.println("Error dropping schema: " + e.getMessage());
+        }
+
+        try {
+            ConnectionPool.execute("DETACH %s".formatted(TEST_CATALOG));
+        } catch (Exception e) {
+            System.err.println("Error detaching catalog: " + e.getMessage());
+        }
     }
 
 
@@ -64,6 +83,7 @@ public class JwtClaimBasedAuthorizerTest {
             "select * from " + TEST_TABLE,
             "select * from " + TEST_CATALOG +"." + TEST_SCHEMA+"." + TEST_TABLE
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testAuthorizedTable(String testQuery) throws Exception {
         var expectedQuery = "select * from %s.%s.%s where key =  'k2'".formatted(TEST_CATALOG, TEST_SCHEMA, TEST_TABLE);
         FlightTestUtils.testQuery(expectedQuery,  testQuery, SERVER_CLIENT.flightSqlClient(), SERVER_CLIENT.clientAllocator());
@@ -74,6 +94,7 @@ public class JwtClaimBasedAuthorizerTest {
             "select * from " + UNAUTHORIZED_TABLE,
             "select * from " + TEST_CATALOG +"." + TEST_SCHEMA+"." + UNAUTHORIZED_TABLE
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testUnAuthorizedTable(String testQuery) throws Exception {
         assertThrows(FlightRuntimeException.class, () -> SERVER_CLIENT.flightSqlClient().execute(testQuery));
     }
@@ -82,6 +103,7 @@ public class JwtClaimBasedAuthorizerTest {
     @ValueSource(strings = {
             TestConstants.SUPPORTED_HIVE_PATH_QUERY
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testAuthorizedPath(String testQuery) throws Exception {
         var expectedQuery = "%s where key =  'k2'".formatted(TestConstants.SUPPORTED_HIVE_PATH_QUERY);
         FlightTestUtils.testQuery(expectedQuery, testQuery, SERVER_CLIENT.flightSqlClient(), SERVER_CLIENT.clientAllocator());
@@ -91,6 +113,7 @@ public class JwtClaimBasedAuthorizerTest {
     @ValueSource(strings = {
             TestConstants.SUPPORTED_HIVE_UNAUTHORIZED_PATH_QUERY
     })
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testUnAuthorizedPath(String testQuery) throws Exception {
         var expectedQuery = "%s where key =  'k2'".formatted(TestConstants.SUPPORTED_HIVE_PATH_QUERY);
         assertThrows(FlightRuntimeException.class, () -> FlightTestUtils.testQuery(expectedQuery,  testQuery, SERVER_CLIENT.flightSqlClient(), SERVER_CLIENT.clientAllocator()));

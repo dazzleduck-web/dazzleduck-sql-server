@@ -16,6 +16,26 @@ import java.util.function.Function;
 
 import static io.dazzleduck.sql.commons.ExpressionConstants.*;
 
+/**
+ * Utility class for SQL Abstract Syntax Tree (AST) transformations.
+ *
+ * <p>This class provides functions to:
+ * <ul>
+ *   <li>Parse SQL queries into JSON AST representation using DuckDB's json_serialize_sql</li>
+ *   <li>Transform AST nodes (filter pushdown, predicate rewriting, table extraction)</li>
+ *   <li>Serialize AST back to SQL using json_deserialize_sql</li>
+ * </ul>
+ *
+ * <p>The JSON AST structure follows DuckDB's logical plan format with nodes containing:
+ * <ul>
+ *   <li>"class" - node class (e.g., COMPARISON, CONJUNCTION)</li>
+ *   <li>"type" - specific type (e.g., SELECT_NODE, BASE_TABLE)</li>
+ *   <li>"children" - child nodes</li>
+ *   <li>type-specific fields (e.g., "left"/"right" for comparisons)</li>
+ * </ul>
+ *
+ * @see ExpressionFactory for creating new AST nodes
+ */
 public class Transformations {
 
     public enum TableType {
@@ -53,13 +73,13 @@ public class Transformations {
         if (!IS_CONJUNCTION_AND.apply(n)) {
             return false;
         }
-        JsonNode children = n.get("children");
-        return children == null || children.isEmpty();
+        JsonNode children = n.get(FIELD_CHILDREN);
+        return children == null || !children.isArray() || children.isEmpty();
     };
 
     public static Function<JsonNode, Boolean> isFunction(String functionName) {
         return n -> {
-            var name = n.get("function_name");
+            var name = n.get(FIELD_FUNCTION_NAME);
             if (name == null)
                 return false;
 
@@ -70,28 +90,42 @@ public class Transformations {
 
     public static Function<JsonNode, Boolean> isTableFunction(String functionName) {
         return n -> {
-            var function = n.get("function");
-            if (function == null )
+            if (n == null || functionName == null) {
                 return false;
-
+            }
+            var function = n.get(FIELD_FUNCTION);
+            if (function == null) {
+                return false;
+            }
+            JsonNode functionNameNode = function.get(FIELD_FUNCTION_NAME);
+            if (functionNameNode == null) {
+                return false;
+            }
             return isType(TABLE_FUNCTION_TYPE).apply(n)
-                    && functionName.equals(function.get("function_name").asText());
+                    && functionName.equals(functionNameNode.asText());
         };
     }
 
     public static Function<JsonNode, Boolean> isBaseTable(String functionName) {
         return n -> {
-            var function = n.get("function");
-            if (function == null )
+            if (n == null || functionName == null) {
                 return false;
-
+            }
+            var function = n.get(FIELD_FUNCTION);
+            if (function == null) {
+                return false;
+            }
+            JsonNode functionNameNode = function.get(FIELD_FUNCTION_NAME);
+            if (functionNameNode == null) {
+                return false;
+            }
             return isType(TABLE_FUNCTION_TYPE).apply(n)
-                    && functionName.equals(function.get("function_name").asText());
+                    && functionName.equals(functionNameNode.asText());
         };
     }
 
     public static final Function<JsonNode, Boolean> IS_REFERENCE_CAST = node -> {
-        return IS_CAST.apply(node) && node.get("child") !=null && IS_REFERENCE.apply(node.get("child"));
+        return IS_CAST.apply(node) && node.get(FIELD_CHILD) != null && IS_REFERENCE.apply(node.get(FIELD_CHILD));
     };
 
     public static final Function<JsonNode, Boolean> IS_SELECT = isType(SELECT_NODE_TYPE);
@@ -101,19 +135,24 @@ public class Transformations {
     public static final Function<JsonNode, Boolean> IS_SUBQUERY = isType(SUBQUERY_TYPE);
 
     /**
-     * Set string to ?, Integer to -1 and Decimal to -1.0
+     * Replaces constant values with placeholder values for pattern matching.
+     * <ul>
+     *   <li>VARCHAR values become "?"</li>
+     *   <li>INTEGER values become -1</li>
+     *   <li>DECIMAL values become -1.0</li>
+     * </ul>
      */
     public static final Function<JsonNode, JsonNode> REPLACE_CONSTANT = node -> {
         JsonNode result = node.deepCopy();
-        ObjectNode valueNode = (ObjectNode) result.get("value");
-        ObjectNode type = (ObjectNode) valueNode.get("type");
+        ObjectNode valueNode = (ObjectNode) result.get(FIELD_VALUE);
+        ObjectNode type = (ObjectNode) valueNode.get(FIELD_TYPE);
         String id = type.get("id").asText();
-        if (id.equals("VARCHAR")) {
-            valueNode.put("value", "?");
-        } else if (id.equals("INTEGER")) {
-            valueNode.put("value", -1);
-        } else if (id.equals("DECIMAL")) {
-            valueNode.put("value", -1);
+        if (id.equals(TYPE_VARCHAR)) {
+            valueNode.put(FIELD_VALUE, "?");
+        } else if (id.equals(TYPE_INTEGER)) {
+            valueNode.put(FIELD_VALUE, -1);
+        } else if (id.equals(TYPE_DECIMAL)) {
+            valueNode.put(FIELD_VALUE, -1);
             ObjectNode typeInfo = (ObjectNode) type.get("type_info").deepCopy();
             typeInfo.put("width", 1);
             typeInfo.put("scale", 1);
@@ -124,8 +163,8 @@ public class Transformations {
 
     public static Function<JsonNode, Boolean> isClassAndType(String clazz, String type) {
         return node -> {
-            JsonNode classNode = node.get("class");
-            JsonNode typeNode = node.get("type");
+            JsonNode classNode = node.get(FIELD_CLASS);
+            JsonNode typeNode = node.get(FIELD_TYPE);
             return classNode != null && typeNode != null && classNode.asText().equals(clazz)
                     && typeNode.asText().equals(type);
         };
@@ -133,14 +172,14 @@ public class Transformations {
 
     public static Function<JsonNode, Boolean> isClass(String clazz) {
         return node -> {
-            JsonNode classNode = node.get("class");
+            JsonNode classNode = node.get(FIELD_CLASS);
             return classNode != null && classNode.asText().equals(clazz);
         };
     }
 
     public static Function<JsonNode, Boolean> isType(String type) {
         return node -> {
-            JsonNode typeNode = node.get("type");
+            JsonNode typeNode = node.get(FIELD_TYPE);
             return typeNode != null && typeNode.asText().equals(type);
         };
     }
@@ -201,7 +240,7 @@ public class Transformations {
                                                                                     Map<String, String> dataTypeMap) {
         return n -> {
             JsonNode copyNode = n.deepCopy();
-            Iterator<JsonNode> it = copyNode.get("children").iterator();
+            Iterator<JsonNode> it = copyNode.get(FIELD_CHILDREN).iterator();
             ArrayNode newFilter = new ArrayNode(new JsonNodeFactory(false));
             Function<JsonNode, JsonNode> replaceRule = replaceEqualMinMaxFromComparison(minMapping, maxMapping, dataTypeMap);
             while (it.hasNext()) {
@@ -211,7 +250,7 @@ public class Transformations {
                     newFilter.add(newNode);
                 }
             }
-            ((ObjectNode) copyNode).set("children", newFilter);
+            ((ObjectNode) copyNode).set(FIELD_CHILDREN, newFilter);
             return copyNode;
         };
     }
@@ -220,20 +259,20 @@ public class Transformations {
     public static Function<JsonNode, JsonNode> removeNonPartitionColumnsPredicatesInQuery(Set<String> partitionColumns) {
         return n -> {
             ObjectNode c = n.deepCopy();
-            JsonNode where = n.get("where_clause");
+            JsonNode where = n.get(FIELD_WHERE_CLAUSE);
             if (where == null || where instanceof NullNode) {
                 return c;
             }
             if (IS_CONJUNCTION_AND.apply(where)) {
                 JsonNode w = transform(where, Transformations.IS_CONJUNCTION_AND,
                         removeNonPartitionColumnsPredicatesFromAndConjunction(partitionColumns));
-                c.set("where_clause", w);
+                c.set(FIELD_WHERE_CLAUSE, w);
             } else if (IS_COMPARISON.apply(where)) {
                 JsonNode w = transform(where, IS_COMPARISON,
                         removeNonPartitionColumnsPredicatesFromComparison(partitionColumns));
-                c.set("where_clause", w);
+                c.set(FIELD_WHERE_CLAUSE, w);
             } else {
-                c.set("where_clause", null);
+                c.set(FIELD_WHERE_CLAUSE, null);
             }
             return c;
         };
@@ -246,29 +285,36 @@ public class Transformations {
         return n -> {
             ObjectNode query = n.deepCopy();
             var firstStatementNode = (ObjectNode) Transformations.getFirstStatementNode(query);
-            ObjectNode from_table = (ObjectNode) firstStatementNode.get("from_table");
-            from_table.put("table_name", statTable);
-            from_table.put("schema_name", "");
-            from_table.put("catalog_name", "");
-            JsonNode where = firstStatementNode.get("where_clause");
+            ObjectNode from_table = (ObjectNode) firstStatementNode.get(FIELD_FROM_TABLE);
+            from_table.put(FIELD_TABLE_NAME, statTable);
+            from_table.put(FIELD_SCHEMA_NAME, "");
+            from_table.put(FIELD_CATALOG_NAME, "");
+            JsonNode where = firstStatementNode.get(FIELD_WHERE_CLAUSE);
             if (where == null || where instanceof NullNode) {
                 return query;
             }
             if (IS_CONJUNCTION_AND.apply(where)) {
                 JsonNode w = Transformations.transform(where, IS_CONJUNCTION_AND, replaceEqualMinMaxFromAndConjunction(minMapping, maxMapping, dataTypeMap));
-                firstStatementNode.set("where_clause", w);
+                firstStatementNode.set(FIELD_WHERE_CLAUSE, w);
             } else if (IS_COMPARISON.apply(where)) {
                 JsonNode w = Transformations.transform(where, IS_COMPARISON, replaceEqualMinMaxFromComparison(minMapping, maxMapping, dataTypeMap));
-                firstStatementNode.set("where_clause", w);
+                firstStatementNode.set(FIELD_WHERE_CLAUSE, w);
             } else {
-                firstStatementNode.set("where_clause", null);
+                firstStatementNode.set(FIELD_WHERE_CLAUSE, null);
             }
             return query;
         };
     }
 
     public static String[] getReferenceName(JsonNode node) {
-        ArrayNode array = (ArrayNode) node.get("column_names");
+        if (node == null) {
+            throw new IllegalArgumentException("Node cannot be null");
+        }
+        JsonNode columnNamesNode = node.get(FIELD_COLUMN_NAMES);
+        if (columnNamesNode == null || !columnNamesNode.isArray()) {
+            throw new IllegalStateException("Node has no 'column_names' array field. Node: " + node);
+        }
+        ArrayNode array = (ArrayNode) columnNamesNode;
         String[] res = new String[array.size()];
         for (int i = 0; i < res.length; i++) {
             res[i] = array.get(i).asText();
@@ -277,18 +323,35 @@ public class Transformations {
     }
 
     /**
-     * a &lt; 10
-     * a &lt;= 10
-     * 10 &gt; a
-     * 10 &gt;=a
-     * a = 10
-     * 10 = a
+     * Checks if a comparison node represents an upper bound predicate.
+     * <p>Matches patterns like:
+     * <ul>
+     *   <li>a &lt; 10</li>
+     *   <li>a &lt;= 10</li>
+     *   <li>10 &gt; a</li>
+     *   <li>10 &gt;= a</li>
+     *   <li>a = 10</li>
+     *   <li>10 = a</li>
+     * </ul>
+     *
+     * @param node the comparison node to check
+     * @return true if the node represents an upper bound, false otherwise
      */
     public static boolean isUpperBound(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
         JsonNode left = node.get("left");
         JsonNode right = node.get("right");
-        String clazz = node.get("class").asText();
-        String type = node.get("type").asText();
+        JsonNode classNode = node.get(FIELD_CLASS);
+        JsonNode typeNode = node.get(FIELD_TYPE);
+
+        if (classNode == null || typeNode == null) {
+            return false;
+        }
+
+        String clazz = classNode.asText();
+        String type = typeNode.asText();
         return (IS_REFERENCE.apply(left) && IS_CONSTANT.apply(right) && clazz.equals(COMPARISON_CLASS)
                 && (type.equals(COMPARE_TYPE_LESSTHAN) || type.equals(COMPARE_TYPE_LESSTHANOREQUALTO) || type.equals(COMPARE_TYPE_EQUAL))
                 || IS_REFERENCE.apply(right) && IS_CONSTANT.apply(left) && clazz.equals(COMPARISON_CLASS)
@@ -297,18 +360,35 @@ public class Transformations {
 
 
     /**
-     * a &gt; 10
-     * a &gt;= 10
-     * 10 &lt; a
-     * 10 &lt;= a
-     * a = 10
-     * 10 = a
+     * Checks if a comparison node represents a lower bound predicate.
+     * <p>Matches patterns like:
+     * <ul>
+     *   <li>a &gt; 10</li>
+     *   <li>a &gt;= 10</li>
+     *   <li>10 &lt; a</li>
+     *   <li>10 &lt;= a</li>
+     *   <li>a = 10</li>
+     *   <li>10 = a</li>
+     * </ul>
+     *
+     * @param node the comparison node to check
+     * @return true if the node represents a lower bound, false otherwise
      */
     public static boolean isLowerBound(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
         JsonNode left = node.get("left");
         JsonNode right = node.get("right");
-        String clazz = node.get("class").asText();
-        String type = node.get("type").asText();
+        JsonNode classNode = node.get(FIELD_CLASS);
+        JsonNode typeNode = node.get(FIELD_TYPE);
+
+        if (classNode == null || typeNode == null) {
+            return false;
+        }
+
+        String clazz = classNode.asText();
+        String type = typeNode.asText();
         return (IS_REFERENCE.apply(left) && IS_CONSTANT.apply(right) && clazz.equals(COMPARISON_CLASS)
                 && (type.equals(COMPARE_TYPE_GREATERTHAN) || type.equals(COMPARE_TYPE_GREATERTHANOREQUALTO) || type.equals(COMPARE_TYPE_EQUAL))
                 || IS_REFERENCE.apply(right) && IS_CONSTANT.apply(left) && clazz.equals(COMPARISON_CLASS)
@@ -361,7 +441,7 @@ public class Transformations {
                 return ExpressionFactory.trueExpression();
             }
             List<List<String>> columnNames = collectColumnNames(references);
-            boolean failed = false;
+            // Check all column names are single-part and in partition set
             for (List<String> columnName : columnNames) {
                 if (columnName.size() != 1) {
                     return ExpressionFactory.trueExpression();
@@ -377,7 +457,7 @@ public class Transformations {
     public static Function<JsonNode, JsonNode> removeNonPartitionColumnsPredicatesFromAndConjunction(Set<String> partitions) {
         return n -> {
             ObjectNode node = n.deepCopy();
-            Iterator<JsonNode> it = node.get("children").iterator();
+            Iterator<JsonNode> it = node.get(FIELD_CHILDREN).iterator();
             ArrayNode newChildren = new ArrayNode(JsonNodeFactory.instance);
 
             while (it.hasNext()) {
@@ -385,7 +465,7 @@ public class Transformations {
                 JsonNode nc = removeNonPartitionColumnsPredicatesFromComparison(partitions).apply(next);
                 newChildren.add(nc);
             }
-            node.set("children", newChildren);
+            node.set(FIELD_CHILDREN, newChildren);
             return node;
         };
     }
@@ -393,7 +473,7 @@ public class Transformations {
     static List<List<String>> collectColumnNames(List<JsonNode> references) {
         List<List<String>> result = new ArrayList<>();
         for (JsonNode node : references) {
-            JsonNode names = node.get("column_names");
+            JsonNode names = node.get(FIELD_COLUMN_NAMES);
             List<String> currentList = new ArrayList<>();
             for (JsonNode n : names) {
                 currentList.add(n.asText());
@@ -473,17 +553,17 @@ public class Transformations {
     }
 
     public static Iterable<JsonNode> getChildren(JsonNode node) {
-        JsonNode children = node.get("children");
+        JsonNode children = node.get(FIELD_CHILDREN);
         if (children != null) {
             return children;
         }
-        JsonNode child = node.get("child");
+        JsonNode child = node.get(FIELD_CHILD);
 
         if(child != null) {
             return List.of(child);
         }
-        JsonNode left = node.get("left");
-        JsonNode right = node.get("right");
+        JsonNode left = node.get(FIELD_LEFT);
+        JsonNode right = node.get(FIELD_RIGHT);
         if (left != null && right != null) {
             return List.of(left, right);
         } else {
@@ -532,7 +612,7 @@ public class Transformations {
         if (matching.apply(input)) {
             changeFunction.accept(input);
         }
-        var children = (ArrayNode) input.get("children");
+        var children = (ArrayNode) input.get(FIELD_CHILDREN);
         if (children == null) {
             return;
         }
@@ -559,13 +639,13 @@ public class Transformations {
     }
 
     public static List<JsonNode> splitStatements(JsonNode tree) {
-        ArrayNode statements = (ArrayNode) tree.get("statements");
+        ArrayNode statements = (ArrayNode) tree.get(FIELD_STATEMENTS);
         List<JsonNode> results = new ArrayList<>();
         for (JsonNode s : statements) {
             ObjectNode res = tree.deepCopy();
             ArrayNode newStatements = new ArrayNode(JsonNodeFactory.instance, 1);
             newStatements.add(s);
-            res.set("statements", newStatements);
+            res.set(FIELD_STATEMENTS, newStatements);
             results.add(res);
         }
         return results;
@@ -578,30 +658,44 @@ public class Transformations {
     }
 
     public static JsonNode getFirstStatementNode(JsonNode jsonNode) {
-        var statements = (ArrayNode) jsonNode.get("statements");
-        var statement = statements.get(0);
-        return statement.get("node");
+        if (jsonNode == null) {
+            throw new IllegalArgumentException("JsonNode cannot be null");
+        }
+        JsonNode statementsNode = jsonNode.get(FIELD_STATEMENTS);
+        if (statementsNode == null || !statementsNode.isArray()) {
+            throw new IllegalStateException("JSON node has no 'statements' array field. Node: " + jsonNode);
+        }
+        ArrayNode statements = (ArrayNode) statementsNode;
+        if (statements.isEmpty()) {
+            throw new IllegalStateException("Statements array is empty. Node: " + jsonNode);
+        }
+        JsonNode statement = statements.get(0);
+        JsonNode node = statement.get(FIELD_NODE);
+        if (node == null) {
+            throw new IllegalStateException("Statement has no 'node' field. Statement: " + statement);
+        }
+        return node;
     }
 
     public static Function<JsonNode, JsonNode> FIRST_STATEMENT_NODE = Transformations::getFirstStatementNode;
 
     public static JsonNode getTableFunction(JsonNode tree) {
-        var fromNode = tree.get("from_table");
-        var fromTableType = fromNode.get("type").asText();
+        var fromNode = tree.get(FIELD_FROM_TABLE);
+        var fromTableType = fromNode.get(FIELD_TYPE).asText();
         switch (fromTableType) {
-            case "BASE_TABLE" -> {
-                throw new IllegalStateException("Reached BASE_TABLE");
+            case NODE_TYPE_BASE_TABLE -> {
+                throw new IllegalStateException("Cannot get table function for BASE_TABLE node. Expected TABLE_FUNCTION or SUBQUERY. Tree: " + tree);
             }
-            case "TABLE_FUNCTION" -> {
-                return fromNode.get("function");
+            case NODE_TYPE_TABLE_FUNCTION -> {
+                return fromNode.get(FIELD_FUNCTION);
             }
-            case "SUBQUERY" -> {
-                var node = fromNode.get("subquery").get("node");
-                var type = node.get("type").asText();
-                if (type.equals("SET_OPERATION_NODE")) {
-                    return getTableFunction(node.get("right"));
-                } else if (type.equals("SELECT_NODE")) {
-                    getTableFunction(node);
+            case NODE_TYPE_SUBQUERY -> {
+                var node = fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE);
+                var type = node.get(FIELD_TYPE).asText();
+                if (type.equals(NODE_TYPE_SET_OPERATION_NODE)) {
+                    return getTableFunction(node.get(FIELD_RIGHT));
+                } else if (type.equals(NODE_TYPE_SELECT_NODE)) {
+                    return getTableFunction(node);
                 }
                 return null;
             }
@@ -610,22 +704,22 @@ public class Transformations {
     }
 
     public static JsonNode getTableFunctionParent(JsonNode tree) {
-        var fromNode = tree.get("from_table");
-        var fromTableType = fromNode.get("type").asText();
+        var fromNode = tree.get(FIELD_FROM_TABLE);
+        var fromTableType = fromNode.get(FIELD_TYPE).asText();
         switch (fromTableType) {
-            case "BASE_TABLE" -> {
-                throw new IllegalStateException("Reached BASE_TABLE");
+            case NODE_TYPE_BASE_TABLE -> {
+                throw new IllegalStateException("Cannot get table function parent for BASE_TABLE node. Tree: " + tree);
             }
-            case "TABLE_FUNCTION" -> {
+            case NODE_TYPE_TABLE_FUNCTION -> {
                 return fromNode;
             }
-            case "SUBQUERY" -> {
-                var node = fromNode.get("subquery").get("node");
-                var type = node.get("type").asText();
-                if (type.equals("SET_OPERATION_NODE")) {
-                    return getTableFunctionParent(node.get("right"));
-                } else if (type.equals("SELECT_NODE")) {
-                    getTableFunctionParent(node);
+            case NODE_TYPE_SUBQUERY -> {
+                var node = fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE);
+                var type = node.get(FIELD_TYPE).asText();
+                if (type.equals(NODE_TYPE_SET_OPERATION_NODE)) {
+                    return getTableFunctionParent(node.get(FIELD_RIGHT));
+                } else if (type.equals(NODE_TYPE_SELECT_NODE)) {
+                    return getTableFunctionParent(node);
                 }
                 return null;
             }
@@ -634,13 +728,13 @@ public class Transformations {
     }
 
     public static JsonNode getSelectForBaseTable(JsonNode statementNode) {
-        var fromTable = statementNode.get("from_table");
-        switch (fromTable.get("type").asText()) {
-            case "BASE_TABLE" -> {
+        var fromTable = statementNode.get(FIELD_FROM_TABLE);
+        switch (fromTable.get(FIELD_TYPE).asText()) {
+            case NODE_TYPE_BASE_TABLE -> {
                 return statementNode;
             }
-            case "SUBQUERY" -> {
-                return getSelectForBaseTable(fromTable.get("subquery").get("node"));
+            case NODE_TYPE_SUBQUERY -> {
+                return getSelectForBaseTable(fromTable.get(FIELD_SUBQUERY).get(FIELD_NODE));
             }
             default -> {
                 return null;
@@ -649,21 +743,21 @@ public class Transformations {
     }
 
     public static JsonNode getSelectForTableFunction(JsonNode statementNode) {
-        var fromTable = statementNode.get("from_table");
-        var type = fromTable.get("type").asText();
+        var fromTable = statementNode.get(FIELD_FROM_TABLE);
+        var type = fromTable.get(FIELD_TYPE).asText();
         switch (type) {
-            case "BASE_TABLE" -> {
+            case NODE_TYPE_BASE_TABLE -> {
                 return statementNode;
             }
-            case "SUBQUERY" -> {
-                var subQueryNode = fromTable.get("subquery").get("node");
-                var subQueryNodeType = subQueryNode.get("type").asText();
+            case NODE_TYPE_SUBQUERY -> {
+                var subQueryNode = fromTable.get(FIELD_SUBQUERY).get(FIELD_NODE);
+                var subQueryNodeType = subQueryNode.get(FIELD_TYPE).asText();
                 switch (subQueryNodeType) {
-                    case "SELECT_NODE" -> {
+                    case NODE_TYPE_SELECT_NODE -> {
                         return getSelectForTableFunction(subQueryNode);
                     }
-                    case "SET_OPERATION_NODE" -> {
-                        if(subQueryNode.get("right").get("from_table").get("type").asText().equals("TABLE_FUNCTION")) {
+                    case NODE_TYPE_SET_OPERATION_NODE -> {
+                        if(subQueryNode.get(FIELD_RIGHT).get(FIELD_FROM_TABLE).get(FIELD_TYPE).asText().equals(NODE_TYPE_TABLE_FUNCTION)) {
                             return statementNode;
                         }
                         return null;
@@ -680,17 +774,26 @@ public class Transformations {
     }
 
     public static JsonNode getWhereClauseForBaseTable(JsonNode statementNode) {
-        return getSelectForBaseTable(statementNode).get("where_clause");
+        JsonNode selectNode = getSelectForBaseTable(statementNode);
+        return selectNode != null ? selectNode.get(FIELD_WHERE_CLAUSE) : null;
     }
 
     public static JsonNode getWhereClauseForTableFunction(JsonNode statementNode) {
-        return getSelectForTableFunction(statementNode).get("where_clause");
+        JsonNode selectNode = getSelectForTableFunction(statementNode);
+        return selectNode != null ? selectNode.get(FIELD_WHERE_CLAUSE) : null;
     }
 
     public static String[][]  getHivePartition(JsonNode tree){
         var select = getFirstStatementNode(tree);
         var tableFunction = Transformations.getTableFunction(select);
-        var children = (ArrayNode) tableFunction.get("children");
+        if (tableFunction == null) {
+            throw new IllegalStateException("No table function found in tree: " + tree);
+        }
+        JsonNode childrenNode = tableFunction.get(FIELD_CHILDREN);
+        if (childrenNode == null || !childrenNode.isArray()) {
+            throw new IllegalStateException("Table function has no children array. Function: " + tableFunction);
+        }
+        ArrayNode children = (ArrayNode) childrenNode;
         JsonNode partition = null;
         for( var c :  children){
             if(isHivePartition(c)){
@@ -698,67 +801,98 @@ public class Transformations {
                 break;
             }
         }
+        if (partition == null) {
+            throw new IllegalStateException("No hive partition found in table function children");
+        }
         return extractPartition(partition);
     }
 
 
 
     private static void getAllTablesOrPathsFromSelect(JsonNode statement, String catalogName, String schemaName, List<CatalogSchemaTable> collector) {
-        var fromNode = statement.get("from_table");
-        var fromTableType = fromNode.get("type").asText();
+        var fromNode = statement.get(FIELD_FROM_TABLE);
+        var fromTableType = fromNode.get(FIELD_TYPE).asText();
         switch (fromTableType) {
-            case "BASE_TABLE" -> {
-                var schemaFromQuery = fromNode.get("schema_name").asText();
-                var catalogFromQuery = fromNode.get("catalog_name").asText();
+            case NODE_TYPE_BASE_TABLE -> {
+                var schemaFromQuery = fromNode.get(FIELD_SCHEMA_NAME).asText();
+                var catalogFromQuery = fromNode.get(FIELD_CATALOG_NAME).asText();
                 var s = schemaFromQuery == null || schemaFromQuery.isEmpty() ? schemaName : schemaFromQuery;
                 var c = catalogFromQuery == null || catalogFromQuery.isEmpty() ? catalogName : catalogFromQuery;
-                collector.add(new CatalogSchemaTable(c, s, fromNode.get("table_name").asText(), TableType.BASE_TABLE));
+                collector.add(new CatalogSchemaTable(c, s, fromNode.get(FIELD_TABLE_NAME).asText(), TableType.BASE_TABLE));
             }
-            case "TABLE_FUNCTION" -> {
-                var function = fromNode.get("function");
-                var functionName = function.get("function_name").asText();
-                var functionChildren = function.get("children");
+            case NODE_TYPE_TABLE_FUNCTION -> {
+                var function = fromNode.get(FIELD_FUNCTION);
+                var functionName = function.get(FIELD_FUNCTION_NAME).asText();
+                var functionChildren = function.get(FIELD_CHILDREN);
+                if (functionChildren == null || !functionChildren.isArray() || functionChildren.isEmpty()) {
+                    throw new IllegalStateException("TABLE_FUNCTION node has no children. Function: " + functionName);
+                }
                 var firstChild = functionChildren.get(0);
-                collector.add(new CatalogSchemaTable(null, null, firstChild.get("value").get("value").asText(), TableType.TABLE_FUNCTION, functionName));
+                collector.add(new CatalogSchemaTable(null, null, firstChild.get(FIELD_VALUE).get(FIELD_VALUE).asText(), TableType.TABLE_FUNCTION, functionName));
             }
-            case "SUBQUERY" -> {
-                var node = fromNode.get("subquery").get("node");
-                if(node.get("type").asText().equals("SET_OPERATION_NODE")) {
+            case NODE_TYPE_SUBQUERY -> {
+                var node = fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE);
+                if(node.get(FIELD_TYPE).asText().equals(NODE_TYPE_SET_OPERATION_NODE)) {
                     getAllTablesOrPathsFromSetOperationNode(node, catalogName, schemaName, collector);
                 } else {
-                    getAllTablesOrPathsFromSelect(fromNode.get("subquery").get("node"), catalogName, schemaName, collector);
+                    getAllTablesOrPathsFromSelect(fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE), catalogName, schemaName, collector);
                 }
             }
 
-            case "SET_OPERATION_NODE" -> {
-                getAllTablesOrPathsFromSelect(fromNode.get("left"), catalogName, schemaName, collector);
-                getAllTablesOrPathsFromSelect(fromNode.get("right"), catalogName, schemaName, collector);
+            case NODE_TYPE_SET_OPERATION_NODE -> {
+                getAllTablesOrPathsFromSelect(fromNode.get(FIELD_LEFT), catalogName, schemaName, collector);
+                getAllTablesOrPathsFromSelect(fromNode.get(FIELD_RIGHT), catalogName, schemaName, collector);
             }
         }
     }
 
     private static void getAllTablesOrPathsFromSetOperationNode(JsonNode setOperation, String catalogName, String schemaName, List<CatalogSchemaTable> collector) {
-        getAllTablesOrPathsFromSelect(setOperation.get("left"), catalogName, schemaName, collector);
-        getAllTablesOrPathsFromSelect(setOperation.get("right"), catalogName, schemaName, collector);
+        getAllTablesOrPathsFromSelect(setOperation.get(FIELD_LEFT), catalogName, schemaName, collector);
+        getAllTablesOrPathsFromSelect(setOperation.get(FIELD_RIGHT), catalogName, schemaName, collector);
     }
 
     private static boolean isHivePartition(JsonNode node) {
-        if(node.get("type") != null  && node.get("type").asText().equals("COMPARE_EQUAL") && node.get("left") != null){
-            var left = node.get("left");
-            var names = left.get("column_names");
-            return names.get(0).asText().equals("hive_types");
+        if (node == null) {
+            return false;
+        }
+        JsonNode typeNode = node.get(FIELD_TYPE);
+        JsonNode leftNode = node.get(FIELD_LEFT);
+        if(typeNode != null  && typeNode.asText().equals(COMPARE_TYPE_EQUAL) && leftNode != null){
+            JsonNode names = leftNode.get(FIELD_COLUMN_NAMES);
+            if (names != null && names.isArray() && names.size() > 0) {
+                return names.get(0).asText().equals("hive_types");
+            }
         }
         return false;
     }
 
     private static String[][] extractPartition(JsonNode node){
-        var children = (ArrayNode) node.get("right").get("children");
-        var res = new String[children.size()][];
+        if (node == null) {
+            throw new IllegalArgumentException("Partition node cannot be null");
+        }
+        JsonNode rightNode = node.get(FIELD_RIGHT);
+        if (rightNode == null) {
+            throw new IllegalStateException("Partition node has no 'right' field. Node: " + node);
+        }
+        JsonNode childrenNode = rightNode.get(FIELD_CHILDREN);
+        if (childrenNode == null || !childrenNode.isArray()) {
+            throw new IllegalStateException("Partition right node has no 'children' array. Node: " + rightNode);
+        }
+        ArrayNode children = (ArrayNode) childrenNode;
+        String[][] res = new String[children.size()][];
         int index = 0;
         for(JsonNode  c : children) {
-            var a = c.get("alias").asText();
-            var cn =  c.get("column_names").get(0).asText();
-            res[index++] = new String[]{a, cn};
+            JsonNode aliasNode = c.get(FIELD_ALIAS);
+            JsonNode columnNamesNode = c.get(FIELD_COLUMN_NAMES);
+            if (aliasNode == null) {
+                throw new IllegalStateException("Partition child has no 'alias' field. Child: " + c);
+            }
+            if (columnNamesNode == null || !columnNamesNode.isArray() || columnNamesNode.isEmpty()) {
+                throw new IllegalStateException("Partition child has no 'column_names' array or it's empty. Child: " + c);
+            }
+            String alias = aliasNode.asText();
+            String columnName = columnNamesNode.get(0).asText();
+            res[index++] = new String[]{alias, columnName};
         }
         return res;
     }
@@ -778,15 +912,48 @@ public class Transformations {
         return "select "  + String.join(",", childTypeString) + " where false";
     }
 
+    /**
+     * Extracts the constant value from a CONSTANT node.
+     * <p><b>Note:</b> Currently only supports VARCHAR type. The generic return type is
+     * maintained for backward compatibility but will always return String.
+     *
+     * @param constant the CONSTANT node
+     * @param <T> the expected type (currently only String is supported)
+     * @return the constant value as a String
+     * @throws IllegalStateException if the constant is not VARCHAR type or has unexpected structure
+     */
+    @SuppressWarnings("unchecked")
     public static <T> T getConstant(JsonNode constant) {
-        assert (CONSTANT_CLASS.equals(constant.get("class").asText()));
-        var valueNode = constant.get("value");
-        var valueType = valueNode.get("type").get("id").asText();
+        if (constant == null) {
+            throw new IllegalArgumentException("Constant node cannot be null");
+        }
+        JsonNode classNode = constant.get(FIELD_CLASS);
+        if (classNode == null || !CONSTANT_CLASS.equals(classNode.asText())) {
+            throw new IllegalStateException("Expected CONSTANT class but got: " + (classNode != null ? classNode.asText() : "null"));
+        }
+
+        var valueNode = constant.get(FIELD_VALUE);
+        if (valueNode == null) {
+            throw new IllegalStateException("CONSTANT node has no value field");
+        }
+
+        JsonNode typeNode = valueNode.get(FIELD_TYPE);
+        if (typeNode == null) {
+            throw new IllegalStateException("CONSTANT value has no type field");
+        }
+
+        JsonNode idNode = typeNode.get("id");
+        if (idNode == null) {
+            throw new IllegalStateException("CONSTANT type has no id field");
+        }
+
+        String valueType = idNode.asText();
         switch (valueType) {
-            case "VARCHAR" -> {
-                return (T) valueNode.get("value").asText();
+            case TYPE_VARCHAR -> {
+                return (T) valueNode.get(FIELD_VALUE).asText();
             }
-            default -> throw new IllegalStateException("Not supported " + valueType);
+            default -> throw new IllegalStateException(
+                    "Unsupported constant type: " + valueType + ". Only VARCHAR is currently supported. Node: " + constant);
         }
     }
 
@@ -803,8 +970,11 @@ public class Transformations {
 
     private static String mapCast(JsonNode node) {
         var typeInfo = (ArrayNode)node.get("type_info").get("child_type").get("type_info").get("child_types");
-        var key = getTypeString(typeInfo.get(1).get("second"));
-        var value = getTypeString(typeInfo.get(1).get("second"));
+        if (typeInfo == null || typeInfo.size() < 2) {
+            throw new IllegalStateException("MAP type info must have at least 2 child types. Node: " + node);
+        }
+        var key = getTypeString(typeInfo.get(0).get("second"));    // Fixed: use index 0 for key
+        var value = getTypeString(typeInfo.get(1).get("second")); // index 1 for value
         return "Map(" + key +"," + value +")";
     }
 
@@ -830,16 +1000,16 @@ public class Transformations {
     private static String getTypeString(JsonNode jsonNode){
         var id = jsonNode.get("id").asText();
         switch (id) {
-            case "STRUCT" -> {
+            case TYPE_STRUCT -> {
                 return structCast(jsonNode);
             }
-            case "MAP" -> {
+            case TYPE_MAP -> {
                 return mapCast(jsonNode);
             }
-            case "LIST" -> {
+            case TYPE_LIST -> {
                 return listCast(jsonNode);
             }
-            case "DECIMAL" -> {
+            case TYPE_DECIMAL -> {
                 return decimalCast(jsonNode);
             }
             default -> {

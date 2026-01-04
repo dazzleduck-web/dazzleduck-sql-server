@@ -9,6 +9,9 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+import java.util.concurrent.TimeUnit;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -94,11 +97,41 @@ public class DucklakeFlightTest {
 
 
     @AfterAll
-    public static void cleanup()  {
-        ConnectionPool.execute("DETACH %s".formatted( CATALOG));
+    public static void cleanup() throws IOException {
+        // Detach catalog
+        ConnectionPool.execute("DETACH %s".formatted(CATALOG));
+
+        // Clean up workspace directory
+        if (workspace != null) {
+            try {
+                deleteDirectory(new java.io.File(workspace));
+            } catch (Exception e) {
+                System.err.println("Error deleting workspace: " + e.getMessage());
+            }
+        }
+    }
+
+    private static void deleteDirectory(java.io.File directory) throws IOException {
+        if (directory == null || !directory.exists()) {
+            return;
+        }
+
+        if (directory.isDirectory()) {
+            java.io.File[] files = directory.listFiles();
+            if (files != null) {
+                for (java.io.File file : files) {
+                    deleteDirectory(file);
+                }
+            }
+        }
+
+        if (!directory.delete()) {
+            throw new IOException("Failed to delete: " + directory.getAbsolutePath());
+        }
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testSimpleReadDucklakeQuery() throws Exception {
         try ( var serverClient = createRestrictedServerClient( "admin" )) {
             try (var splittableClient = splittableAdminClientForTable(serverClient.location(), serverClient.clientAllocator(), PARTITIONED_TABLE)) {
@@ -122,6 +155,7 @@ public class DucklakeFlightTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testFilterReadDucklakeQuery() throws Exception {
         try ( var serverClient = createRestrictedServerClient(  "admin" )) {
             try (var splittableClient = splittableAdminClientForTable(serverClient.location(), serverClient.clientAllocator(), PARTITIONED_TABLE)) {
@@ -146,6 +180,7 @@ public class DucklakeFlightTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testNoAccessReadDucklakeQuery() throws Exception {
         try ( var serverClient = createRestrictedServerClient(  "admin" )) {
             try (var splittableClient = splittableAdminClientForTable(serverClient.location(), serverClient.clientAllocator(), PARTITIONED_TABLE)) {

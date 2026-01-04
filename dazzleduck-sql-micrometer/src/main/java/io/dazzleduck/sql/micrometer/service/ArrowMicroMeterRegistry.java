@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.micrometer.service;
 
-import io.dazzleduck.sql.common.ingestion.FlightSender;
+import io.dazzleduck.sql.client.FlightProducer;
 import io.dazzleduck.sql.common.types.JavaRow;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
@@ -20,13 +20,13 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
     private static final Logger log =
             LoggerFactory.getLogger(ArrowMicroMeterRegistry.class);
 
-    private final FlightSender sender;
+    private final FlightProducer sender;
     private final String application_id;
     private final String application_name;
     private final String application_host;
 
     public ArrowMicroMeterRegistry(
-            FlightSender sender,
+            FlightProducer sender,
             Clock clock,
             Duration step,
             String applicationId,

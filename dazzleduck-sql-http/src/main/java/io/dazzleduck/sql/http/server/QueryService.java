@@ -18,11 +18,17 @@ public class QueryService extends AbstractQueryBasedService {
 
     private final FlightProducer flightProducer;
     private final String producerId;
+    private final HttpConfig httpConfig;
 
     public QueryService(SimpleBulkIngestConsumer flightProducer, AccessMode accessMode) {
+        this(flightProducer, accessMode, HttpConfig.defaultConfig());
+    }
+
+    public QueryService(SimpleBulkIngestConsumer flightProducer, AccessMode accessMode, HttpConfig httpConfig) {
         super(accessMode);
         this.flightProducer = flightProducer;
         this.producerId = flightProducer.getProducerId();
+        this.httpConfig = httpConfig;
     }
 
 
@@ -30,17 +36,30 @@ public class QueryService extends AbstractQueryBasedService {
                                   ServerResponse response,
                                   QueryRequest query) {
         var context = ControllerService.createContext(request);
+        OutputStreamServerStreamListener listener = null;
         try {
             var id = query.id() == null ? StatementHandle.nextStatementId() : query.id();
             var statementHandle = StatementHandle.newStatementHandle(id, query.query(), producerId, -1);
             var ticket = createTicket(statementHandle);
-            var listener = new OutputStreamServerStreamListener(response);
+            listener = new OutputStreamServerStreamListener(response);
             flightProducer.getStream(context, ticket, listener);
-            listener.waitForEnd();
+            listener.waitForEnd(httpConfig.getQueryTimeoutMs());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // Restore interrupt status
+            logger.atError().setCause(e).log("Query execution interrupted");
+            String errorMsg = "Query execution interrupted";
+            response.status(Status.INTERNAL_SERVER_ERROR_500);
+            response.send(errorMsg);
         } catch (Exception e) {
             logger.atError().setCause(e).log("Error sending query result");
-            response.send(e.getMessage());
+            String errorMsg = e.getMessage() != null ? e.getMessage() : "Internal server error";
             response.status(Status.INTERNAL_SERVER_ERROR_500);
+            response.send(errorMsg);
+        } finally {
+            // Ensure listener is properly completed even on exception
+            if (listener != null && !listener.isCompleted()) {
+                listener.forceComplete();
+            }
         }
     }
 

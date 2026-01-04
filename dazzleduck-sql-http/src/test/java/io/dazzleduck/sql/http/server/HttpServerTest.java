@@ -16,9 +16,11 @@ import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.duckdb.DuckDBConnection;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -78,6 +80,33 @@ public class HttpServerTest {
         Main.main(args3);
         String[] sqls = {"INSTALL arrow FROM community", "LOAD arrow"};
         ConnectionPool.executeBatch(sqls);
+    }
+
+    @AfterAll
+    public static void cleanup() throws Exception {
+        // Clean up warehouse directory
+        if (warehousePath != null) {
+            deleteDirectory(new File(warehousePath));
+        }
+    }
+
+    private static void deleteDirectory(File directory) throws IOException {
+        if (directory == null || !directory.exists()) {
+            return;
+        }
+
+        if (directory.isDirectory()) {
+            File[] files = directory.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    deleteDirectory(file);
+                }
+            }
+        }
+
+        if (!directory.delete()) {
+            throw new IOException("Failed to delete: " + directory.getAbsolutePath());
+        }
     }
 
     @Test
@@ -394,6 +423,7 @@ public class HttpServerTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
     public void testIngestionPostConcurrent() throws IOException, SQLException {
         final int totalRequests = 100;
         final int parallelism = 100;
@@ -446,6 +476,7 @@ public class HttpServerTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testCancelWithGet() throws Exception {
         var jwt = login(TEST_PORT2);
         String auth = jwt.tokenType() + " " + jwt.accessToken();
@@ -481,6 +512,7 @@ public class HttpServerTest {
 
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testCancelWithPost() throws Exception {
         var jwt = login(TEST_PORT2);
         String auth = jwt.tokenType() + " " + jwt.accessToken();
@@ -517,11 +549,8 @@ public class HttpServerTest {
     }
 
     @Test
-    @Disabled
-    /**
-     * Disabled because as of now there is no way to slow the down the processing of the query
-     * By the time cancel is requested the query is already completed
-     */
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Disabled("No way to slow down query processing - cancel happens too fast")
     public void testCancelWithPlanning() throws Exception {
         var jwt = login(TEST_PLANNING_PORT);
         String auth = jwt.tokenType() + " " + jwt.accessToken();

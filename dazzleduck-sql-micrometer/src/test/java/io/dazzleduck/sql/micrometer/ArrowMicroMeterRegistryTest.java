@@ -2,7 +2,7 @@ package io.dazzleduck.sql.micrometer;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.client.HttpSender;
+import io.dazzleduck.sql.client.HttpProducer;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.micrometer.service.ArrowMicroMeterRegistry;
 import io.dazzleduck.sql.micrometer.util.ArrowFileWriterUtil;
@@ -51,7 +51,7 @@ class ArrowMicroMeterRegistryTest {
 
         schema = new Schema(java.util.List.of(new Field("timestamp", FieldType.nullable(new ArrowType.Utf8()), null)));
         ConnectionPool.execute("load arrow");
-        HttpSender sender = new HttpSender(
+        HttpProducer sender = new HttpProducer(
                 schema,
                 "http://localhost:8080",
                 "admin",
@@ -59,6 +59,7 @@ class ArrowMicroMeterRegistryTest {
                 "arrow.outputFile",
                 Duration.ofSeconds(6),
                 1024,                          // minBatchSize (test)
+                2048,                          // maxBatchSize (test)
                 Duration.ofSeconds(6),      // maxSendInterval
                 3,                          // retryCount
                 1000,                       // retryIntervalMillis

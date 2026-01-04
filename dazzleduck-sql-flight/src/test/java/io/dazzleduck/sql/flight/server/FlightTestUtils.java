@@ -1,6 +1,8 @@
 package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.ConfigFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.util.ConfigUtils;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
@@ -30,6 +32,8 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 public interface FlightTestUtils {
+
+    Logger logger = LoggerFactory.getLogger(FlightTestUtils.class);
 
     String USER = "admin";
     String PASSWORD = "password";
@@ -116,7 +120,7 @@ public interface FlightTestUtils {
         Thread severThread = new Thread(() -> {
             try {
                 flightServer.start();
-                System.out.println("Flight Server is up: Listening on URI: " + flightServer.getLocation().getUri());
+                logger.info("Flight Server is up: Listening on URI: {}", flightServer.getLocation().getUri());
                 flightServer.awaitTermination();
             } catch (IOException | InterruptedException e) {
                 throw new RuntimeException(e);

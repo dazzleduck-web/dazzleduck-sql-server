@@ -15,6 +15,7 @@ import org.jmock.lib.concurrent.DeterministicScheduler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,8 +34,12 @@ public class DuckDBSqlProducerTimeoutTest {
     private static final String PASSWORD = "password";
     private static final String TEST_CATALOG = "producer_test_catalog";
     private static final String TEST_SCHEMA = "test_schema";
-    private static final BufferAllocator clientAllocator = new RootAllocator(Integer.MAX_VALUE);
-    private static final BufferAllocator serverAllocator = new RootAllocator(Integer.MAX_VALUE);
+    private static final long ALLOCATOR_LIMIT = 1024 * 1024 * 1024; // 1GB
+
+    protected static BufferAllocator clientAllocator;
+    protected static BufferAllocator serverAllocator;
+    protected static DuckDBFlightSqlProducer producer;
+    protected static Path tempDir;
     private static final String LONG_RUNNING_QUERY = "with t as " +
             "(select len(split(concat('abcdefghijklmnopqrstuvwxyz:', generate_series), ':')) as len  from generate_series(1, 1000000000) )" +
             " select count(*) from t where len = 10";
@@ -47,8 +52,14 @@ public class DuckDBSqlProducerTimeoutTest {
 
     @BeforeAll
     public static void beforeAll() throws Exception {
-        Path tempDir = Files.createTempDirectory("duckdb_" + DuckDBFlightSqlProducerTest.class.getName());
-        warehousePath = Files.createTempDirectory("duckdb_warehouse_" + DuckDBFlightSqlProducerTest.class.getName()).toString();
+        // Create allocators with reasonable limits
+        clientAllocator = new RootAllocator(ALLOCATOR_LIMIT);
+        serverAllocator = new RootAllocator(ALLOCATOR_LIMIT);
+
+        // Create temporary directories
+        tempDir = Files.createTempDirectory("duckdb_" + DuckDBSqlProducerTimeoutTest.class.getName());
+        warehousePath = Files.createTempDirectory("duckdb_warehouse_" + DuckDBSqlProducerTimeoutTest.class.getName()).toString();
+
         String[] sql = {
                 String.format("ATTACH '%s/file.db' AS %s", tempDir.toString(), TEST_CATALOG),
                 String.format("USE %s", TEST_CATALOG),
@@ -61,34 +72,116 @@ public class DuckDBSqlProducerTimeoutTest {
 
 
     @AfterAll
-    public static void afterAll() {
+    public static void afterAll() throws Exception {
+        // Detach catalog
         String[] sql = { "DETACH  " + TEST_CATALOG };
         ConnectionPool.executeBatch(sql);
-        clientAllocator.close();
+
+        // Close clients and servers
+        if (sqlClient != null) {
+            try {
+                sqlClient.close();
+            } catch (Exception e) {
+                System.err.println("Error closing sqlClient: " + e.getMessage());
+            }
+        }
+
+        if (flightServer != null) {
+            try {
+                flightServer.close();
+            } catch (Exception e) {
+                System.err.println("Error closing flightServer: " + e.getMessage());
+            }
+        }
+
+        if (producer != null) {
+            try {
+                producer.close();
+            } catch (Exception e) {
+                System.err.println("Error closing producer: " + e.getMessage());
+            }
+        }
+
+        // Close allocators
+        if (clientAllocator != null) {
+            try {
+                clientAllocator.close();
+            } catch (Exception e) {
+                System.err.println("Error closing clientAllocator: " + e.getMessage());
+            }
+        }
+
+        if (serverAllocator != null) {
+            try {
+                serverAllocator.close();
+            } catch (Exception e) {
+                System.err.println("Error closing serverAllocator: " + e.getMessage());
+            }
+        }
+
+        // Clean up temporary directories
+        if (warehousePath != null) {
+            try {
+                deleteDirectory(new java.io.File(warehousePath));
+            } catch (Exception e) {
+                System.err.println("Error deleting warehousePath: " + e.getMessage());
+            }
+        }
+
+        if (tempDir != null) {
+            try {
+                deleteDirectory(tempDir.toFile());
+            } catch (Exception e) {
+                System.err.println("Error deleting tempDir: " + e.getMessage());
+            }
+        }
+    }
+
+    private static void deleteDirectory(java.io.File directory) throws java.io.IOException {
+        if (directory == null || !directory.exists()) {
+            return;
+        }
+
+        if (directory.isDirectory()) {
+            java.io.File[] files = directory.listFiles();
+            if (files != null) {
+                for (java.io.File file : files) {
+                    deleteDirectory(file);
+                }
+            }
+        }
+
+        if (!directory.delete()) {
+            throw new java.io.IOException("Failed to delete: " + directory.getAbsolutePath());
+        }
     }
 
     private static void setUpClientServer() throws Exception {
-        final Location serverLocation = Location.forGrpcInsecure(LOCALHOST, 55551);
+        // Use dynamic port allocation
+        final Location serverLocation = FlightTestUtils.findNextLocation();
+
         mutableClock = new MutableClock(Instant.now(), ZoneId.systemDefault());
         executor = new DeterministicScheduler();
-        flightServer = FlightServer.builder(
-                        serverAllocator,
-                        serverLocation,
-                        new DuckDBFlightSqlProducer(serverLocation,
-                                UUID.randomUUID().toString(),
-                                "change me",
-                                serverAllocator, warehousePath, AccessMode.COMPLETE,
-                                DuckDBFlightSqlProducer.newTempDir(),
-                                PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(),
-                                executor,
-                                Duration.ofSeconds(5),
-                                mutableClock,
-                                new NOOPFlightRecorder(),
-                                QueryOptimizer.NOOP_QUERY_OPTIMIZER,  DuckDBFlightSqlProducer.DEFAULT_INGESTION_CONFIG
-                        ))
+
+        // Create and store producer reference
+        producer = new DuckDBFlightSqlProducer(serverLocation,
+                UUID.randomUUID().toString(),
+                "change me",
+                serverAllocator, warehousePath, AccessMode.COMPLETE,
+                DuckDBFlightSqlProducer.newTempDir(),
+                PostIngestionTaskFactoryProvider.NO_OP.getPostIngestionTaskFactory(),
+                executor,
+                Duration.ofSeconds(5),
+                mutableClock,
+                new NOOPFlightRecorder(),
+                QueryOptimizer.NOOP_QUERY_OPTIMIZER,  DuckDBFlightSqlProducer.DEFAULT_INGESTION_CONFIG
+        );
+
+        flightServer = FlightServer.builder(serverAllocator, serverLocation, producer)
                 .headerAuthenticator(AuthUtils.getTestAuthenticator())
                 .build()
                 .start();
+
         sqlClient = new FlightSqlClient(FlightClient.builder(clientAllocator, serverLocation)
                 .intercept(AuthUtils.createClientMiddlewareFactory(USER,
                         PASSWORD,
@@ -98,6 +191,7 @@ public class DuckDBSqlProducerTimeoutTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testAutoCancelForPreparedStatement() throws Exception {
         try (FlightSqlClient.PreparedStatement preparedStatement = sqlClient.prepare(LONG_RUNNING_QUERY);
              FlightStream stream = sqlClient.getStream(preparedStatement.execute().getEndpoints().get(0).getTicket())) {
@@ -109,6 +203,7 @@ public class DuckDBSqlProducerTimeoutTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testAutoCancelForStatement() throws Exception {
         FlightInfo flightInfo = sqlClient.execute(LONG_RUNNING_QUERY);
         try (FlightStream stream = sqlClient.getStream(flightInfo.getEndpoints().get(0).getTicket())) {

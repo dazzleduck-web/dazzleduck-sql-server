@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.logger.tailing;
 
-import io.dazzleduck.sql.client.HttpSender;
+import io.dazzleduck.sql.client.HttpProducer;
 import io.dazzleduck.sql.logger.tailing.model.LogFileWithLines;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
@@ -27,7 +27,7 @@ public final class LogTailToArrowProcessor implements AutoCloseable {
 
     private final LogFileTailReader tailReader;
     private final JsonToArrowConverter arrowConverter;
-    private final HttpSender httpSender;
+    private final HttpProducer httpSender;
     private final ScheduledExecutorService scheduler;
     private final long pollIntervalMs;
 
@@ -46,7 +46,7 @@ public final class LogTailToArrowProcessor implements AutoCloseable {
             String logDirectory,
             String filePattern,
             JsonToArrowConverter arrowConverter,
-            HttpSender httpSender,
+            HttpProducer httpSender,
             long pollIntervalMs
     ) {
         Objects.requireNonNull(logDirectory, "logDirectory must not be null");

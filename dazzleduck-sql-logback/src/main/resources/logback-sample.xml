@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample logback configuration for dazzleduck-sql-logback.
+  Copy this file to your project's src/main/resources/logback.xml and customize as needed.
+-->
+<configuration>
+
+    <!-- Console appender for local development -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- DazzleDuck log forwarding appender -->
+    <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+        <!-- Maximum number of log entries to buffer (default: 10000) -->
+        <maxBufferSize>10000</maxBufferSize>
+    </appender>
+
+    <!-- Root logger configuration -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LOG_FORWARDER"/>
+    </root>
+
+    <!-- Optional: Configure specific loggers -->
+    <logger name="com.example.myapp" level="DEBUG"/>
+
+</configuration>

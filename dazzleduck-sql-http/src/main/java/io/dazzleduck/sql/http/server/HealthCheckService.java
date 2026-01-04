@@ -45,7 +45,7 @@ public class HealthCheckService implements HttpService {
 
         } catch (Exception e) {
             dbUp = false;
-            dbError = e.getMessage();
+            dbError = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
             LOGGER.log(Level.WARNING, "Database health check failed", e);
         }
 

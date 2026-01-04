@@ -64,8 +64,8 @@ public class HttpSenderTest {
         org.awaitility.Awaitility.reset();
     }
 
-    private HttpSender newSender(String file, Duration timeout) {
-        return new HttpSender(
+    private HttpProducer newSender(String file, Duration timeout) {
+        return new HttpProducer(
                 schema,
                 "http://localhost:" + PORT,
                 "admin",
@@ -73,13 +73,15 @@ public class HttpSenderTest {
                 file,
                 timeout,
                 100_000,
+                200_000,
                 Duration.ofSeconds(1),
                 3,
                 1000,
                 java.util.List.of(),
                 java.util.List.of(),
                 100,
-                100_000, Clock.systemDefaultZone()
+                100_000,
+                Clock.systemDefaultZone()
         );
     }
     private byte[] arrowBytes(String query) throws Exception {
@@ -114,7 +116,7 @@ public class HttpSenderTest {
     void testAsyncIngestionSingleBatch() throws Exception {
         String file = "async-single-" + System.nanoTime();
         Files.createDirectories(Path.of(warehouse, file));
-        try (HttpSender sender = newSender(file, Duration.ofSeconds(10))) {
+        try (HttpProducer sender = newSender(file, Duration.ofSeconds(10))) {
             sender.enqueue(arrowBytes("select * from generate_series(4)"));
         }
 
@@ -127,7 +129,7 @@ public class HttpSenderTest {
         String file = "overwrite-" + System.nanoTime();
         Files.createDirectories(Path.of(warehouse, file));
 
-        try (HttpSender overwriteSender = new HttpSender(
+        try (HttpProducer overwriteSender = new HttpProducer(
                 schema,
                 "http://localhost:" + PORT,
                 "admin",
@@ -135,6 +137,7 @@ public class HttpSenderTest {
                 file,
                 Duration.ofSeconds(3),
                 100_000,
+                200_000,
                 Duration.ofSeconds(2),
                 3,
                 1000,
@@ -158,7 +161,7 @@ public class HttpSenderTest {
         CountDownLatch latch = new CountDownLatch(5);
         AtomicInteger errors = new AtomicInteger(0);
 
-        try (HttpSender concurrentEnqueues = newSender(file, Duration.ofSeconds(5))) {
+        try (HttpProducer concurrentEnqueues = newSender(file, Duration.ofSeconds(5))) {
             for (int i = 0; i < 5; i++) {
                 final int index = i;
                 new Thread(() -> {
@@ -187,7 +190,7 @@ public class HttpSenderTest {
         Files.createDirectories(Path.of(warehouse, file));
 
         // Multiple requests should reuse the same token
-        try (HttpSender ReuseSender = newSender(file, Duration.ofSeconds(5))) {
+        try (HttpProducer ReuseSender = newSender(file, Duration.ofSeconds(5))) {
             for (int i = 0; i < 5; i++) {
                 ReuseSender.enqueue(arrowBytes("select " + i + " as val"));
             }
@@ -205,7 +208,7 @@ public class HttpSenderTest {
         Files.createDirectories(Path.of(warehouse, file));
 
         // Rapid fire 20 small batches
-        try (HttpSender HighThroughput = newSender(file, Duration.ofSeconds(5))) {
+        try (HttpProducer HighThroughput = newSender(file, Duration.ofSeconds(5))) {
             for (int i = 0; i < 5; i++) {
                 HighThroughput.enqueue(arrowBytes("select " + i + " as val"));
             }
@@ -218,7 +221,7 @@ public class HttpSenderTest {
 
     @Test
     void testQueueFullBehavior() throws Exception {
-        var limitedSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", "full.parquet", Duration.ofSeconds(3), 100_000,
+        var limitedSender = new HttpProducer(  schema,"http://localhost:" + PORT, "admin", "admin", "full.parquet", Duration.ofSeconds(3), 100_000, 200_000,
                 Duration.ofSeconds(2), 3, 1000, java.util.List.of(), java.util.List.of(), 100, 200);
 
         byte[] largeData = arrowBytes("select * from generate_series(200)");
@@ -249,7 +252,7 @@ public class HttpSenderTest {
     void testMemoryDiskSwitching() throws Exception {
         var path = "spill";
         Files.createDirectories(Path.of(warehouse, path));
-        var spillSender = new HttpSender(  schema,"http://localhost:" + PORT, "admin", "admin", path, Duration.ofSeconds(10), 100_000,
+        var spillSender = new HttpProducer(  schema,"http://localhost:" + PORT, "admin", "admin", path, Duration.ofSeconds(10), 100_000, 200_000,
                 Duration.ofSeconds(2), 3, 1000, java.util.List.of(), java.util.List.of(), 50, 100_000);
 
 
@@ -268,7 +271,7 @@ public class HttpSenderTest {
         String path = "transformations-test";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (HttpSender sender = new HttpSender(
+        try (HttpProducer sender = new HttpProducer(
                 schema,
                 "http://localhost:" + PORT,
                 "admin",
@@ -276,6 +279,7 @@ public class HttpSenderTest {
                 path,
                 Duration.ofSeconds(3),
                 100_000,
+                200_000,
                 Duration.ofSeconds(1),
                 3,
                 1000,
@@ -298,7 +302,7 @@ public class HttpSenderTest {
         String path = "both-headers-test";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (HttpSender sender = new HttpSender(
+        try (HttpProducer sender = new HttpProducer(
                 schema,
                 "http://localhost:" + PORT,
                 "admin",
@@ -306,6 +310,7 @@ public class HttpSenderTest {
                 path,
                 Duration.ofSeconds(3),
                 100_000,
+                200_000,
                 Duration.ofSeconds(1),
                 3,
                 1000,
@@ -330,7 +335,7 @@ public class HttpSenderTest {
         Files.createDirectories(Path.of(warehouse, path));
 
         // Empty lists should work fine and not send headers
-        try (HttpSender sender = new HttpSender(
+        try (HttpProducer sender = new HttpProducer(
                 schema,
                 "http://localhost:" + PORT,
                 "admin",
@@ -338,6 +343,7 @@ public class HttpSenderTest {
                 path,
                 Duration.ofSeconds(3),
                 100_000,
+                200_000,
                 Duration.ofSeconds(1),
                 3,
                 1000,

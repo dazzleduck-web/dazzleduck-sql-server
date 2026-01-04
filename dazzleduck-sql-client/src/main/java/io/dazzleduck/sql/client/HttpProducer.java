@@ -2,14 +2,12 @@ package io.dazzleduck.sql.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.dazzleduck.sql.common.ingestion.FlightSender;
 import io.dazzleduck.sql.login.LoginRequest;
 import io.dazzleduck.sql.login.LoginResponse;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,9 +21,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-public final class HttpSender extends FlightSender.AbstractFlightSender  {
+public final class HttpProducer extends FlightProducer.AbstractFlightProducer {
 
-    private static final Logger logger = LoggerFactory.getLogger(HttpSender.class);
+    private static final Logger logger = LoggerFactory.getLogger(HttpProducer.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final Duration REFRESH_SKEW = Duration.ofSeconds(60);
     private static final Duration DEFAULT_TOKEN_LIFETIME = Duration.ofHours(5);
@@ -44,7 +42,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
     private volatile String jwt = null;
     private volatile Instant jwtExpiry = Instant.EPOCH;
 
-    public HttpSender(
+    public HttpProducer(
             Schema schema,
             String baseUrl,
             String username,
@@ -52,6 +50,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             String targetPath,
             Duration httpClientTimeout,
             long minBatchSize,
+            long maxBatchSize,
             Duration maxSendInterval,
             int retryCount,
             long retryIntervalMillis,
@@ -60,9 +59,9 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             long maxInMemorySize,
             long maxOnDiskSize
     ) {
-        this(schema, baseUrl, username, password, targetPath, httpClientTimeout, minBatchSize, maxSendInterval, retryCount, retryIntervalMillis, transformations, partitionBy, maxInMemorySize, maxOnDiskSize, Clock.systemUTC());
+        this(schema, baseUrl, username, password, targetPath, httpClientTimeout, minBatchSize, maxBatchSize, maxSendInterval, retryCount, retryIntervalMillis, transformations, partitionBy, maxInMemorySize, maxOnDiskSize, Clock.systemUTC());
     }
-    public HttpSender(
+    public HttpProducer(
             Schema schema,
             String baseUrl,
             String username,
@@ -70,6 +69,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             String targetPath,
             Duration httpClientTimeout,
             long minBatchSize,
+            long maxBatchSize,
             Duration maxSendInterval,
             int retryCount,
             long retryIntervalMillis,
@@ -79,7 +79,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
             long maxOnDiskSize,
             Clock clock
     ) {
-        super(minBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
+        super(minBatchSize, maxBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
 
         // Issue #3: Parameter validation
         Objects.requireNonNull(baseUrl, "baseUrl must not be null");
@@ -217,7 +217,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
     }
 
     @Override
-    protected void doSend(SendElement element) throws InterruptedException {
+    protected void doSend(ProducerElement element) throws InterruptedException {
         // Issue #4: Check if thread was interrupted before attempting send
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("Thread interrupted before send");
@@ -226,11 +226,12 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
         HttpResponse<String> resp = null;
         int authRetries = 0;
 
-        // Issue #2: Read payload into memory for retry capability
-        // Note: We need the full payload in memory to support auth retries
+        // Read the element bytes for HTTP sending
         final byte[] payload;
-        try (InputStream in = element.read()) {
-            payload = in.readAllBytes();
+        try (java.io.InputStream in = element.read();
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            in.transferTo(out);
+            payload = out.toByteArray();
         } catch (IOException e) {
             logger.error("Failed to read element data", e);
             throw new RuntimeException("Failed to read element data", e);
@@ -264,7 +265,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
                 throw new RuntimeException("Ingestion failed with status " + resp.statusCode() + ": " + resp.body());
             }
 
-            logger.debug("Successfully sent data to {}{}", baseUrl, targetPath);
+            logger.debug("Successfully sent element to {}{}", baseUrl, targetPath);
 
         } catch (HttpTimeoutException e) {
             logger.error("HTTP request timed out after {} to {}{}", httpClientTimeout, baseUrl, targetPath, e);
@@ -340,11 +341,7 @@ public final class HttpSender extends FlightSender.AbstractFlightSender  {
 
         // Rethrow the first exception if any occurred
         if (superCloseException != null) {
-            if (superCloseException instanceof RuntimeException) {
-                throw (RuntimeException) superCloseException;
-            } else {
-                throw new RuntimeException("Failed to close HttpSender", superCloseException);
-            }
+            throw (RuntimeException) superCloseException;
         }
     }
 }

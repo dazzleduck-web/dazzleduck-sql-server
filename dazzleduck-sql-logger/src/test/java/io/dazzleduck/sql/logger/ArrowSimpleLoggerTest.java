@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.logger;
 
-import io.dazzleduck.sql.common.ingestion.FlightSender;
+import io.dazzleduck.sql.client.FlightProducer;
 import org.apache.arrow.vector.types.pojo.*;
 import org.junit.jupiter.api.*;
 
@@ -15,11 +15,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class ArrowSimpleLoggerTest {
 
     private ArrowSimpleLogger logger;
-    private TestFlightSender sender;
+    private TestFlightProducer sender;
 
     @BeforeEach
     void setup() {
-        sender = new TestFlightSender();
+        sender = new TestFlightProducer();
         logger = new ArrowSimpleLogger("test-logger", sender);
     }
 
@@ -88,13 +88,14 @@ class ArrowSimpleLoggerTest {
         assertEquals("A X B 1", out);
     }
 
-    static class TestFlightSender extends FlightSender.AbstractFlightSender {
+    static class TestFlightProducer extends FlightProducer.AbstractFlightProducer {
 
         final AtomicInteger rowsReceived = new AtomicInteger();
         final CountDownLatch latch = new CountDownLatch(10);
 
-        TestFlightSender() {
+        TestFlightProducer() {
             super(
+                    2048,
                     1024 * 1024,
                     Duration.ofSeconds(1),
 
@@ -123,11 +124,18 @@ class ArrowSimpleLoggerTest {
         }
 
         @Override
-        protected void doSend(SendElement element) {
+        protected void doSend(ProducerElement element) {
             rowsReceived.incrementAndGet();
             latch.countDown();
-            try {
-                element.read().close();
+            // Consume the element to simulate actual usage
+            try (org.apache.arrow.memory.BufferAllocator childAllocator =
+                    bufferAllocator.newChildAllocator("test-send", 0, Long.MAX_VALUE);
+                 java.io.InputStream in = element.read();
+                 org.apache.arrow.vector.ipc.ArrowStreamReader reader =
+                        new org.apache.arrow.vector.ipc.ArrowStreamReader(in, childAllocator)) {
+                while (reader.loadNextBatch()) {
+                    // Just iterate through batches
+                }
             } catch (Exception ignored) {
             }
         }

@@ -38,7 +38,8 @@ public abstract class AbstractQueryBasedService implements HttpService, Controll
             if (e instanceof InternalErrorException) {
                 logger.atError().setCause(e).log("Error");
             }
-            var msg = e.getMessage().getBytes();
+            String errorMsg = e.getMessage() != null ? e.getMessage() : "Internal server error";
+            var msg = errorMsg.getBytes();
             response.status(e.errorCode);
             response.send(msg);
         }
@@ -62,9 +63,24 @@ public abstract class AbstractQueryBasedService implements HttpService, Controll
                            ServerResponse response) {
         var query = request.requestedUri().query();
         var q = request.requestedUri().query().get("q");
+
+        // Validate required query parameter
+        if (q == null || q.isEmpty()) {
+            response.status(Status.BAD_REQUEST_400);
+            response.send("Missing required parameter: q");
+            return;
+        }
+
         QueryRequest queryRequest;
         if (query.contains("id")) {
-            queryRequest = new QueryRequest(q, Long.parseLong(query.get("id")));
+            try {
+                long id = Long.parseLong(query.get("id"));
+                queryRequest = new QueryRequest(q, id);
+            } catch (NumberFormatException e) {
+                response.status(Status.BAD_REQUEST_400);
+                response.send("Invalid id parameter: must be a valid number");
+                return;
+            }
         } else {
             queryRequest = new QueryRequest(q);
         }
@@ -72,9 +88,16 @@ public abstract class AbstractQueryBasedService implements HttpService, Controll
     }
 
     public void handlePost(ServerRequest request,
-                           ServerResponse response) throws IOException {
-        var requestObject = MAPPER.readValue(request.content().inputStream(), QueryRequest.class);
-        handle(request, response, requestObject);
+                           ServerResponse response) {
+        try {
+            var requestObject = MAPPER.readValue(request.content().inputStream(), QueryRequest.class);
+            handle(request, response, requestObject);
+        } catch (IOException e) {
+            logger.atError().setCause(e).log("Failed to parse request body");
+            String errorMsg = e.getMessage() != null ? e.getMessage() : "Invalid request body";
+            response.status(Status.BAD_REQUEST_400);
+            response.send(errorMsg);
+        }
     }
 
     protected abstract void handleInternal(ServerRequest request,

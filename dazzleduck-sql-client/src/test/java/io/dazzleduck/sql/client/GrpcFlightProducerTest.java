@@ -20,7 +20,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class GrpcFlightSenderTest {
+class GrpcFlightProducerTest {
 
     private static final String HOST = "localhost";
     private static final int PORT = 55620;
@@ -78,9 +78,10 @@ class GrpcFlightSenderTest {
         String path =  "names";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,
@@ -129,9 +130,10 @@ class GrpcFlightSenderTest {
         String path = "transformations-grpc-test";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,
@@ -172,9 +174,10 @@ class GrpcFlightSenderTest {
         String path = "partitionby-grpc-test";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,
@@ -215,9 +218,10 @@ class GrpcFlightSenderTest {
         String path = "both-params-grpc-test";
         Files.createDirectories(Path.of(warehouse, path));
 
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,
@@ -259,9 +263,10 @@ class GrpcFlightSenderTest {
         Files.createDirectories(Path.of(warehouse, path));
 
         // Test with special characters that need URL encoding
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,
@@ -303,9 +308,10 @@ class GrpcFlightSenderTest {
         Files.createDirectories(Path.of(warehouse, path));
 
         // Empty lists should work fine and not send parameters
-        try (GrpcFlightSender sender = new GrpcFlightSender(
+        try (GrpcFlightProducer sender = new GrpcFlightProducer(
                 schema,
                 1024,
+                2048,
                 Duration.ofSeconds(2),
                 Clock.systemUTC(),
                 3,

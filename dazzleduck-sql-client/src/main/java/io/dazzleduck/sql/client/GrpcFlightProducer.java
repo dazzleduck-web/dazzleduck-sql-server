@@ -3,28 +3,24 @@ package io.dazzleduck.sql.client;
 
 
 import io.dazzleduck.sql.common.Headers;
-import io.dazzleduck.sql.common.ingestion.FlightSender;
 import io.dazzleduck.sql.client.auth.AuthUtils;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.InputStream;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
-public final class GrpcFlightSender extends FlightSender.AbstractFlightSender implements AutoCloseable {
+public final class GrpcFlightProducer extends FlightProducer.AbstractFlightProducer implements AutoCloseable {
 
-    private static final Logger logger = LoggerFactory.getLogger(GrpcFlightSender.class);
+    private static final Logger logger = LoggerFactory.getLogger(GrpcFlightProducer.class);
 
     private final FlightSqlClient client;
     private final BufferAllocator allocator;
@@ -33,9 +29,10 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
     private final long maxDisk;
     private final Duration grpcTimeout;
 
-    public GrpcFlightSender(
+    public GrpcFlightProducer(
             Schema schema,
             long minBatchSize,
+            long maxBatchSize,
             Duration maxSendInterval,
             Clock clock,
             int retryCount,
@@ -53,7 +50,7 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
             Map<String, String> ingestParams,
             Duration grpcTimeout
     ) {
-        super(minBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
+        super(minBatchSize, maxBatchSize, maxSendInterval, schema, clock, retryCount, retryIntervalMillis, transformations, partitionBy);
 
         // Validate parameters (Issue #6)
         this.allocator = Objects.requireNonNull(allocator, "allocator must not be null");
@@ -130,20 +127,32 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
     }
 
     @Override
-    protected void doSend(SendElement element) throws InterruptedException {
+    protected void doSend(ProducerElement element) throws InterruptedException {
         // Check if thread was interrupted before attempting send
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("Thread interrupted before send");
         }
 
-        try (InputStream in = element.read();
-             ArrowStreamReader reader = new ArrowStreamReader(in, allocator)) {
-            client.executeIngest(reader, ingestOptions);
+        logger.debug("Sending element via gRPC");
+
+        // Read the element and send it via gRPC
+        // Use child allocator for better memory management
+        try (org.apache.arrow.memory.BufferAllocator childAllocator =
+                allocator.newChildAllocator("grpc-send", 0, Long.MAX_VALUE)) {
+
+            try (java.io.InputStream in = element.read();
+                 org.apache.arrow.vector.ipc.ArrowStreamReader reader =
+                    new org.apache.arrow.vector.ipc.ArrowStreamReader(in, childAllocator)) {
+
+                client.executeIngest(reader, ingestOptions);
+                logger.info("Successfully sent element via gRPC");
+            }
         } catch (Exception e) {
             // If interrupted during operation, throw InterruptedException instead
             if (Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("Thread interrupted during gRPC send");
             }
+            logger.error("gRPC ingestion failed for element", e);
             throw new RuntimeException("gRPC ingestion failed", e);
         }
     }
@@ -174,13 +183,7 @@ public final class GrpcFlightSender extends FlightSender.AbstractFlightSender im
 
         // Rethrow the first exception if any occurred
         if (superCloseException != null) {
-            if (superCloseException instanceof RuntimeException) {
-                throw (RuntimeException) superCloseException;
-            } else {
-                throw new RuntimeException("Failed to close GrpcFlightSender", superCloseException);
-            }
+            throw (RuntimeException) superCloseException;
         }
     }
-
-
 }

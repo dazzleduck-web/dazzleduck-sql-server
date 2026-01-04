@@ -13,6 +13,8 @@ import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.junit.jupiter.api.*;
 
+import java.io.IOException;
+
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -20,6 +22,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -57,10 +60,32 @@ public class HttpServerAuthorizationTest {
     @AfterAll
     static void cleanup() throws Exception {
         ConnectionPool.execute("DROP TABLE IF EXISTS auth_test");
-        new java.io.File(warehousePath).delete();
+        if (warehousePath != null) {
+            deleteDirectory(new java.io.File(warehousePath));
+        }
+    }
+
+    private static void deleteDirectory(java.io.File directory) throws IOException {
+        if (directory == null || !directory.exists()) {
+            return;
+        }
+
+        if (directory.isDirectory()) {
+            java.io.File[] files = directory.listFiles();
+            if (files != null) {
+                for (java.io.File file : files) {
+                    deleteDirectory(file);
+                }
+            }
+        }
+
+        if (!directory.delete()) {
+            throw new IOException("Failed to delete: " + directory.getAbsolutePath());
+        }
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testQueryWithClaimsFilter() throws Exception {
         var claims = Map.of(
                 "filter", "id = 1",
@@ -79,6 +104,7 @@ public class HttpServerAuthorizationTest {
     }
 
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testUnauthorizedMissingTableClaim() throws Exception {
         var claims = Map.of(
                 "filter", "id = 1",
@@ -91,8 +117,9 @@ public class HttpServerAuthorizationTest {
         assertEquals(500, inputStreamResponse.statusCode());
     }
 
-    @Disabled
     @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Disabled("Column-level authorization not yet implemented")
     public void testColumnLevelAuthorization() throws Exception {
         var claims = Map.of(
                 // "columns", List.of("id", "name"),
