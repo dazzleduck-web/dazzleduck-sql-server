@@ -399,23 +399,40 @@ public class Transformations {
     /**
      *  if(max_a=null, true, cast(min_a as int) &lt;= cast(x as int)
      **/
-    public static JsonNode constructUpperBoundPredicate(String[] minCol, JsonNode literal, String datatype) {
+    public static JsonNode constructUpperBoundPredicate(
+            String[] minCol, JsonNode literal, String datatype) {
+
+        datatype = normalizeLogicalType(datatype);
         JsonNode nullNode = ExpressionFactory.constant(null);
         JsonNode referenceNode = ExpressionFactory.reference(minCol);
         JsonNode ifCondition = ExpressionFactory.equalExpr(referenceNode, nullNode);
         JsonNode then = ExpressionFactory.cast(ExpressionFactory.constant("t"), "BOOLEAN");
-        JsonNode elseExpression = ExpressionFactory.lessThanOrEqualExpr(ExpressionFactory.cast(referenceNode.deepCopy(), datatype), ExpressionFactory.cast(literal, datatype));
+
+        JsonNode elseExpression = ExpressionFactory.lessThanOrEqualExpr(
+                        ExpressionFactory.cast(referenceNode.deepCopy(), datatype),
+                        ExpressionFactory.cast(literal, datatype)
+                );
+
         return ExpressionFactory.ifExpr(ifCondition, then, elseExpression);
     }
 
     public static JsonNode constructEqualPredicate(String[] minCol, String[] maxCol, JsonNode literal, String datatype) {
+
+        datatype = normalizeLogicalType(datatype);
         JsonNode nullNode = ExpressionFactory.constant(null);
         JsonNode minReferenceNode = ExpressionFactory.reference(minCol);
         JsonNode maxReferenceNode = ExpressionFactory.reference(maxCol);
         JsonNode ifCondition = ExpressionFactory.equalExpr(minReferenceNode, nullNode);
         JsonNode then = ExpressionFactory.cast(ExpressionFactory.constant("t"), "BOOLEAN");
-        JsonNode elseRightExpression = ExpressionFactory.lessThanOrEqualExpr(ExpressionFactory.cast(literal, datatype), ExpressionFactory.cast(maxReferenceNode.deepCopy(), datatype));
-        JsonNode elseLeftExpression = ExpressionFactory.lessThanOrEqualExpr(ExpressionFactory.cast(minReferenceNode.deepCopy(), datatype), ExpressionFactory.cast(literal, datatype));
+
+        JsonNode elseRightExpression = ExpressionFactory.lessThanOrEqualExpr(
+                        ExpressionFactory.cast(literal, datatype),
+                        ExpressionFactory.cast(maxReferenceNode.deepCopy(), datatype));
+
+        JsonNode elseLeftExpression = ExpressionFactory.lessThanOrEqualExpr(
+                        ExpressionFactory.cast(minReferenceNode.deepCopy(), datatype),
+                        ExpressionFactory.cast(literal, datatype));
+
         JsonNode andExpression = ExpressionFactory.andFilters(elseLeftExpression, elseRightExpression);
         return ExpressionFactory.ifExpr(ifCondition, then, andExpression);
     }
@@ -423,14 +440,25 @@ public class Transformations {
     /**
      *  if(min_a=null, true, cast(max_a as int) &lt;= cast(x as int)
      **/
-    public static JsonNode constructLowerBoundPredicate(String[] maxCol, JsonNode literal, String datatype) {
+    public static JsonNode constructLowerBoundPredicate(
+            String[] maxCol, JsonNode literal, String datatype) {
+
+        datatype = normalizeLogicalType(datatype);
+
         JsonNode nullNode = ExpressionFactory.constant(null);
         JsonNode referenceNode = ExpressionFactory.reference(maxCol);
         JsonNode ifCondition = ExpressionFactory.equalExpr(referenceNode, nullNode);
         JsonNode then = ExpressionFactory.cast(ExpressionFactory.constant("t"), "BOOLEAN");
-        JsonNode elseExpression = ExpressionFactory.greaterThanOrEqualExpr(ExpressionFactory.cast(referenceNode.deepCopy(), datatype), ExpressionFactory.cast(literal, datatype));
+
+        JsonNode elseExpression =
+                ExpressionFactory.greaterThanOrEqualExpr(
+                        ExpressionFactory.cast(referenceNode.deepCopy(), datatype),
+                        ExpressionFactory.cast(literal, datatype)
+                );
+
         return ExpressionFactory.ifExpr(ifCondition, then, elseExpression);
     }
+
 
 
     public static Function<JsonNode, JsonNode> removeNonPartitionColumnsPredicatesFromComparison(Set<String> partitions) {
@@ -996,9 +1024,19 @@ public class Transformations {
     private static String getStrcutChildNameString(JsonNode jsonNode) {
         return jsonNode.get("first").asText();
     }
-
+    private static String normalizeLogicalType(String id) {
+        return switch (id) {
+            case "int32" -> TYPE_INTEGER;   // INTEGER
+            case "int64" -> "BIGINT";
+            case "float32" -> "REAL";
+            case "float64" -> "DOUBLE";
+            case "bool" -> "BOOLEAN";
+            default -> id;
+        };
+    }
     private static String getTypeString(JsonNode jsonNode){
-        var id = jsonNode.get("id").asText();
+        var rawId = jsonNode.get("id").asText();
+        var id = normalizeLogicalType(rawId);
         switch (id) {
             case TYPE_STRUCT -> {
                 return structCast(jsonNode);
