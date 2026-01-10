@@ -156,15 +156,20 @@ class LogTailToArrowProcessorTest {
     // ------------------------------
     // HELPER METHODS
     //-------------------------------
-    // can generate multiple files and no. of logs per files
+
+    /**
+     * Generate multiple log files with specified number of logs per file.
+     * Calls SimpleLogGenerator directly instead of spawning a process.
+     */
     static void runLogGenerator(Path tempDir, String numFiles, String logsPerFile) throws Exception {
-        Process process = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp", System.getProperty("java.class.path"), "io.dazzleduck.sql.logger.tailing.SimpleLogGenerator", tempDir.toString(), numFiles, logsPerFile).redirectErrorStream(true).inheritIO().start();
-        assertEquals(0, process.waitFor());
+        SimpleLogGenerator.generateLogs(tempDir, Integer.parseInt(numFiles), Integer.parseInt(logsPerFile));
     }
 
-    // this will add 1 log every time we send a file in this
+    /**
+     * Append a single log entry to an existing file.
+     * Calls SimpleLogGenerator directly instead of spawning a process.
+     */
     static void runLogGeneratorWithFile(Path logFile) throws Exception {
-        Process process = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp", System.getProperty("java.class.path"), "io.dazzleduck.sql.logger.tailing.SimpleLogGenerator", logFile.toString()).redirectErrorStream(true).inheritIO().start();
-        assertEquals(0, process.waitFor());
+        SimpleLogGenerator.appendLog(logFile);
     }
 }
