@@ -33,18 +33,21 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
     private final String name;
     private final ArrowProducer producer;
     private final Level configLogLevel;
+    private final AsyncConsoleWriter consoleWriter;
 
     /**
      * Create a logger with the given name, shared producer, and log level.
      *
-     * @param name           Logger name
-     * @param producer       Shared ArrowProducer (may be null if not configured)
-     * @param configLogLevel Configured log level threshold
+     * @param name              Logger name
+     * @param producer          Shared ArrowProducer (may be null if not configured)
+     * @param configLogLevel    Configured log level threshold
+     * @param consoleWriter     Async console writer (null to disable console output)
      */
-    public ArrowSimpleLogger(String name, ArrowProducer producer, Level configLogLevel) {
+    public ArrowSimpleLogger(String name, ArrowProducer producer, Level configLogLevel, AsyncConsoleWriter consoleWriter) {
         this.name = name;
         this.producer = producer;
         this.configLogLevel = configLogLevel != null ? configLogLevel : Level.INFO;
+        this.consoleWriter = consoleWriter;
     }
 
     @Override
@@ -74,6 +77,10 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
             message += "\n" + sw;
         }
 
+        if (consoleWriter != null) {
+            printToConsole(level, message);
+        }
+
         writeLog(level, marker, message);
     }
 
@@ -82,6 +89,15 @@ public class ArrowSimpleLogger extends LegacyAbstractLogger {
             return pattern;
         }
         return MessageFormatter.arrayFormat(pattern, args).getMessage();
+    }
+
+    private void printToConsole(Level level, String message) {
+        String timestamp = TS_FORMAT.format(Instant.now());
+        String threadName = Thread.currentThread().getName();
+        StringBuilder sb = new StringBuilder(timestamp.length() + threadName.length() + name.length() + message.length() + 16);
+        sb.append(timestamp).append(" [").append(threadName).append("] ")
+                .append(level).append(' ').append(name).append(" - ").append(message);
+        consoleWriter.write(sb.toString());
     }
 
     private void writeLog(Level level, Marker marker, String message) {

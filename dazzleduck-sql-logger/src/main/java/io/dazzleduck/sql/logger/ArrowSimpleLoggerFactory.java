@@ -31,22 +31,26 @@ public class ArrowSimpleLoggerFactory implements ILoggerFactory {
     // Configuration
     private final Config config;
     private final Level configLogLevel;
+    private final AsyncConsoleWriter consoleWriter;
     private final Schema schema;
 
     public ArrowSimpleLoggerFactory() {
         Config tempConfig = null;
         Level logLevel = Level.INFO;
+        boolean showConsole = true;
 
         try {
             tempConfig = ConfigFactory.load().getConfig("dazzleduck_logger");
             String levelStr = tempConfig.hasPath("log_level") ? tempConfig.getString("log_level") : "INFO";
             logLevel = Level.valueOf(levelStr.toUpperCase());
+            showConsole = !tempConfig.hasPath("show_log_in_console") || tempConfig.getBoolean("show_log_in_console");
         } catch (Exception e) {
             System.err.println("[ArrowSimpleLoggerFactory] Failed to load config, using defaults: " + e.getMessage());
         }
 
         this.config = tempConfig;
         this.configLogLevel = logLevel;
+        this.consoleWriter = showConsole ? new AsyncConsoleWriter() : null;
         this.schema = createSchema();
     }
 
@@ -115,7 +119,7 @@ public class ArrowSimpleLoggerFactory implements ILoggerFactory {
         }
 
         // Create new logger with shared producer
-        ArrowSimpleLogger newLogger = new ArrowSimpleLogger(name, sharedProducer, configLogLevel);
+        ArrowSimpleLogger newLogger = new ArrowSimpleLogger(name, sharedProducer, configLogLevel, consoleWriter);
 
         ArrowSimpleLogger existing = loggerMap.putIfAbsent(name, newLogger);
         return existing != null ? existing : newLogger;
@@ -135,6 +139,10 @@ public class ArrowSimpleLoggerFactory implements ILoggerFactory {
                 System.err.println("[ArrowSimpleLoggerFactory] Failed to close producer: " + e.getMessage());
             }
             sharedProducer = null;
+        }
+
+        if (consoleWriter != null) {
+            consoleWriter.shutdown();
         }
     }
 

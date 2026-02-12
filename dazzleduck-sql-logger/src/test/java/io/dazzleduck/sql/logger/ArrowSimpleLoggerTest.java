@@ -20,7 +20,7 @@ class ArrowSimpleLoggerTest {
     @BeforeEach
     void setup() {
         producer = new MockArrowProducer();
-        logger = new ArrowSimpleLogger("test-logger", producer, Level.INFO);
+        logger = new ArrowSimpleLogger("test-logger", producer, Level.INFO, null);
     }
 
     @Test
@@ -83,7 +83,7 @@ class ArrowSimpleLoggerTest {
 
     @Test
     void testNullProducerDoesNotThrow() {
-        ArrowSimpleLogger nullProducerLogger = new ArrowSimpleLogger("null-producer", null, Level.INFO);
+        ArrowSimpleLogger nullProducerLogger = new ArrowSimpleLogger("null-producer", null, Level.INFO, null);
 
         // Should not throw
         assertDoesNotThrow(() -> nullProducerLogger.info("test message"));
