@@ -34,9 +34,6 @@ class MetricsForwarderTest {
         properties.setMaxBatchSize(16 * 1024 * 1024);
         properties.setMaxInMemorySize(10 * 1024 * 1024);
         properties.setMaxOnDiskSize(1024 * 1024 * 1024);
-
-        // Reset sequence counter for consistent test results
-        CollectedMetric.resetSequence();
     }
 
     @Test
@@ -106,26 +103,24 @@ class MetricsForwarderTest {
     }
 
     @Test
-    @DisplayName("Should have correct Arrow schema with s_no column")
+    @DisplayName("Should have correct Arrow schema")
     void getArrowSchema_HasCorrectFields() {
         MetricsForwarder forwarder = new MetricsForwarder(properties);
         try {
             Schema schema = forwarder.getArrowSchema();
 
             assertNotNull(schema);
-            assertEquals(10, schema.getFields().size());
+            assertEquals(9, schema.getFields().size());
 
-            // Verify s_no is first column
-            assertEquals("s_no", schema.getFields().get(0).getName());
-            assertEquals("timestamp", schema.getFields().get(1).getName());
-            assertEquals("name", schema.getFields().get(2).getName());
-            assertEquals("type", schema.getFields().get(3).getName());
-            assertEquals("source_url", schema.getFields().get(4).getName());
-            assertEquals("collector_id", schema.getFields().get(5).getName());
-            assertEquals("collector_name", schema.getFields().get(6).getName());
-            assertEquals("collector_host", schema.getFields().get(7).getName());
-            assertEquals("labels", schema.getFields().get(8).getName());
-            assertEquals("value", schema.getFields().get(9).getName());
+            assertEquals("timestamp", schema.getFields().get(0).getName());
+            assertEquals("name", schema.getFields().get(1).getName());
+            assertEquals("type", schema.getFields().get(2).getName());
+            assertEquals("source_url", schema.getFields().get(3).getName());
+            assertEquals("collector_id", schema.getFields().get(4).getName());
+            assertEquals("collector_name", schema.getFields().get(5).getName());
+            assertEquals("collector_host", schema.getFields().get(6).getName());
+            assertEquals("labels", schema.getFields().get(7).getName());
+            assertEquals("value", schema.getFields().get(8).getName());
         } finally {
             forwarder.close();
         }
@@ -171,27 +166,6 @@ class MetricsForwarderTest {
 
             assertTrue(result);
             assertEquals(1, forwarder.getMetricsSentCount());
-        } finally {
-            forwarder.close();
-        }
-    }
-
-    @Test
-    @DisplayName("Should assign sequential s_no to metrics")
-    void sendMetrics_SequentialSNo() {
-        CollectedMetric.resetSequence();
-        MetricsForwarder forwarder = new MetricsForwarder(properties);
-        try {
-            CollectedMetric m1 = createMetric("m1", 1.0);
-            CollectedMetric m2 = createMetric("m2", 2.0);
-            CollectedMetric m3 = createMetric("m3", 3.0);
-
-            assertEquals(1, m1.sNo());
-            assertEquals(2, m2.sNo());
-            assertEquals(3, m3.sNo());
-
-            boolean result = forwarder.sendMetrics(List.of(m1, m2, m3));
-            assertTrue(result);
         } finally {
             forwarder.close();
         }

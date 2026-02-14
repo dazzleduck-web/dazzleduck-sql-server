@@ -28,16 +28,15 @@ public class MetricsForwarder {
     private final Schema arrowSchema;
 
     // Column indices in the schema
-    private static final int COL_S_NO = 0;
-    private static final int COL_TIMESTAMP = 1;
-    private static final int COL_NAME = 2;
-    private static final int COL_TYPE = 3;
-    private static final int COL_SOURCE_URL = 4;
-    private static final int COL_COLLECTOR_ID = 5;
-    private static final int COL_COLLECTOR_NAME = 6;
-    private static final int COL_COLLECTOR_HOST = 7;
-    private static final int COL_LABELS = 8;
-    private static final int COL_VALUE = 9;
+    private static final int COL_TIMESTAMP = 0;
+    private static final int COL_NAME = 1;
+    private static final int COL_TYPE = 2;
+    private static final int COL_SOURCE_URL = 3;
+    private static final int COL_COLLECTOR_ID = 4;
+    private static final int COL_COLLECTOR_NAME = 5;
+    private static final int COL_COLLECTOR_HOST = 6;
+    private static final int COL_LABELS = 7;
+    private static final int COL_VALUE = 8;
 
     // Simple counters for monitoring
     private final AtomicLong metricsSentCount = new AtomicLong(0);
@@ -46,9 +45,8 @@ public class MetricsForwarder {
     public MetricsForwarder(CollectorProperties properties) {
         this.properties = properties;
 
-        // Arrow schema for collected metrics with s_no as first column
+        // Arrow schema for collected metrics
         this.arrowSchema = new Schema(List.of(
-            new Field("s_no", FieldType.notNullable(new ArrowType.Int(64, true)), null),
             new Field("timestamp", FieldType.nullable(new ArrowType.Int(64, true)), null),
             new Field("name", FieldType.notNullable(new ArrowType.Utf8()), null),
             new Field("type", FieldType.notNullable(new ArrowType.Utf8()), null),
@@ -117,8 +115,7 @@ public class MetricsForwarder {
      * Convert CollectedMetric to JavaRow for Arrow serialization.
      */
     private JavaRow toJavaRow(CollectedMetric metric) {
-        Object[] values = new Object[10];
-        values[COL_S_NO] = metric.sNo();
+        Object[] values = new Object[9];
         values[COL_TIMESTAMP] = metric.timestamp().toEpochMilli();
         values[COL_NAME] = metric.name();
         values[COL_TYPE] = metric.type();

@@ -37,7 +37,6 @@ class MetricsCollectorServerTest {
         executor = Executors.newSingleThreadExecutor();
 
         ConfigFactory.invalidateCaches();
-        CollectedMetric.resetSequence();
     }
 
     @AfterEach
@@ -239,8 +238,9 @@ class MetricsCollectorServerTest {
         // Start in background thread
         executor.submit(server::start);
 
-        // Wait for startup - give more time for HttpArrowProducer initialization
-        Thread.sleep(1000);
+        // Wait for startup using polling (more reliable than fixed sleep)
+        // Increased timeout to 10s to account for Arrow memory initialization on first run
+        waitUntil(server::isRunning, 10000);
 
         assertTrue(server.isRunning(), "Server should be running");
         assertNotNull(server.getCollector(), "Collector should not be null");

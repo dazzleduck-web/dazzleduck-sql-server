@@ -11,7 +11,6 @@ ATTACH 'ducklake:/workspace/warehouse/metadata/ollylake/metadata.ducklake' AS ol
 
 -- Create metric table for Micrometer metrics
 CREATE TABLE IF NOT EXISTS ollylake.main.metric (
-    s_no BIGINT,
     timestamp TIMESTAMP,
     name VARCHAR,
     type VARCHAR,

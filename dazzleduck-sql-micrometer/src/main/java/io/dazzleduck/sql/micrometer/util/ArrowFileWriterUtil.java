@@ -18,7 +18,6 @@ import java.io.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Utility class to export Micrometer Meters into Apache Arrow format.
@@ -79,10 +78,9 @@ public final class ArrowFileWriterUtil {
                             .thenComparing(m -> m.getId().getName()))
                     .toList();
 
-            AtomicLong sequenceCounter = new AtomicLong(0);
             List<JavaRow> rows = new ArrayList<>(sortedMeters.size());
             for (Meter meter : sortedMeters) {
-                rows.add(toRow(sequenceCounter.incrementAndGet(), meter));
+                rows.add(toRow(meter));
             }
 
             vectorWriter.writeToVector(rows.toArray(JavaRow[]::new), root);
@@ -94,7 +92,7 @@ public final class ArrowFileWriterUtil {
     /**
      * Converts a single Micrometer Meter to a JavaRow (Arrow record).
      */
-    private static JavaRow toRow(long sNo, Meter meter) {
+    private static JavaRow toRow(Meter meter) {
         Meter.Id id = meter.getId();
         Map<String, String> tagsMap = new LinkedHashMap<>();
         for (Tag t : id.getTags()) {
@@ -154,7 +152,6 @@ public final class ArrowFileWriterUtil {
         }
 
         return new JavaRow(new Object[]{
-                sNo,
                 Instant.now().toEpochMilli(),
                 id.getName(),
                 id.getType().name().toLowerCase(),
@@ -173,7 +170,6 @@ public final class ArrowFileWriterUtil {
     private static Schema buildMeterSchema() {
         List<Field> fields = new ArrayList<>();
 
-        fields.add(new Field("s_no", FieldType.notNullable(new ArrowType.Int(64, true)), null));
         fields.add(new Field("timestamp", FieldType.notNullable(new ArrowType.Timestamp(org.apache.arrow.vector.types.TimeUnit.MILLISECOND, null)), null));
         fields.add(new Field("name", FieldType.notNullable(new ArrowType.Utf8()), null));
         fields.add(new Field("type", FieldType.notNullable(new ArrowType.Utf8()), null));

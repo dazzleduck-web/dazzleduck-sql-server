@@ -46,7 +46,6 @@ public class HttpMetricDuckLakeIntegrationTest {
                 ATTACH 'ducklake:%s/%s' AS %s (DATA_PATH '%s/%s');
                 USE %s;
                 CREATE TABLE IF NOT EXISTS %s (
-                    s_no BIGINT,
                     timestamp TIMESTAMP,
                     name VARCHAR,
                     type VARCHAR,
