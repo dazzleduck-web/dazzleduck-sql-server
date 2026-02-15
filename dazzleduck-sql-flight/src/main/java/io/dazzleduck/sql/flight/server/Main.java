@@ -66,7 +66,7 @@ public class Main {
                 StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX,
                 new ConfigBasedStartupScriptProvider());
         if (startupScriptProvider.getStartupScript() != null) {
-            ConnectionPool.execute(startupScriptProvider.getStartupScript());
+            ConnectionPool.executeOnSingleton(startupScriptProvider.getStartupScript());
         }
 
         // Create allocator and producer using factory

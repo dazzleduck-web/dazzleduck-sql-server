@@ -219,7 +219,7 @@ public final class LogForwarderConfig {
         private String password = "admin";
         private Map<String, String> claims = Map.of();
         private String ingestionQueue = "log";
-        private Duration httpClientTimeout = Duration.ofSeconds(3);
+        private Duration httpClientTimeout = Duration.ofSeconds(30); // Increased from 3s to 30s for ingestion
         private int maxBufferSize = 10000;
         private Duration pollInterval = Duration.ofSeconds(5);
         private long minBatchSize = 1024 * 1024; // 1 MB

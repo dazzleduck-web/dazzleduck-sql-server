@@ -1,11 +1,22 @@
 package io.dazzleduck.sql.logback.demo;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
+import java.io.BufferedInputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -34,6 +45,7 @@ public class Demo {
     private static final AtomicBoolean running = new AtomicBoolean(true);
     private static final AtomicLong counter = new AtomicLong(0);
     private static final Random random = new Random();
+    private static final ScheduledExecutorService queryScheduler = Executors.newSingleThreadScheduledExecutor();
 
     private static final String[] USERS = {"alice", "bob", "charlie", "diana", "eve"};
     private static final String[] ACTIONS = {"LOGIN", "LOGOUT", "VIEW", "UPDATE", "DELETE"};
@@ -46,9 +58,14 @@ public class Demo {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\nShutting down...");
             running.set(false);
+            queryScheduler.shutdown();
         }));
 
         log.info("Demo started - logging to DazzleDuck server");
+
+        // Start background query task every 5 seconds
+        String baseUrl = System.getenv().getOrDefault("DAZZLEDUCK_BASE_URL", "http://localhost:8081");
+        queryScheduler.scheduleAtFixedRate(() -> runCountQuery(baseUrl), 5, 5, TimeUnit.SECONDS);
 
         while (running.get()) {
             try {
@@ -64,6 +81,37 @@ public class Demo {
         System.out.println("\n=== Demo complete ===");
         System.out.println("Total logs generated: " + counter.get());
         System.out.println("Query: SELECT * FROM read_parquet('warehouse/log/*.parquet') ORDER BY timestamp DESC;");
+    }
+
+    private static void runCountQuery(String baseUrl) {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            String query = "SELECT count(*) as count FROM ollylake.main.log";
+            String urlStr = baseUrl + "/v1/query?q=" + java.net.URLEncoder.encode(query, "UTF-8");
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+
+            if (conn.getResponseCode() == 200) {
+                try (InputStream inputStream = new BufferedInputStream(conn.getInputStream());
+                     ArrowStreamReader reader = new ArrowStreamReader(inputStream, allocator)) {
+
+                    while (reader.loadNextBatch()) {
+                        VectorSchemaRoot root = reader.getVectorSchemaRoot();
+                        if (root.getRowCount() > 0) {
+                            org.apache.arrow.vector.BigIntVector countVector = (org.apache.arrow.vector.BigIntVector) root.getVector("count");
+                            long count = countVector.getObject(0);
+                            System.out.println("[" + java.time.LocalTime.now() + "] Log count: " + count);
+                        }
+                    }
+                }
+            } else {
+                System.err.println("Query failed: HTTP " + conn.getResponseCode());
+            }
+            conn.disconnect();
+        } catch (Exception e) {
+            System.err.println("Error running count query: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     private static void generateLog() {
