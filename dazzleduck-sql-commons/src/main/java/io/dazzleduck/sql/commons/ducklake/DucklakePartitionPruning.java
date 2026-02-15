@@ -187,7 +187,7 @@ public class DucklakePartitionPruning {
             var res = ConnectionPool.collectAll(connection, toRun, DucklakeFileStatus.class);
             var result = new java.util.ArrayList<FileStatus>();
             for (var x : res) {
-                result.add(x.resolvedFileStatue(tableRelativePath));
+                result.add(x.resolvedFileStatus(tableRelativePath));
             }
             return result;
         }
