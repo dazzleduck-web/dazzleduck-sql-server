@@ -7,8 +7,11 @@ public record DucklakeFileStatus(String fileName, Long size, Long lastModified, 
         return new FileStatus(fileName, size, lastModified);
     }
 
-    public FileStatus resolvedFileStatue(String basePath){
-        var resolvedPath = basePath + "/" + fileName;
-        return new FileStatus( resolvedPath, size, lastModified);
+    public FileStatus resolvedFileStatus(String basePath){
+        if (pathIsRelative != null && pathIsRelative) {
+            var resolvedPath = basePath + "/" + fileName;
+            return new FileStatus(resolvedPath, size, lastModified);
+        }
+        return new FileStatus(fileName, size, lastModified);
     }
 }
