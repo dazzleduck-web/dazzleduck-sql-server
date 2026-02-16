@@ -263,8 +263,26 @@ export const LoggingProvider = ({ children }) => {
 
             return { data: normalized, queryId };
         } catch (err) {
-            const msg = err?.message || String(err);
-            throw new Error(`Query execution failed: ${msg}`);
+            // Handle axios errors with response data
+            if (err.response && err.response.data) {
+                // Decode the ArrayBuffer response to get the actual error message
+                const responseData = err.response.data;
+
+                if (responseData instanceof ArrayBuffer) {
+                    const decoder = new TextDecoder('utf-8');
+                    const errorText = decoder.decode(responseData);
+
+                    // Create a new error with the server's error message
+                    throw new Error(errorText);
+                } else if (typeof responseData === 'string') {
+                    throw new Error(responseData);
+                } else if (responseData && typeof responseData === 'object') {
+                    const errorMsg = responseData.message || responseData.error || JSON.stringify(responseData);
+                    throw new Error(errorMsg);
+                }
+            }
+            // For other errors (network, timeout), preserve original
+            throw err;
         }
     }, [connectionInfo]);
 
