@@ -14,7 +14,9 @@ const QueryResults = ({ logs, loading, error, view, isConnected }) => {
     if (error) {
         return (
             <div className="border overflow-auto max-h-[450px] bg-white rounded-lg scrollbar-custom">
-                <p className="text-red-600 text-center font-medium p-10">{error}</p>
+                <pre className="text-red-600 text-center font-medium p-5 whitespace-pre-wrap break-all text-md">
+                    {error}
+                </pre>
             </div>
         );
     }

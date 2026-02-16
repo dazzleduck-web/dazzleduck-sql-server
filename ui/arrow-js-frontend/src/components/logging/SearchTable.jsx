@@ -124,9 +124,9 @@ const SearchTable = ({
                                 Loading data...
                             </p>
                         ) : error ? (
-                            <p className="text-center py-6 text-red-600">
+                            <pre className="text-red-600 text-center font-medium p-5 whitespace-pre-wrap break-all text-md">
                                 {error}
-                            </p>
+                            </pre>
                         ) : data.length === 0 ? (
                             <p className="text-center py-6 text-gray-500">
                                 No data to display
