@@ -9,9 +9,15 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5174,
-    strictPort: true
+    strictPort: true,
+    allowedHosts: ['dazzleduck-ui.com', 'www.dazzleduck-ui.com'],
+    // WebSocket HMR connection
+    hmr: {
+      host: 'dazzleduck-ui.com',
+      port: 8000,
+      protocol: 'ws'
+    }
   },
-  // Configuration for building your library for NPM
   build: {
     lib: {
       // Use process.cwd() to resolve the entry file from the project root
@@ -36,7 +42,7 @@ export default defineConfig({
     emptyOutDir: true, // Clean the 'dist' folder before each build
   },
 
-  // Your existing Vitest configuration
+  // Vitest configuration
   test: {
     environment: 'jsdom',
     globals: true,
