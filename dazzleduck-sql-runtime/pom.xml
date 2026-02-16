@@ -216,6 +216,16 @@
                                 <from>${project.basedir}/docker</from>
                                 <into>/app</into>
                             </path>
+                            <!-- Add startup scripts -->
+                            <path>
+                                <from>${project.basedir}/../example/startup</from>
+                                <into>/startup</into>
+                            </path>
+                            <!-- Add example data -->
+                            <path>
+                                <from>${project.basedir}/../example/data</from>
+                                <into>/data</into>
+                            </path>
                         </paths>
                         <permissions>
                             <permission>
