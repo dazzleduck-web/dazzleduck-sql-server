@@ -42,9 +42,6 @@ class MetricsCollectorTest {
         properties.setMaxBatchSize(16 * 1024 * 1024);
         properties.setMaxInMemorySize(10 * 1024 * 1024);
         properties.setMaxOnDiskSize(1024 * 1024 * 1024);
-
-        // Reset sequence for consistent tests
-        CollectedMetric.resetSequence();
     }
 
     @AfterEach

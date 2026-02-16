@@ -262,7 +262,6 @@ Metrics are serialized using the following Apache Arrow schema:
 
 | Field           | Type          | Description                      |
 |-----------------|---------------|----------------------------------|
-| s_no            | Int64         | Sequence number (auto-generated) |
 | timestamp       | Int64         | Epoch milliseconds               |
 | name            | Utf8          | Metric name                      |
 | type            | Utf8          | Metric type (gauge, counter, etc)|

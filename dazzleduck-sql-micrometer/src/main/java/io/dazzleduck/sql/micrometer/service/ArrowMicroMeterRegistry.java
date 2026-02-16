@@ -15,7 +15,6 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements AutoCloseable {
 
@@ -23,7 +22,6 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
             LoggerFactory.getLogger(ArrowMicroMeterRegistry.class);
 
     private final ArrowProducer sender;
-    private final AtomicLong sequenceCounter = new AtomicLong(0);
 
     public ArrowMicroMeterRegistry(
             ArrowProducer sender,
@@ -112,7 +110,6 @@ public final class ArrowMicroMeterRegistry extends StepMeterRegistry implements 
         }
 
         return new JavaRow(new Object[]{
-                sequenceCounter.incrementAndGet(),
                 Instant.now().toEpochMilli(),
                 id.getName(),
                 id.getType().name().toLowerCase(),
