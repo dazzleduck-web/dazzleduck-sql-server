@@ -210,7 +210,6 @@ Metrics are stored with the following Arrow schema:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `s_no` | Long | Sequence number |
 | `timestamp` | Timestamp | Timestamp (millisecond precision) |
 | `name` | String | Metric name |
 | `type` | String | Metric type (counter, gauge, timer, etc.) |

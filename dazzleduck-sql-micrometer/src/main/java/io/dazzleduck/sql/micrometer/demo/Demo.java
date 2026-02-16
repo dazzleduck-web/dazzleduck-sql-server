@@ -3,10 +3,24 @@ package io.dazzleduck.sql.micrometer.demo;
 import io.dazzleduck.sql.micrometer.MicrometerForwarder;
 import io.dazzleduck.sql.micrometer.config.MicrometerForwarderConfig;
 import io.micrometer.core.instrument.*;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
 
+import java.io.BufferedInputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.time.Duration;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -43,6 +57,7 @@ public class Demo {
     private static final AtomicBoolean running = new AtomicBoolean(true);
     private static final AtomicLong counter = new AtomicLong(0);
     private static final Random random = new Random();
+    private static final ScheduledExecutorService queryScheduler = Executors.newSingleThreadScheduledExecutor();
 
     // Simulated data
     private static final String[] ENDPOINTS = {"/api/users", "/api/orders", "/api/products", "/api/health"};
@@ -96,7 +111,11 @@ public class Demo {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\nShutting down...");
             running.set(false);
+            queryScheduler.shutdown();
         }));
+
+        // Start background query task every 5 seconds
+        queryScheduler.scheduleAtFixedRate(() -> runCountQuery(baseUrl), 5, 5, TimeUnit.SECONDS);
 
         // Create metrics
         Counter requestCounter = Counter.builder("http.requests.total")
@@ -155,6 +174,36 @@ public class Demo {
         System.out.println("\n=== Demo complete ===");
         System.out.println("Total metric batches generated: " + counter.get());
         System.out.println("Query: SELECT * FROM read_parquet('warehouse/ingestion/metric/**/*.parquet') ORDER BY timestamp DESC;");
+    }
+
+    private static void runCountQuery(String baseUrl) {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            String query = "SELECT count(*) as count FROM ollylake.main.metric";
+            String urlStr = baseUrl + "/v1/query?q=" + URLEncoder.encode(query, "UTF-8");
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+
+            if (conn.getResponseCode() == 200) {
+                try (InputStream inputStream = new BufferedInputStream(conn.getInputStream());
+                     ArrowStreamReader reader = new ArrowStreamReader(inputStream, allocator)) {
+
+                    while (reader.loadNextBatch()) {
+                        VectorSchemaRoot root = reader.getVectorSchemaRoot();
+                        if (root.getRowCount() > 0) {
+                            BigIntVector countVector = (BigIntVector) root.getVector("count");
+                            long count = countVector.getObject(0);
+                            System.out.println("[" + LocalTime.now() + "] Metric count: " + count);
+                        }
+                    }
+                }
+            } else {
+                System.err.println("Query failed: HTTP " + conn.getResponseCode());
+            }
+            conn.disconnect();
+        } catch (Exception e) {
+            System.err.println("Error running count query: " + e.getMessage());
+        }
     }
 
     private static void generateMetrics(MeterRegistry registry, Counter requestCounter,

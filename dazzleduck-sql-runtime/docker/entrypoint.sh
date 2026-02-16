@@ -19,7 +19,9 @@ if [[ $1 == io.dazzleduck.* ]]; then
   MAIN_CLASS=$1
   shift
   echo "Starting $MAIN_CLASS..."
-  exec java $JVM_OPTS -cp $CLASSPATH $MAIN_CLASS "$@"
+
+  # Use Logback as SLF4J provider for demo classes to avoid Arrow logger conflict
+  exec java $JVM_OPTS -Dslf4j.provider=ch.qos.logback.classic.spi.LogbackServiceProvider -cp $CLASSPATH $MAIN_CLASS "$@"
 else
   # Default: run the runtime Main with all arguments
   echo "Starting DazzleDuck Runtime..."

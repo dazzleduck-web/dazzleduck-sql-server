@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
 
+    <!-- Define properties with defaults using Logback property syntax -->
+    <property name="DAZZLEDUCK_BASE_URL" value="${DAZZLEDUCK_BASE_URL:-http://localhost:8081}" />
+    <property name="DAZZLEDUCK_USERNAME" value="${DAZZLEDUCK_USERNAME:-admin}" />
+    <property name="DAZZLEDUCK_PASSWORD" value="${DAZZLEDUCK_PASSWORD:-admin}" />
+    <property name="DAZZLEDUCK_INGESTION_QUEUE" value="${DAZZLEDUCK_INGESTION_QUEUE:-log}" />
+
     <!-- Shutdown hook ensures forwarder is flushed on JVM exit -->
     <shutdownHook/>
 
@@ -13,10 +19,10 @@
 
     <!-- DazzleDuck Log Forwarding Appender -->
     <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-        <baseUrl>${DAZZLEDUCK_BASE_URL:-http://localhost:8081}</baseUrl>
-        <username>${DAZZLEDUCK_USERNAME:-admin}</username>
-        <password>${DAZZLEDUCK_PASSWORD:-admin}</password>
-        <ingestionQueue>${DAZZLEDUCK_INGESTION_QUEUE:-log}</ingestionQueue>
+        <baseUrl>${DAZZLEDUCK_BASE_URL}</baseUrl>
+        <username>${DAZZLEDUCK_USERNAME}</username>
+        <password>${DAZZLEDUCK_PASSWORD}</password>
+        <ingestionQueue>${DAZZLEDUCK_INGESTION_QUEUE}</ingestionQueue>
         <minBatchSize>1024</minBatchSize>
         <project>*, CAST(timestamp AS DATE) AS date</project>
         <partitionBy>date</partitionBy>

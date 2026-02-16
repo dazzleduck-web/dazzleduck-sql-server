@@ -125,20 +125,34 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
     @Override
     public void start() {
         // Auto-create forwarder if baseUrl is configured
-        if (baseUrl != null && !baseUrl.isEmpty() && forwarder == null) {
-            synchronized (LogForwardingAppender.class) {
-                if (forwarder == null) {
-                    LogForwarderConfig config = LogForwarderConfig.builder()
-                            .baseUrl(baseUrl)
-                            .username(username)
-                            .password(password)
-                            .ingestionQueue(ingestionQueue)
-                            .minBatchSize(minBatchSize)
-                            .project(project)
-                            .partitionBy(partitionBy)
-                            .build();
-                    forwarder = new LogForwarder(config);
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            addError("LogForwardingAppender baseUrl is not configured - logs will NOT be forwarded. " +
+                    "Please set DAZZLEDUCK_BASE_URL environment variable or baseUrl property in logback.xml");
+        } else if (baseUrl.contains("${") || baseUrl.contains("}")) {
+            addError("LogForwardingAppender baseUrl contains unresolved variables: " + baseUrl +
+                    " - logs will NOT be forwarded. Check logback.xml property definitions.");
+        } else if (forwarder == null) {
+            try {
+                synchronized (LogForwardingAppender.class) {
+                    if (forwarder == null) {
+                        addInfo("Initializing LogForwardingAppender with baseUrl=" + baseUrl +
+                                ", ingestionQueue=" + ingestionQueue);
+
+                        LogForwarderConfig config = LogForwarderConfig.builder()
+                                .baseUrl(baseUrl)
+                                .username(username)
+                                .password(password)
+                                .ingestionQueue(ingestionQueue)
+                                .minBatchSize(minBatchSize)
+                                .project(project)
+                                .partitionBy(partitionBy)
+                                .build();
+                        forwarder = new LogForwarder(config);
+                        addInfo("LogForwardingAppender successfully initialized");
+                    }
                 }
+            } catch (Exception e) {
+                addError("Failed to initialize LogForwardingAppender", e);
             }
         }
 
@@ -156,7 +170,17 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
 
     @Override
     protected void append(ILoggingEvent event) {
-        if (!enabled || forwarder == null) {
+        if (!enabled) {
+            return;
+        }
+
+        if (forwarder == null) {
+            // Only log this error once every 1000 entries to avoid spamming
+            long seq = sequenceCounter.get();
+            if (seq == 0 || seq % 1000 == 0) {
+                addError("LogForwardingAppender forwarder is null - logs are being dropped. " +
+                        "Check configuration and initialization errors.");
+            }
             return;
         }
 
@@ -169,9 +193,18 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
         LogEntry entry = LogEntry.from(sequenceCounter.incrementAndGet(), event);
 
         // Add directly to forwarder - it handles batching via ArrowProducer
-        if (!forwarder.addLogEntry(entry)) {
-            // Queue full or forwarder not running - silently drop to avoid infinite loop
-            addWarn("Log forwarder queue full, dropping entry: " + event.getFormattedMessage());
+        try {
+            if (!forwarder.addLogEntry(entry)) {
+                // Queue full or forwarder not running - log this warning periodically
+                long seq = sequenceCounter.get();
+                if (seq == 1 || seq % 100 == 0) {
+                    addWarn("Log forwarder queue full, dropping entry (seq=" + seq + ")");
+                }
+            }
+        } catch (Exception e) {
+            // Log errors using addError to avoid infinite loop
+            // (this error itself will be excluded by the shouldExclude check)
+            addError("Failed to forward log entry", e);
         }
     }
 

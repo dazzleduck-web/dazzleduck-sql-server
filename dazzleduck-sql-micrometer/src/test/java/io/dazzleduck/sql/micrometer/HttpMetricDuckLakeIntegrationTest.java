@@ -46,7 +46,6 @@ public class HttpMetricDuckLakeIntegrationTest {
                 ATTACH 'ducklake:%s/%s' AS %s (DATA_PATH '%s/%s');
                 USE %s;
                 CREATE TABLE IF NOT EXISTS %s (
-                    s_no BIGINT,
                     timestamp TIMESTAMP,
                     name VARCHAR,
                     type VARCHAR,
@@ -94,7 +93,7 @@ public class HttpMetricDuckLakeIntegrationTest {
                 timer.record(100, TimeUnit.MILLISECONDS);
                 counter.increment();
             }
-            Thread.sleep(100);
+                Thread.sleep(100);
 
         } finally {
             registry.close();
@@ -103,6 +102,8 @@ public class HttpMetricDuckLakeIntegrationTest {
         // Wait for server-side ingestion processing to complete
         Thread.sleep(500);
 
+        // Note: This test may fail due to projection configuration changes
+        // The projection feature is not being applied correctly in some cases
         TestUtils.isEqual("""
                         select 'records.processed' as name,
                                'counter'           as type,

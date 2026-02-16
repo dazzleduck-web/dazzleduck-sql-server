@@ -295,7 +295,7 @@ public final class HttpArrowProducer extends ArrowProducer.AbstractArrowProducer
 
                 if (resp.statusCode() == 401 || resp.statusCode() == 403) {
                     if (authRetries >= MAX_AUTH_RETRIES) {
-                        logger.error("Max auth retries ({}) exceeded for {}{}", MAX_AUTH_RETRIES, baseUrl, ingestionQueue);
+                        logger.error("Max auth retries ({}) exceeded for {}", MAX_AUTH_RETRIES, buildIngestUrl());
                         break;
                     }
                     logger.warn("Received auth failure ({}) on attempt {}, invalidating JWT and retrying",
@@ -324,8 +324,8 @@ public final class HttpArrowProducer extends ArrowProducer.AbstractArrowProducer
                         })
                         .orElse(5000L); // Default 5 second wait
 
-                logger.warn("Server returned 429 Too Many Requests to {}{}, suggested wait: {} ms",
-                        baseUrl, ingestionQueue, waitMillis);
+                logger.warn("Server returned 429 Too Many Requests to {}, suggested wait: {} ms",
+                        buildIngestUrl(), waitMillis);
                 throw new BackPressureException(
                         "Server returned 429 Too Many Requests: " + resp.body(),
                         waitMillis
@@ -333,29 +333,29 @@ public final class HttpArrowProducer extends ArrowProducer.AbstractArrowProducer
             }
 
             if (resp.statusCode() != 200) {
-                logger.error("Ingestion failed with status {} to {}{}", resp.statusCode(), baseUrl, ingestionQueue);
+                logger.error("Ingestion failed with status {} to {}", resp.statusCode(), buildIngestUrl());
                 throw new RuntimeException("Ingestion failed with status " + resp.statusCode() + ": " + resp.body());
             }
 
-            logger.debug("Successfully sent element to {}{}", baseUrl, ingestionQueue);
+            logger.debug("Successfully sent to {}", buildIngestUrl());
 
         } catch (HttpTimeoutException e) {
-            logger.error("HTTP request timed out after {} to {}{}", httpClientTimeout, baseUrl, ingestionQueue, e);
+            logger.error("HTTP request timed out after {} to {}", httpClientTimeout, buildIngestUrl(), e);
             // Invalidate JWT on timeout - server may have restarted
             invalidateJwt();
-            throw new RuntimeException("HTTP request timed out to " + baseUrl + ingestionQueue, e);
+            throw new RuntimeException("HTTP request timed out to " + buildIngestUrl(), e);
         } catch (IOException e) {
             // Check if interrupted during IO
             if (Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("Thread interrupted during HTTP send");
             }
-            logger.error("Network error sending data to {}{}", baseUrl, ingestionQueue, e);
+            logger.error("Network error sending data to {}", buildIngestUrl(), e);
             // Invalidate JWT on network error - server may have restarted
             invalidateJwt();
-            throw new RuntimeException("Network error sending data to " + baseUrl + ingestionQueue, e);
+            throw new RuntimeException("Network error sending data to " + buildIngestUrl(), e);
         } catch (SecurityException e) {
-            logger.error("Authentication failed for {}{}", baseUrl, ingestionQueue, e);
-            throw new RuntimeException("Authentication failed for " + baseUrl + ingestionQueue, e);
+            logger.error("Authentication failed for {}", buildIngestUrl(), e);
+            throw new RuntimeException("Authentication failed for " + buildIngestUrl(), e);
         }
     }
 
@@ -377,9 +377,17 @@ public final class HttpArrowProducer extends ArrowProducer.AbstractArrowProducer
         return client;
     }
 
+    /**
+     * Build the full ingestion URL for logging purposes.
+     */
+    private String buildIngestUrl() {
+        return baseUrl + "/v1/ingest?ingestion_queue=" + ingestionQueue;
+    }
+
     private HttpResponse<String> post(byte[] payload) throws IOException, InterruptedException {
+        String fullUrl = buildIngestUrl();
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/v1/ingest?ingestion_queue=" + ingestionQueue))
+                .uri(URI.create(fullUrl))
                 .timeout(httpClientTimeout)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .header("Authorization", getJwt())
