@@ -20,7 +20,6 @@ services:
     working_dir: /workspace
     volumes:
       - warehouse-data:/workspace/warehouse
-      - ../../../dazzleduck-sql-flight/src/main/resources/startup/ollylake.sql:/workspace/startup/ollylake.sql:ro
     entrypoint:
       - /bin/sh
       - -c
@@ -31,7 +30,7 @@ services:
       - "--conf"
       - "dazzleduck_server.startup_script_provider.class=io.dazzleduck.sql.flight.LocalStartupConfigProvider"
       - "--conf"
-      - "dazzleduck_server.startup_script_provider.script_location=/workspace/startup/ollylake.sql"
+      - "dazzleduck_server.startup_script_provider.script_location=/startup/ollylake.sql"
       - "--conf"
       - "dazzleduck_server.ingestion_task_factory_provider.class=io.dazzleduck.sql.commons.ingestion.DuckLakeIngestionTaskFactoryProvider"
       - "--conf"

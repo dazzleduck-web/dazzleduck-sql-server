@@ -1,6 +1,6 @@
-# Arrow SLF4J Logger Demo with DuckLake
+# Logback LogForwardingAppender Demo with DuckLake
 #
-# Run from dazzleduck-sql-examples/docker/slf4j-demo directory:
+# Run from dazzleduck-sql-examples/docker/logback-demo directory:
 #   docker-compose up
 #
 # Prerequisites:
@@ -20,7 +20,6 @@ services:
     working_dir: /workspace
     volumes:
       - warehouse-data:/workspace/warehouse
-      - ../../../dazzleduck-sql-flight/src/main/resources/startup/ollylake.sql:/workspace/startup/ollylake.sql:ro
     entrypoint:
       - /bin/sh
       - -c
@@ -31,7 +30,7 @@ services:
       - "--conf"
       - "dazzleduck_server.startup_script_provider.class=io.dazzleduck.sql.flight.LocalStartupConfigProvider"
       - "--conf"
-      - "dazzleduck_server.startup_script_provider.script_location=/workspace/startup/ollylake.sql"
+      - "dazzleduck_server.startup_script_provider.script_location=/startup/ollylake.sql"
       - "--conf"
       - "dazzleduck_server.ingestion_task_factory_provider.class=io.dazzleduck.sql.commons.ingestion.DuckLakeIngestionTaskFactoryProvider"
       - "--conf"
@@ -52,14 +51,15 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  slf4j-demo:
+  logback-demo:
     image: dazzleduck/dazzleduck:latest
-    container_name: slf4j-demo
-    command: ["io.dazzleduck.sql.logger.demo.Demo"]
+    container_name: logback-demo
+    command: ["io.dazzleduck.sql.logback.demo.Demo"]
     environment:
-      # Logger module uses TypeSafe Config (reference.conf)
-      # Override via system properties
-      - JAVA_TOOL_OPTIONS=-Ddazzleduck_logger.http.base_url=http://dazzleduck-server:8081 -Ddazzleduck_logger.http.ingestion_queue=log
+      - DAZZLEDUCK_BASE_URL=http://dazzleduck-server:8081
+      - DAZZLEDUCK_USERNAME=admin
+      - DAZZLEDUCK_PASSWORD=admin
+      - DAZZLEDUCK_INGESTION_QUEUE=log
     depends_on:
       dazzleduck-server:
         condition: service_healthy
@@ -73,4 +73,4 @@ volumes:
 networks:
   dazzleduck-net:
     driver: bridge
-    name: dazzleduck-slf4j-demo-network
+    name: dazzleduck-logback-demo-network
