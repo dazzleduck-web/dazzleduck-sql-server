@@ -13,8 +13,10 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the application
-RUN npm run build
+# Build the web application (using app config, not library config)
+# Note: vite.config.js builds the library, vite.config.app.js builds the web app
+# Use npm run build:app to build the web application
+RUN npm run build:app
 
 # Production stage
 FROM node:20-alpine AS production
