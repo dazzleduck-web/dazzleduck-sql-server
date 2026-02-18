@@ -6,6 +6,7 @@ import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.FlightProducer;
 import org.apache.arrow.flight.PutResult;
 import org.apache.arrow.flight.sql.impl.FlightSql;
+import org.apache.arrow.vector.compression.CompressionUtil;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -115,10 +116,36 @@ public interface HttpFlightAdaptor {
             FlightProducer.CallContext context,
             Supplier<OutputStream> outputStreamSupplier) {
 
+        return getStreamStatementDirect(ticket, context, outputStreamSupplier, CompressionUtil.CodecType.ZSTD);
+    }
+
+    /**
+     * Gets the stream for a statement query ticket, writing directly to an OutputStream,
+     * with configurable compression.
+     *
+     * <p>The default implementation delegates to {@link #getStreamStatement} using a
+     * {@link DirectOutputStreamListener} that writes Arrow IPC format to the output stream.
+     *
+     * <p>The outputStreamSupplier is used instead of a direct OutputStream to defer
+     * obtaining the stream until data is actually ready to write. This allows HTTP
+     * error responses to set proper status codes before the response is committed.
+     *
+     * @param ticket the statement query ticket
+     * @param context the call context
+     * @param outputStreamSupplier supplier that provides the output stream when data is ready to write
+     * @param compressionCodec the compression codec to use for Arrow IPC (e.g., ZSTD, LZ4, NONE)
+     * @return a CompletableFuture that completes when streaming is done, or exceptionally on error
+     */
+    default CompletableFuture<Void> getStreamStatementDirect(
+            FlightSql.TicketStatementQuery ticket,
+            FlightProducer.CallContext context,
+            Supplier<OutputStream> outputStreamSupplier,
+            CompressionUtil.CodecType compressionCodec) {
+
         CompletableFuture<Void> future = new CompletableFuture<>();
         // Use lazy initialization - only get the outputStream when start() is called
         // This allows errors before start() to be handled without committing the HTTP response
-        DirectOutputStreamListener listener = new DirectOutputStreamListener(outputStreamSupplier, future);
+        DirectOutputStreamListener listener = new DirectOutputStreamListener(outputStreamSupplier, future, compressionCodec);
 
         // getStreamStatement is typically async - it starts streaming and returns
         getStreamStatement(ticket, context, listener);

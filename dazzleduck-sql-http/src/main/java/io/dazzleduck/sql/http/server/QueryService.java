@@ -12,6 +12,7 @@ import io.helidon.webserver.http.ServerResponse;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.flight.sql.impl.FlightSql;
+import org.apache.arrow.vector.compression.CompressionUtil;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -44,13 +45,23 @@ public class QueryService extends AbstractQueryBasedService {
             var statementHandle = StatementHandle.newStatementHandle(id, query.query(), producerId, -1);
             var ticket = createTicket(statementHandle);
 
+            // Get Arrow compression codec from header (defaults to ZSTD)
+            CompressionUtil.CodecType compressionCodec = ParameterUtils.getArrowCompression(request);
+            logger.atDebug().log("Using Arrow compression codec: {}", compressionCodec);
+
             logger.atDebug().log("Calling getStreamStatementDirect for query: {}", query.query());
-            var future = httpFlightAdaptor.getStreamStatementDirect(ticket, context, () -> response.outputStream());
+            var future = httpFlightAdaptor.getStreamStatementDirect(ticket, context, () -> response.outputStream(), compressionCodec);
 
             logger.atDebug().log("Waiting for future.get() with timeout {}ms", httpConfig.getQueryTimeoutMs());
             future.get(httpConfig.getQueryTimeoutMs(), TimeUnit.MILLISECONDS);
             logger.atDebug().log("future.get() completed successfully");
 
+        } catch (IllegalArgumentException e) {
+            logger.atError().setCause(e).log("Invalid Arrow compression header value");
+            if (!response.isSent()) {
+                response.status(Status.BAD_REQUEST_400);
+                response.send(e.getMessage());
+            }
         } catch (TimeoutException e) {
             logger.atError().log("Query execution timeout after {}ms", httpConfig.getQueryTimeoutMs());
             if (!response.isSent()) {
