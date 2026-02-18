@@ -299,7 +299,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testInvalidCompressionHeader() throws Exception {
         var query = "SELECT 1";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HEADER_ARROW_COMPRESSION, "invalid_codec")
                 .build();
@@ -314,7 +314,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testValidCompressionHeaders(String compressionValue) throws Exception {
         var query = "SELECT 1";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HEADER_ARROW_COMPRESSION, compressionValue)
                 .build();

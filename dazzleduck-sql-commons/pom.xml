@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.19</version>
+        <version>0.0.20</version>
     </parent>
     <artifactId>dazzleduck-sql-commons</artifactId>
     <name>DazzleDuck Project Commons</name>
@@ -155,7 +155,7 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-common</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
         </dependency>
     </dependencies>
 </project>
