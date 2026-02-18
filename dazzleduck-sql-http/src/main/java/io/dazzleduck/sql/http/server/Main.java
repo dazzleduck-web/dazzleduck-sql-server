@@ -58,6 +58,7 @@ public class Main {
     private static final String HTTP_METHOD_POST = "POST";
     private static final String HEADER_CONTENT_TYPE = "Content-Type";
     private static final String HEADER_AUTHORIZATION = "Authorization";
+    private static final String HEADER_ARROW_COMPRESSION = "x-dd-arrow-compression";
 
     // Authentication types
     private static final String AUTH_NONE = ConfigConstants.AUTH_NONE;
@@ -287,7 +288,7 @@ public class Main {
                 .addCrossOrigin(CrossOriginConfig.builder()
                         .allowOrigins(appConfig.hasPath(CONFIG_ALLOW_ORIGIN) ? appConfig.getString(CONFIG_ALLOW_ORIGIN) : CORS_DEFAULT_ALLOW_ORIGIN)
                         .allowMethods(HTTP_METHOD_GET, HTTP_METHOD_POST)
-                        .allowHeaders(HEADER_CONTENT_TYPE, HEADER_AUTHORIZATION)
+                        .allowHeaders(HEADER_CONTENT_TYPE, HEADER_AUTHORIZATION, HEADER_ARROW_COMPRESSION)
                         .build())
                 .build();
         HttpService loginService;

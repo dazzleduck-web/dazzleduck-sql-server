@@ -10,7 +10,9 @@ const AdvancedSettings = ({
     updateClaim,
     register,
     errors,
-    isSubmitted
+    isSubmitted,
+    disableCompression,
+    setDisableCompression
 }) => {
     return (
         <div className="">
@@ -59,6 +61,22 @@ const AdvancedSettings = ({
                         )}
                         <p className="text-xs text-gray-500 mt-1">
                             0 = /v1/query; &gt;0 = /v1/plan with splits
+                        </p>
+                    </div>
+
+                    {/* Compression */}
+                    <div>
+                        <label className="flex items-center text-sm font-medium text-gray-700 mb-1 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={disableCompression}
+                                onChange={(e) => setDisableCompression(e.target.checked)}
+                                className="mr-2 cursor-pointer"
+                            />
+                            Disable ZSTD compression
+                        </label>
+                        <p className="text-xs text-gray-500 mt-1">
+                            {disableCompression ? "Compression: NONE" : "Compression: ZSTD (default)"}
                         </p>
                     </div>
                 </div>

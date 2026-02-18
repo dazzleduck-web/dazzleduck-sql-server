@@ -92,6 +92,8 @@ const Logging = () => {
                 handleSaveSession={sessionManagement.handleSaveSession}
                 handleOpenSession={sessionManagement.handleOpenSession}
                 openFileDialog={sessionManagement.openFileDialog}
+                disableCompression={connectionForm.disableCompression}
+                setDisableCompression={connectionForm.setDisableCompression}
             />
 
             {/* Tabs */}
