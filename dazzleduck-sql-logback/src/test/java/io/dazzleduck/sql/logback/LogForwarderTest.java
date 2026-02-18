@@ -15,7 +15,7 @@ class LogForwarderTest {
 
     @BeforeEach
     void setUp() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
 
         config = LogForwarderConfig.builder()
                 .baseUrl("http://localhost:9999")  // Non-existent server for testing
@@ -34,7 +34,7 @@ class LogForwarderTest {
 
     @AfterEach
     void tearDown() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
     }
 
     @Test

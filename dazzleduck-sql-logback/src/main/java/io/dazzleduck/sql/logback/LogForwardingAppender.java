@@ -14,6 +14,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * to a remote server via HTTP. Log entries are sent directly to the
  * ArrowProducer which handles batching and sending.
  *
+ * <p>Each appender instance maintains its own {@link LogForwarder}, so multiple
+ * appenders with different configurations (different servers, queues, etc.)
+ * can coexist in the same JVM.</p>
+ *
  * <p>Usage in logback.xml:</p>
  * <pre>{@code
  * <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
@@ -25,9 +29,19 @@ import java.util.concurrent.atomic.AtomicLong;
  *     <partitionBy>date</partitionBy>
  * </appender>
  *
+ * <!-- Multiple appenders with different configs are supported -->
+ * <appender name="AUDIT_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+ *     <baseUrl>http://audit-server:8081</baseUrl>
+ *     <ingestionQueue>audit</ingestionQueue>
+ * </appender>
+ *
  * <root level="INFO">
  *     <appender-ref ref="LOG_FORWARDER"/>
  * </root>
+ *
+ * <logger name="com.example.audit" level="INFO" additivity="false">
+ *     <appender-ref ref="AUDIT_FORWARDER"/>
+ * </logger>
  * }</pre>
  */
 public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
@@ -40,16 +54,16 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
             "org.apache.arrow"
     };
 
-    // Sequence number counter for generating unique s_no values
+    // Global sequence number counter for unique s_no values across all appender instances
     private static final AtomicLong sequenceCounter = new AtomicLong(0);
 
-    // Static forwarder - auto-created when baseUrl is configured
-    private static volatile LogForwarder forwarder;
-
     /**
-     * Enable or disable log forwarding.
+     * Global enable/disable toggle for all appender instances.
      */
     private static volatile boolean enabled = true;
+
+    // Per-instance forwarder - each appender has its own independent forwarder
+    private volatile LogForwarder forwarder;
 
     // Logback XML configurable properties
     private String baseUrl;
@@ -131,26 +145,22 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
         } else if (baseUrl.contains("${") || baseUrl.contains("}")) {
             addError("LogForwardingAppender baseUrl contains unresolved variables: " + baseUrl +
                     " - logs will NOT be forwarded. Check logback.xml property definitions.");
-        } else if (forwarder == null) {
+        } else {
             try {
-                synchronized (LogForwardingAppender.class) {
-                    if (forwarder == null) {
-                        addInfo("Initializing LogForwardingAppender with baseUrl=" + baseUrl +
-                                ", ingestionQueue=" + ingestionQueue);
+                addInfo("Initializing LogForwardingAppender with baseUrl=" + baseUrl +
+                        ", ingestionQueue=" + ingestionQueue);
 
-                        LogForwarderConfig config = LogForwarderConfig.builder()
-                                .baseUrl(baseUrl)
-                                .username(username)
-                                .password(password)
-                                .ingestionQueue(ingestionQueue)
-                                .minBatchSize(minBatchSize)
-                                .project(project)
-                                .partitionBy(partitionBy)
-                                .build();
-                        forwarder = new LogForwarder(config);
-                        addInfo("LogForwardingAppender successfully initialized");
-                    }
-                }
+                LogForwarderConfig config = LogForwarderConfig.builder()
+                        .baseUrl(baseUrl)
+                        .username(username)
+                        .password(password)
+                        .ingestionQueue(ingestionQueue)
+                        .minBatchSize(minBatchSize)
+                        .project(project)
+                        .partitionBy(partitionBy)
+                        .build();
+                forwarder = new LogForwarder(config);
+                addInfo("LogForwardingAppender successfully initialized");
             } catch (Exception e) {
                 addError("Failed to initialize LogForwardingAppender", e);
             }
@@ -218,16 +228,11 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
     }
 
     /**
-     * Reset the appender state. Primarily for testing.
+     * Reset the global static state. Primarily for testing.
+     * Note: per-instance forwarders are cleaned up via {@link #stop()}.
      */
-    static void reset() {
-        synchronized (LogForwardingAppender.class) {
-            if (forwarder != null) {
-                forwarder.close();
-                forwarder = null;
-            }
-            enabled = true;
-            sequenceCounter.set(0);
-        }
+    static void resetGlobalState() {
+        enabled = true;
+        sequenceCounter.set(0);
     }
 }
