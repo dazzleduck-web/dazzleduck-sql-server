@@ -8,6 +8,7 @@ import org.apache.arrow.vector.compression.CompressionUtil;
 import org.apache.arrow.vector.dictionary.DictionaryProvider;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.ipc.message.IpcOption;
+import org.apache.arrow.vector.compression.CompressionUtil.CodecType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,7 +28,7 @@ import java.util.function.Supplier;
  * <ul>
  *   <li>Defers obtaining the OutputStream until {@link #start} is called, allowing HTTP
  *       error responses to set proper status codes before the response is committed</li>
- *   <li>Uses ZSTD compression for efficient data transfer</li>
+ *   <li>Supports configurable compression codec (default: ZSTD) for efficient data transfer</li>
  *   <li>Completes the future when streaming finishes or fails</li>
  * </ul>
  */
@@ -37,13 +38,14 @@ public class DirectOutputStreamListener implements FlightProducer.ServerStreamLi
 
     private final Supplier<OutputStream> outputStreamSupplier;
     private final CompletableFuture<Void> future;
+    private final CodecType compressionCodec;
     private OutputStream outputStream;
     private ArrowStreamWriter writer;
     private volatile boolean completed;
     private int batchCount = 0;
 
     /**
-     * Create a new DirectOutputStreamListener.
+     * Create a new DirectOutputStreamListener with default ZSTD compression.
      *
      * @param outputStreamSupplier supplier that provides the output stream when data is ready to write
      * @param future the future to complete when streaming is done or fails
@@ -51,10 +53,25 @@ public class DirectOutputStreamListener implements FlightProducer.ServerStreamLi
     public DirectOutputStreamListener(
             Supplier<OutputStream> outputStreamSupplier,
             CompletableFuture<Void> future) {
+        this(outputStreamSupplier, future, CompressionUtil.CodecType.ZSTD);
+    }
+
+    /**
+     * Create a new DirectOutputStreamListener with configurable compression.
+     *
+     * @param outputStreamSupplier supplier that provides the output stream when data is ready to write
+     * @param future the future to complete when streaming is done or fails
+     * @param compressionCodec the compression codec to use (e.g., ZSTD, LZ4, NONE)
+     */
+    public DirectOutputStreamListener(
+            Supplier<OutputStream> outputStreamSupplier,
+            CompletableFuture<Void> future,
+            CodecType compressionCodec) {
         this.outputStreamSupplier = outputStreamSupplier;
         this.future = future;
+        this.compressionCodec = compressionCodec;
         this.completed = false;
-        logger.debug("DirectOutputStreamListener created");
+        logger.debug("DirectOutputStreamListener created with compression codec: {}", compressionCodec);
     }
 
     @Override
@@ -74,21 +91,27 @@ public class DirectOutputStreamListener implements FlightProducer.ServerStreamLi
 
     @Override
     public synchronized void start(VectorSchemaRoot root, DictionaryProvider dictionaries, IpcOption option) {
-        logger.debug("start() called with schema: {}", root.getSchema());
+        logger.debug("start() called with schema: {} and compression codec: {}", root.getSchema(), compressionCodec);
         try {
             // Lazily get the outputStream - this commits the HTTP response (status 200)
             // Only do this when we're ready to write data
             this.outputStream = outputStreamSupplier.get();
-            this.writer = new ArrowStreamWriter(
-                    root,
-                    dictionaries,
-                    Channels.newChannel(outputStream),
-                    option != null ? option : IpcOption.DEFAULT,
-                    CommonsCompressionFactory.INSTANCE,
-                    CompressionUtil.CodecType.ZSTD);
+
+            // Handle NO_COMPRESSION separately - use constructor without compression factory
+            if (compressionCodec == CompressionUtil.CodecType.NO_COMPRESSION) {
+                this.writer = new ArrowStreamWriter(root, dictionaries, outputStream);
+            } else {
+                this.writer = new ArrowStreamWriter(
+                        root,
+                        dictionaries,
+                        Channels.newChannel(outputStream),
+                        option != null ? option : IpcOption.DEFAULT,
+                        CommonsCompressionFactory.INSTANCE,
+                        compressionCodec);
+            }
             writer.start();
             outputStream.flush();
-            logger.debug("writer.start() and flush completed successfully");
+            logger.debug("writer.start() and flush completed successfully with compression: {}", compressionCodec);
         } catch (IOException e) {
             logger.error("Error in start()", e);
             future.completeExceptionally(e);

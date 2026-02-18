@@ -36,7 +36,6 @@
         <module>dazzleduck-sql-search</module>
         <module>dazzleduck-sql-runtime</module>
         <module>dazzleduck-sql-micrometer</module>
-        <module>dazzleduck-sql-logger</module>
         <module>dazzleduck-sql-login</module>
         <module>dazzleduck-sql-client</module>
         <module>dazzleduck-sql-client-grpc</module>

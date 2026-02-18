@@ -294,4 +294,37 @@ public class HttpServerBasicTest extends HttpServerTestBase {
         }
         assertTrue(new String(bytes).contains("Error"));
     }
+
+    @Test
+    public void testInvalidCompressionHeader() throws Exception {
+        var query = "SELECT 1";
+        var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+                .GET()
+                .header(HEADER_ARROW_COMPRESSION, "invalid_codec")
+                .build();
+        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, response.statusCode());
+        assertTrue(response.body().contains("Invalid Arrow compression codec specified"));
+        assertTrue(response.body().contains("invalid_codec"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"zstd", "ZSTD", "zstandard", "ZSTANDARD", "ZsTd", "none", "NONE", "NoNe"})
+    public void testValidCompressionHeaders(String compressionValue) throws Exception {
+        var query = "SELECT 1";
+        var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+                .GET()
+                .header(HEADER_ARROW_COMPRESSION, compressionValue)
+                .build();
+        var response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, response.statusCode());
+        // Verify we can read the Arrow stream
+        try (var allocator = new RootAllocator();
+             var inputStream = response.body();
+             var reader = new ArrowStreamReader(inputStream, allocator)) {
+            assertTrue(reader.loadNextBatch());
+        }
+    }
 }
