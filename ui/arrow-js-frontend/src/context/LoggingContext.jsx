@@ -57,7 +57,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Login ---
-    const login = async (serverUrl, username, password, splitSize, claims) => {
+    const login = async (serverUrl, username, password, splitSize, claims, disableCompression = false) => {
         try {
             const response = await axios.post(`${serverUrl.trim()}/v1/login`, {
                 username,
@@ -83,6 +83,7 @@ export const LoggingProvider = ({ children }) => {
                 username,
                 claims,
                 splitSize, // Default, will be updated when executing queries
+                disableCompression,
                 loginTime: new Date().toISOString()
             };
 
@@ -132,7 +133,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Core forwarder ---
-    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null) => {
+    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null, disableCompression = false) => {
         if (!/^https?:\/\//i.test(serverUrl.trim())) {
             throw new Error("Server URL must start with http:// or https://");
         }
@@ -144,6 +145,11 @@ export const LoggingProvider = ({ children }) => {
             Accept: "application/json, application/vnd.apache.arrow.stream",
             Authorization: token ? token : jwt,
         };
+
+        // Add compression header if disabled
+        if (disableCompression) {
+            headers["x-dd-arrow-compression"] = "none";
+        }
 
         // Prepare request body with queryId (as number)
         let requestBody;
@@ -194,7 +200,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Execute Query ---
-    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId) => {
+    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId, disableCompression = false) => {
         const cleanUrl = serverUrl.trim();
         if (!serverUrl || !query) {
             throw new Error("Please fill in all fields before running the query.");
@@ -209,7 +215,7 @@ export const LoggingProvider = ({ children }) => {
                     ? cleanUrl
                     : cleanUrl.replace(/\/+$/, "") + "/v1/query";
 
-                const result = await forwardToDazzleDuck(url, query, jwt, queryId);
+                const result = await forwardToDazzleDuck(url, query, jwt, queryId, disableCompression);
                 finalResults = result.type === "json"
                     ? parseResponseData(result.data)
                     : parseResponseData({
@@ -236,7 +242,7 @@ export const LoggingProvider = ({ children }) => {
                         ? serverUrl
                         : serverUrl.replace(/\/+$/, "") + "/v1/query";
 
-                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt, queryId);
+                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt, queryId, disableCompression);
                     const normalized = splitResult.type === "json"
                         ? parseResponseData(splitResult.data)
                         : parseResponseData({
@@ -339,7 +345,8 @@ export const LoggingProvider = ({ children }) => {
                 serverUrl: connectionInfo.serverUrl,
                 username: connectionInfo.username,
                 claims: connectionInfo.claims,
-                splitSize: connectionInfo.splitSize || 0
+                splitSize: connectionInfo.splitSize || 0,
+                disableCompression: connectionInfo.disableCompression || false
             },
             queries: currentQueries.map(q => ({
                 query: q.query
@@ -385,6 +392,7 @@ export const LoggingProvider = ({ children }) => {
             username: connection.username,
             claims: connection.claims,
             splitSize: connection.splitSize,
+            disableCompression: connection.disableCompression || false,
             loginTime: new Date().toISOString()
         };
 
