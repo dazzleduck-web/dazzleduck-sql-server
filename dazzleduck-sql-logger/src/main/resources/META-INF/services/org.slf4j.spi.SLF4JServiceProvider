@@ -1,4 +1,0 @@
-# File: src/main/resources/META-INF/services/org.slf4j.spi.SLF4JServiceProvider
-# This file must be created for SLF4J to discover your implementation
-
-io.dazzleduck.sql.logger.ArrowSLF4JServiceProvider
