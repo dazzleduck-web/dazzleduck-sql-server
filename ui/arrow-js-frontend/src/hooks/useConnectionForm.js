@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useForm } from 'react-hook-form';
 
 export const useConnectionForm = (login, logout, connectionInfo) => {
@@ -9,12 +9,13 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
         password: "",
         claims: { cluster: "" },
         splitSize: 0,
-        disableCompression: false,
+        disableCompression: true,
     });
     const [isConnected, setIsConnected] = useState(false);
     const [loginError, setLoginError] = useState(null);
     const [showAdvanced, setShowAdvanced] = useState(false);
-    const [disableCompression, setDisableCompression] = useState(false);
+    const [disableCompression, setDisableCompression] = useState(true);
+    const hasInitialized = useRef(false);
 
     const {
         register,
@@ -34,6 +35,10 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
 
     const watchedFields = watch();
 
+    useEffect(() => {
+        setConnection(prev => ({ ...prev, disableCompression }));
+    }, [disableCompression]);
+
     // Load connection info on mount
     useEffect(() => {
         if (connectionInfo) {
@@ -49,15 +54,19 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
                 setClaims(claimsArray.length > 0 ? claimsArray : [{ key: "", value: "" }]);
             }
 
-            setConnection({
+            if (!hasInitialized.current) {
+                hasInitialized.current = true;
+                setDisableCompression(connectionInfo.disableCompression ?? true);
+            }
+
+            setConnection(prev => ({
+                ...prev,
                 url: connectionInfo.serverUrl,
                 username: connectionInfo.username,
                 password: "",
                 claims: connectionInfo.claims,
                 splitSize: connectionInfo.splitSize || 0,
-                disableCompression: connectionInfo.disableCompression || false,
-            });
-            setDisableCompression(connectionInfo.disableCompression || false);
+            }));
         }
     }, [connectionInfo, setValue]);
 
@@ -136,7 +145,7 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
         setValue("username", sessionData.connection.username);
         setValue("password", "");
         setValue("splitSize", sessionData.connection.splitSize || 0);
-        setDisableCompression(sessionData.connection.disableCompression || false);
+        setDisableCompression(sessionData.connection.disableCompression ?? true);
 
         if (sessionData.connection.claims) {
             const claimsArray = Object.entries(sessionData.connection.claims).map(([key, value]) => ({
