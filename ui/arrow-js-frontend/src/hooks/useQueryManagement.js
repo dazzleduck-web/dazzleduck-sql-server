@@ -53,7 +53,7 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
     };
 
     const runQueryForRow = async (row) => {
-        const { url, splitSize } = connection;
+        const { url, splitSize, disableCompression } = connection;
 
         if (!isConnected) {
             return { logs: [], error: "Not connected — click Connect", queryId: null };
@@ -66,7 +66,7 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
         setQueryIds(prev => ({ ...prev, [row.id]: queryId }));
 
         try {
-            const result = await executeQuery(url, row.query, splitSize, null, queryId);
+            const result = await executeQuery(url, row.query, splitSize, null, queryId, disableCompression);
             return { logs: result.data, error: null, queryId: result.queryId };
         } catch (err) {
             return { logs: [], error: err?.message || "Query failed", queryId: null };

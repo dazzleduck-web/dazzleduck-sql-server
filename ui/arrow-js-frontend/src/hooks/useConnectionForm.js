@@ -9,10 +9,12 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
         password: "",
         claims: { cluster: "" },
         splitSize: 0,
+        disableCompression: false,
     });
     const [isConnected, setIsConnected] = useState(false);
     const [loginError, setLoginError] = useState(null);
     const [showAdvanced, setShowAdvanced] = useState(false);
+    const [disableCompression, setDisableCompression] = useState(false);
 
     const {
         register,
@@ -53,7 +55,9 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
                 password: "",
                 claims: connectionInfo.claims,
                 splitSize: connectionInfo.splitSize || 0,
+                disableCompression: connectionInfo.disableCompression || false,
             });
+            setDisableCompression(connectionInfo.disableCompression || false);
         }
     }, [connectionInfo, setValue]);
 
@@ -107,12 +111,13 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
             password: data.password,
             claims: claimsObject,
             splitSize: data.splitSize ?? 0,
+            disableCompression,
         };
 
         setConnection(newConnection);
 
         try {
-            await login(data.url, data.username, data.password, data.splitSize, claimsObject);
+            await login(data.url, data.username, data.password, data.splitSize, claimsObject, disableCompression);
             setIsConnected(true);
         } catch (err) {
             setIsConnected(false);
@@ -131,6 +136,7 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
         setValue("username", sessionData.connection.username);
         setValue("password", "");
         setValue("splitSize", sessionData.connection.splitSize || 0);
+        setDisableCompression(sessionData.connection.disableCompression || false);
 
         if (sessionData.connection.claims) {
             const claimsArray = Object.entries(sessionData.connection.claims).map(([key, value]) => ({
@@ -165,6 +171,8 @@ export const useConnectionForm = (login, logout, connectionInfo) => {
         // Advanced settings
         showAdvanced,
         setShowAdvanced,
+        disableCompression,
+        setDisableCompression,
 
         // Actions
         onSubmit,
