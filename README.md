@@ -45,7 +45,7 @@ The project includes JDK 11 compatible client libraries:
 ```
 - Start the container with `example/data` mounted to the container
   ```bash
-  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data
+  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data --conf users.0.password="your password"
   ```
   This will print the following on the console:
   ```
@@ -67,7 +67,7 @@ The project includes JDK 11 compatible client libraries:
 ## Getting started in the dev setup 
  ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
-./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse"
+./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse --conf users.0.password="your password""
 ```
 
 ### Supported functionality
@@ -100,53 +100,8 @@ All HTTP API endpoints are versioned with a `/v1` prefix to ensure backward comp
 The server is running on HTTP mode on port 8081 which can used to query DuckDB with POST and GET methods. This will return data in arrow format.<p>
 The return data can itself be queried with duckdb
 
-- Using HTTP GET to query the server and read the data in duckdb
--
-  ```bash
-  URL="http://localhost:8081/v1/query?q=select%201"
-  SQL="INSTALL arrow FROM community; LOAD arrow; FROM read_arrow('/dev/stdin') SELECT count(*);"
-  curl -s "$URL" | duckdb -c "$SQL"
-  ```
-
-- Using http POST for split planning
-  ```bash
-  SCHEMA_QUERY="FROM (VALUES(NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR)) t( dt, p, key, value) WHERE false UNION ALL BY NAME FROM read_parquet('/data/hive_table/*/*/*.parquet', hive_partitioning = true, hive_types = {'dt': DATE, 'p': VARCHAR})"
-  URL="http://localhost:8081/v1/plan"
-  QUERY="SELECT count(*) FROM ($SCHEMA_QUERY) GROUP BY key"
-  curl -s -X POST \
-  -H "Content-Type: application/json" \
-  -d "{\"query\" : \"$QUERY\"}" \
-  "$URL"
-  ```
-- For smaller split sizes
-
-   ```bash
-  curl -s -X POST \
-  -H "Content-Type: application/json" \
-  -H "split_size: 1" \
-  -d "{\"query\" : \"$QUERY\"}" \
-  "$URL"
-  ```
-
-- Writing to Server using post <br>
-```bash
-curl -i -X POST 'http://localhost:8081/v1/ingest?path=file1.parquet' \
-  -H "Content-Type: application/vnd.apache.arrow.stream" \
-  --data-binary "@dazzleduck-sql-http/example/arrow_ipc/file1.arrow"
-```
-- Reading the file written above <br>
-```bash
-URL="http://localhost:8081/v1/query?q=select%20%2A%20from%20read_parquet%28%27%2Fdata%2Fwarehouse%2Ffile.parquet%27%29%0A"
-curl -s "$URL" | duckdb -c "$SQL"
-```
-
-## Connecting to Remote HTTP server with Local DuckDB
-```
-D INSTALL arrow FROM community;
-D LOAD arrow;
-D SELECT * FROM read_arrow(concat('http://localhost:8081/v1/query?q=', url_encode('select 1, 2, 3')));
-```
-
+## Getting start with duckdb.
+You can learn more about Dazzleduck-sql-server [dazzleduck](https://github.com/dazzleduck-web/dazzleduck-sql-duckdb/blob/main/README.md)
 
 ## Connecting to the flight server via Flight JDBC
 Download the [Apache Arrow Flight SQL JDBC driver](https://search.maven.org/search?q=a:flight-sql-jdbc-driver)

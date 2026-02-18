@@ -7,7 +7,7 @@ This module provides HTTP REST API endpoints for the DazzleDuck SQL Server, buil
 - **Framework**: Helidon WebServer
 - **API Version**: v1
 - **Base Path**: `/v1` (except health check and UI)
-- **Authentication**: JWT token-based (configurable)
+- **Authentication**: JWT token-based (required for all versioned endpoints by default)
 - **Data Format**: Apache Arrow IPC streaming format for query results
 
 ## API Endpoints
@@ -471,9 +471,9 @@ curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
 
 ## Authentication
 
-### JWT Authentication
+### JWT Authentication (Required)
 
-When JWT authentication is enabled, protected endpoints require a valid Bearer token.
+All versioned API endpoints require a valid JWT Bearer token for authentication.
 
 **Protected Endpoints**:
 - `/v1/query`
@@ -483,13 +483,15 @@ When JWT authentication is enabled, protected endpoints require a valid Bearer t
 - `/v1/ui`
 
 **Unprotected Endpoints**:
-- `/health`
-- `/v1/login`
+- `/health` - Health check (always accessible)
+- `/v1/login` - Authentication endpoint (for obtaining tokens)
 
 **Authorization Header**:
 ```
 Authorization: Bearer <JWT token>
 ```
+
+**Note**: To disable authentication (not recommended for production), set `http.authentication` to `"none"` in your configuration.
 
 ### CORS Configuration
 
@@ -505,7 +507,7 @@ Authorization: Bearer <JWT token>
 |-----|-------------|---------|
 | `http.host` | Server host | localhost |
 | `http.port` | Server port | 8080 |
-| `http.authentication` | Auth mode ("none" or "jwt") | none |
+| `http.authentication` | Auth mode ("none" or "jwt") | jwt |
 | `jwt_token.expiration` | JWT token expiration | - |
 | `jwt_token.claims.generate.headers` | Headers to extract as JWT claims | - |
 | `jwt_token.claims.validate.headers` | Headers to validate | - |
@@ -552,18 +554,13 @@ Authorization: Bearer <JWT token>
 ### Execute a Query (curl)
 
 ```bash
-# Without authentication
-curl -X POST http://localhost:8080/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "SELECT * FROM users LIMIT 10"}' \
-  --output result.arrow
-
-# With JWT authentication
+# JWT authentication is required by default
+# First, login to get a token
 curl -X POST http://localhost:8080/v1/login \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "secret"}'
 
-# Use the returned token
+# Use the returned token in subsequent requests
 curl -X POST http://localhost:8080/v1/query \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
@@ -580,8 +577,10 @@ curl http://localhost:8080/health
 ### Ingest Data
 
 ```bash
+# JWT authentication is required by default
 curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
   -H "Content-Type: application/vnd.apache.arrow.stream" \
+  -H "Authorization: Bearer <token>" \
   -H "x-dd-format: parquet" \
   --data-binary @data.arrow
 ```
