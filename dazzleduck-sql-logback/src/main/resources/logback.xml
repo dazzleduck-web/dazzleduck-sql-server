@@ -17,7 +17,25 @@
         </encoder>
     </appender>
 
-    <!-- DazzleDuck Log Forwarding Appender -->
+    <!--
+        DazzleDuck Log Forwarding Appender - two configuration styles:
+
+        Style 1 (inline): set properties directly in this file (shown below).
+
+        Style 2 (configFile): point to a dedicated XML file on the classpath or filesystem.
+                              Each component gets its own XML file; only the name differs here.
+                              Example for multiple components:
+
+          <appender name="CONTROLLER_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+              <configFile>controller-logback.xml</configFile>
+          </appender>
+
+          <appender name="SERVICE_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+              <configFile>service-logback.xml</configFile>
+          </appender>
+
+          See controller-logback.xml in resources for the expected file format.
+    -->
     <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
         <baseUrl>${DAZZLEDUCK_BASE_URL}</baseUrl>
         <username>${DAZZLEDUCK_USERNAME}</username>
