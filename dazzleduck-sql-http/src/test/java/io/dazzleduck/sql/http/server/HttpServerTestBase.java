@@ -136,4 +136,17 @@ public abstract class HttpServerTestBase {
     protected String urlEncode(String s) {
         return URLEncoder.encode(s, Charset.defaultCharset());
     }
+
+    /**
+     * Create an HttpRequest.Builder with JWT authentication header.
+     * @param uri the request URI
+     * @return HttpRequest.Builder with Authorization header
+     * @throws IOException if login fails
+     * @throws InterruptedException if login is interrupted
+     */
+    protected HttpRequest.Builder authenticatedRequestBuilder(URI uri) throws IOException, InterruptedException {
+        String token = getJWTToken();
+        return HttpRequest.newBuilder(uri)
+                .header("Authorization", "Bearer " + token);
+    }
 }

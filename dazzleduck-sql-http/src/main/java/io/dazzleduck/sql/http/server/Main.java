@@ -277,7 +277,7 @@ public class Main {
         var httpConfig = appConfig.getConfig(CONFIG_HTTP);
         var port = httpConfig.getInt(ConfigConstants.PORT_KEY);
         var host = httpConfig.getString(ConfigConstants.HOST_KEY);
-        var auth = httpConfig.hasPath(ConfigConstants.AUTHENTICATION_KEY) ? httpConfig.getString(ConfigConstants.AUTHENTICATION_KEY) : AUTH_NONE;
+        var auth = httpConfig.hasPath(ConfigConstants.AUTHENTICATION_KEY) ? httpConfig.getString(ConfigConstants.AUTHENTICATION_KEY) : AUTH_JWT;
        String base64SecretKey = appConfig.getString(ConfigConstants.SECRET_KEY_KEY);
         var secretKey = Validator.fromBase64String(base64SecretKey);
         String location = PROTOCOL_HTTP + "://%s:%s".formatted(host, port);
@@ -298,10 +298,8 @@ public class Main {
             loginService = new LoginService(appConfig, secretKey, jwtExpiration);
         }
 
-        // JWT filter is required if EITHER:
-        // 1. Authentication is explicitly set to "jwt", OR
-        // 2. Access mode is RESTRICTED (requires JWT for authorization)
-        boolean requiresJwt = AUTH_JWT.equals(auth) || accessMode == AccessMode.RESTRICTED;
+        // All versioned endpoints now require JWT authentication
+        logger.info("JWT authentication is required for all versioned API endpoints (auth={}, accessMode={})", auth, accessMode);
 
         WebServer server = WebServer.builder()
                 .config(helidonConfig.get(ConfigConstants.CONFIG_PATH))
@@ -317,18 +315,13 @@ public class Main {
                             .register(ENDPOINT_INGEST, new IngestionService(producer))
                             .register(ENDPOINT_UI, new UIService(producer));
 
-                    // Add JWT filter to versioned endpoints if required
-                    if (requiresJwt) {
-                        logger.info("JWT authentication enabled (auth={}, accessMode={})", auth, accessMode);
-                        b.addFilter(new JwtAuthenticationFilter(
-                                List.of(ENDPOINT_QUERY, ENDPOINT_PLAN, ENDPOINT_INGEST, ENDPOINT_CANCEL, ENDPOINT_UI),
-                                appConfig,
-                                secretKey,
-                                producer.getSqlAuthorizer()
-                        ));
-                    } else {
-                        logger.warn("JWT authentication disabled - API endpoints are publicly accessible!");
-                    }
+                    // JWT filter is always applied to all versioned endpoints
+                    b.addFilter(new JwtAuthenticationFilter(
+                            List.of(ENDPOINT_QUERY, ENDPOINT_PLAN, ENDPOINT_INGEST, ENDPOINT_CANCEL, ENDPOINT_UI),
+                            appConfig,
+                            secretKey,
+                            producer.getSqlAuthorizer()
+                    ));
                 })
                 .port(port)
                 .host(host)

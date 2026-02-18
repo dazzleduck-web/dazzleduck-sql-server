@@ -45,7 +45,7 @@ The project includes JDK 11 compatible client libraries:
 ```
 - Start the container with `example/data` mounted to the container
   ```bash
-  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data
+  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data --conf users.0.username="admin" --conf users.0.password="admin"
   ```
   This will print the following on the console:
   ```
@@ -67,7 +67,7 @@ The project includes JDK 11 compatible client libraries:
 ## Getting started in the dev setup 
  ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
-./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse"
+./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse --conf users.0.username="admin" --conf users.0.password="admin""
 ```
 
 ### Supported functionality

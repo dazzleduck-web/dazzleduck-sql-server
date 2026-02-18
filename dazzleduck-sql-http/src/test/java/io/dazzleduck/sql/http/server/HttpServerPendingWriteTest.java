@@ -62,7 +62,7 @@ public class HttpServerPendingWriteTest extends HttpServerTestBase {
             }
             streamWrite.end();
 
-            var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
+            var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                     .header("Content-Type", ContentTypes.APPLICATION_ARROW)
