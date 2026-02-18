@@ -57,7 +57,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Login ---
-    const login = async (serverUrl, username, password, splitSize, claims, disableCompression = false) => {
+    const login = async (serverUrl, username, password, splitSize, claims, disableCompression = true) => {
         try {
             const response = await axios.post(`${serverUrl.trim()}/v1/login`, {
                 username,
@@ -133,7 +133,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Core forwarder ---
-    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null, disableCompression = false) => {
+    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null, disableCompression = true) => {
         if (!/^https?:\/\//i.test(serverUrl.trim())) {
             throw new Error("Server URL must start with http:// or https://");
         }
@@ -200,7 +200,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Execute Query ---
-    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId, disableCompression = false) => {
+    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId, disableCompression = true) => {
         const cleanUrl = serverUrl.trim();
         if (!serverUrl || !query) {
             throw new Error("Please fill in all fields before running the query.");
@@ -346,7 +346,7 @@ export const LoggingProvider = ({ children }) => {
                 username: connectionInfo.username,
                 claims: connectionInfo.claims,
                 splitSize: connectionInfo.splitSize || 0,
-                disableCompression: connectionInfo.disableCompression || false
+                disableCompression: connectionInfo.disableCompression || true
             },
             queries: currentQueries.map(q => ({
                 query: q.query
@@ -392,7 +392,7 @@ export const LoggingProvider = ({ children }) => {
             username: connection.username,
             claims: connection.claims,
             splitSize: connection.splitSize,
-            disableCompression: connection.disableCompression || false,
+            disableCompression: connection.disableCompression || true,
             loginTime: new Date().toISOString()
         };
 

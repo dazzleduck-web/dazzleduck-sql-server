@@ -76,7 +76,7 @@ const AdvancedSettings = ({
                             Disable ZSTD compression
                         </label>
                         <p className="text-xs text-gray-500 mt-1">
-                            {disableCompression ? "Compression: NONE" : "Compression: ZSTD (default)"}
+                            {disableCompression ? "Compression: NONE (default)" : "Compression: ZSTD"}
                         </p>
                     </div>
                 </div>
