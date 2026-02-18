@@ -41,7 +41,7 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
                 "--conf", "dazzleduck_server.access_mode=RESTRICTED",
                 "--conf", "dazzleduck_server.http.%s=jwt".formatted(ConfigConstants.AUTHENTICATION_KEY));
         ConnectionPool.execute("CREATE TABLE auth_test(id INTEGER, name STRING, city STRING, age INTEGER)");
-        ConnectionPool.execute("INSERT INTO auth_test VALUES (1, 'shivam', 'chhindwara', 21), (2, 'hariom', 'delhi', 22), (3, 'piyush', 'bhopal', 21)");
+        ConnectionPool.execute("INSERT INTO auth_test VALUES (1, 'admin', 'main', 30), (2, 'user1', 'location1', 25), (3, 'user2', 'location2', 28)");
     }
 
     @AfterAll
@@ -110,8 +110,8 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
                 Headers.HEADER_ACCESS_TYPE, AccessType.WRITE.name(),
                 Headers.HEADER_PATH, "data/ingestion"
         );
-        assertTrue(authorizer.hasWriteAccess("test_user", "data/ingestion", claims));
-        assertTrue(authorizer.hasWriteAccess("test_user", "data/ingestion/subpath", claims));
+        assertTrue(authorizer.hasWriteAccess("admin", "data/ingestion", claims));
+        assertTrue(authorizer.hasWriteAccess("admin", "data/ingestion/subpath", claims));
     }
 
     @Test
@@ -120,7 +120,7 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
         var claims = Map.of(
                 Headers.HEADER_PATH, "data/ingestion"
         );
-        assertFalse(authorizer.hasWriteAccess("test_user", "data/ingestion", claims));
+        assertFalse(authorizer.hasWriteAccess("admin", "data/ingestion", claims));
     }
 
     @Test
@@ -130,7 +130,7 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
                 Headers.HEADER_ACCESS_TYPE, AccessType.READ.name(),
                 Headers.HEADER_PATH, "data/ingestion"
         );
-        assertFalse(authorizer.hasWriteAccess("test_user", "data/ingestion", claims));
+        assertFalse(authorizer.hasWriteAccess("admin", "data/ingestion", claims));
     }
 
     @Test
@@ -140,7 +140,7 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
                 Headers.HEADER_ACCESS_TYPE, AccessType.WRITE.name(),
                 Headers.HEADER_PATH, "data/ingestion"
         );
-        assertFalse(authorizer.hasWriteAccess("test_user", "other/path", claims));
+        assertFalse(authorizer.hasWriteAccess("admin", "other/path", claims));
     }
 
     @Test
@@ -149,7 +149,7 @@ public class HttpServerAuthorizationTest extends HttpServerTestBase {
         var claims = Map.of(
                 Headers.HEADER_ACCESS_TYPE, AccessType.WRITE.name()
         );
-        assertFalse(authorizer.hasWriteAccess("test_user", "data/ingestion", claims));
+        assertFalse(authorizer.hasWriteAccess("admin", "data/ingestion", claims));
     }
 
     /**

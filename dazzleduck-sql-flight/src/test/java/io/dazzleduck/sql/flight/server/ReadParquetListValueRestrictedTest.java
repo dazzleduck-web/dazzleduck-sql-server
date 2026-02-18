@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 public class ReadParquetListValueRestrictedTest {
 
-    private static final String TEST_USER = "test_user";
+    private static final String TEST_USER = "admin";
     private static final String TEST_CATALOG = "memory";
     private static final String TEST_SCHEMA = "main";
     private static String testDataPath;

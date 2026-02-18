@@ -73,8 +73,8 @@ class MetricsCollectorServerTest {
                     flush-interval-ms = 100
                 }
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -103,8 +103,8 @@ class MetricsCollectorServerTest {
                 targets = ["%s"]
                 server-url = "http://localhost:8081"
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -132,8 +132,8 @@ class MetricsCollectorServerTest {
             collector {
                 enabled = false
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -165,8 +165,8 @@ class MetricsCollectorServerTest {
                 enabled = true
                 targets = []
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -218,8 +218,8 @@ class MetricsCollectorServerTest {
                     retry-delay-ms = 100
                 }
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -281,8 +281,8 @@ class MetricsCollectorServerTest {
                     max-retries = 0
                 }
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024
@@ -339,8 +339,8 @@ class MetricsCollectorServerTest {
                 max-retries = 0
             }
             auth {
-                username = "test"
-                password = "test"
+                username = "admin"
+                password = "admin"
             }
             producer {
                 min-batch-size = 1
@@ -412,8 +412,8 @@ class MetricsCollectorServerTest {
                     max-retries = 0
                 }
                 auth {
-                    username = "test"
-                    password = "test"
+                    username = "admin"
+                    password = "admin"
                 }
                 producer {
                     min-batch-size = 1024

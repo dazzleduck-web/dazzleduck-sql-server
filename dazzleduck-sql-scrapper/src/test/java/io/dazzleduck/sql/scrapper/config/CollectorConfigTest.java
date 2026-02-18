@@ -173,8 +173,8 @@ class CollectorConfigTest {
         tempConfigFile = createTempConfigFile(hoconContent);
         CollectorConfig config = new CollectorConfig(tempConfigFile.getAbsolutePath());
 
-        // Should use values from classpath application.conf as fallback
-        // These are the values defined in src/test/resources/application.conf
+        // Should use values from classpath reference.conf as fallback
+        // These are the values defined in src/test/resources/reference.conf
         assertTrue(config.isEnabled());
         assertEquals(List.of("/metrics"), config.getTargets()); // From external file
         assertNotNull(config.getTargetPrefix()); // Falls back to classpath or default

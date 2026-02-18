@@ -4,12 +4,14 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.common.ConfigConstants;
 
+import java.io.File;
 import java.time.Duration;
 
 /**
- * Factory for creating LogForwarderConfig instances configured from application.conf.
+ * Factory for creating LogForwarderConfig instances configured from application.conf
+ * or from a dedicated per-component conf file.
  *
- * <p>Expected configuration format in application.conf:</p>
+ * <p>Expected configuration format (in application.conf or a separate .conf file):</p>
  * <pre>{@code
  * dazzleduck_logback {
  *   enabled = true
@@ -36,29 +38,74 @@ import java.time.Duration;
  *   partition_by = [date]
  * }
  * }</pre>
+ *
+ * <p>A separate per-component file only needs to override the keys that differ from the defaults
+ * in reference.conf. For example, a minimal controller-logback.conf:</p>
+ * <pre>{@code
+ * dazzleduck_logback {
+ *   http {
+ *     base_url = "http://controller-server:8081"
+ *     ingestion_queue = "controller-logs"
+ *   }
+ *   partition_by = [date]
+ * }
+ * }</pre>
  */
 public final class LogForwarderConfigFactory {
 
-    private static final Config config = ConfigFactory.load().getConfig("dazzleduck_logback");
+    private static final String CONFIG_ROOT = "dazzleduck_logback";
 
     private LogForwarderConfigFactory() {}
 
     /**
-     * Create a LogForwarder from configuration.
+     * Create a LogForwarder from the default application configuration.
      *
      * @return A configured and started LogForwarder
      */
     public static LogForwarder createForwarder() {
-        LogForwarderConfig forwarderConfig = createConfig();
-        return new LogForwarder(forwarderConfig);
+        return new LogForwarder(createConfig());
     }
 
     /**
-     * Create a LogForwarderConfig from the application configuration.
+     * Create a LogForwarderConfig from the default application configuration
+     * (application.conf / reference.conf on the classpath).
      *
      * @return A configured LogForwarderConfig
      */
     public static LogForwarderConfig createConfig() {
+        Config root = ConfigFactory.load().getConfig(CONFIG_ROOT);
+        return buildConfig(root);
+    }
+
+    /**
+     * Create a LogForwarderConfig by reading a dedicated conf file.
+     * The file must contain a {@code dazzleduck_logback} block; any keys not present
+     * in the file fall back to the defaults defined in reference.conf.
+     *
+     * @param configFilePath path to a TypeSafe Config (.conf) file on the filesystem
+     *                       or on the classpath (classpath resources are resolved first)
+     * @return A configured LogForwarderConfig
+     */
+    public static LogForwarderConfig createConfig(String configFilePath) {
+        Config fallback = ConfigFactory.load();
+        Config fileConfig;
+
+        File file = new File(configFilePath);
+        if (file.isAbsolute() || file.exists()) {
+            fileConfig = ConfigFactory.parseFile(file).withFallback(fallback);
+        } else {
+            // Try classpath resource first, then filesystem relative path
+            fileConfig = ConfigFactory.parseResources(configFilePath).withFallback(fallback);
+            if (!fileConfig.hasPath(CONFIG_ROOT)) {
+                fileConfig = ConfigFactory.parseFile(file).withFallback(fallback);
+            }
+        }
+
+        Config root = fileConfig.resolve().getConfig(CONFIG_ROOT);
+        return buildConfig(root);
+    }
+
+    private static LogForwarderConfig buildConfig(Config config) {
         Config http = config.getConfig(ConfigConstants.HTTP_PREFIX);
 
         return LogForwarderConfig.builder()

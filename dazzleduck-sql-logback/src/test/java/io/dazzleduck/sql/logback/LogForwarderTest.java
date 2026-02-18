@@ -15,12 +15,12 @@ class LogForwarderTest {
 
     @BeforeEach
     void setUp() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
 
         config = LogForwarderConfig.builder()
                 .baseUrl("http://localhost:9999")  // Non-existent server for testing
-                .username("test")
-                .password("test")
+                .username("admin")
+                .password("admin")
                 .ingestionQueue("test-logs")
                 .httpClientTimeout(Duration.ofMillis(100))
                 .pollInterval(Duration.ofMillis(100))
@@ -34,7 +34,7 @@ class LogForwarderTest {
 
     @AfterEach
     void tearDown() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
     }
 
     @Test
