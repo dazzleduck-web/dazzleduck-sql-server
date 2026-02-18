@@ -101,7 +101,7 @@ The server is running on HTTP mode on port 8081 which can used to query DuckDB w
 The return data can itself be queried with duckdb
 
 ## Getting start with duckdb.
-You can learn more about Dazzleduck-sql-server [dazzleduck](https://github.com/dazzleduck-web/dazzleduck-sql-duckdb/blob/main/README.md)
+Learn more about it here [dazzleduck](https://github.com/dazzleduck-web/dazzleduck-sql-duckdb/blob/main/README.md)
 
 ## Connecting to the flight server via Flight JDBC
 Download the [Apache Arrow Flight SQL JDBC driver](https://search.maven.org/search?q=a:flight-sql-jdbc-driver)
