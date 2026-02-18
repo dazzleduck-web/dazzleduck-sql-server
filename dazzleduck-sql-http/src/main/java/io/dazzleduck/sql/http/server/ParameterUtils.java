@@ -1,7 +1,9 @@
 package io.dazzleduck.sql.http.server;
 
+import io.dazzleduck.sql.common.Headers;
 import io.helidon.http.HeaderNames;
 import io.helidon.webserver.http.HttpRequest;
+import org.apache.arrow.vector.compression.CompressionUtil;
 
 import java.util.function.Function;
 
@@ -23,5 +25,33 @@ public interface ParameterUtils {
             return mapFunction.apply(fromHeader.get());
         }
         return defaultValue;
+    }
+
+    /**
+     * Parse the Arrow compression codec from the HTTP header.
+     *
+     * <p>Supported values (case-insensitive):
+     * <ul>
+     *   <li>"zstd" or "zstandard" - ZSTD compression (default)</li>
+     *   <li>"none" - No compression</li>
+     * </ul>
+     *
+     * @param request the HTTP request
+     * @return the compression codec to use, defaults to ZSTD if header is not present
+     * @throws IllegalArgumentException if an invalid compression value is specified
+     */
+    static CompressionUtil.CodecType getArrowCompression(HttpRequest request) {
+        var fromHeader = request.headers().value(HeaderNames.create(Headers.HEADER_ARROW_COMPRESSION));
+        if (fromHeader.isPresent()) {
+            String compressionValue = fromHeader.get().toUpperCase().trim();
+            return switch (compressionValue) {
+                case "ZSTD", "ZSTANDARD" -> CompressionUtil.CodecType.ZSTD;
+                case "NONE" -> CompressionUtil.CodecType.NO_COMPRESSION;
+                default -> throw new IllegalArgumentException(
+                    "Invalid Arrow compression codec specified: " + fromHeader.get() +
+                    ". Supported values: zstd, zstandard, none");
+            };
+        }
+        return CompressionUtil.CodecType.ZSTD;
     }
 }
