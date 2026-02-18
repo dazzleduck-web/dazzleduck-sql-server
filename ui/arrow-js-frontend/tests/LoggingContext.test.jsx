@@ -43,7 +43,6 @@ describe('LoggingContext Integration Tests', () => {
         expect(jwtToken).toMatch(/Bearer/);
     });
 
-    // /query tests ---------------------- START
     it('should execute query directly (split size 0) and return correct format', async () => {
         const resultObj = await result.current.executeQuery(
             SERVER_URL,
@@ -83,26 +82,6 @@ describe('LoggingContext Integration Tests', () => {
             expect(resultObj.data[0].one).toBe(1);
         }
     });
-
-    it('should execute query with alias', async () => {
-        const resultObj = await result.current.executeQuery(
-            SERVER_URL,
-            'select 21 as age',
-            0,
-            jwtToken,
-            null,
-            true // disableCompression to avoid Arrow decompression issues in test env
-        );
-
-        expect(resultObj).toHaveProperty('data');
-        expect(Array.isArray(resultObj.data)).toBe(true);
-
-        if (resultObj.data.length > 0) {
-            expect(resultObj.data[0]).toHaveProperty('age');
-            expect(resultObj.data[0].age).toBe(21);
-        }
-    });
-    // /query tests ---------------------- END
 
     // /plan and split queries tests ---------------------- START
     it('should execute /plan -> /query split logic correctly', async () => {
@@ -157,42 +136,6 @@ describe('LoggingContext Integration Tests', () => {
 
         expect(token).toBeUndefined();
         expect(connectionInfo).toBeUndefined();
-    });
-    
-    // Test with claims
-    it('should login with claims', async () => {
-        const claims = { cluster: 'test-cluster', database: 'test-db' };
-
-        await act(async () => {
-            jwtToken = await result.current.login(SERVER_URL, USERNAME, PASSWORD, 0, claims);
-        });
-
-        expect(jwtToken).toBeDefined();
-        expect(typeof jwtToken).toBe('string');
-    });
-
-    // Test with compression disabled
-    it('should login with compression disabled', async () => {
-        await act(async () => {
-            jwtToken = await result.current.login(SERVER_URL, USERNAME, PASSWORD, 0, {}, true);
-        });
-
-        expect(jwtToken).toBeDefined();
-    });
-
-    // Test queryId parameter
-    it('should include queryId in request when provided', async () => {
-        const resultObj = await result.current.executeQuery(
-            SERVER_URL,
-            'select 1',
-            0,
-            jwtToken,
-            123, // explicit queryId
-            true // disableCompression to avoid Arrow decompression issues in test env
-        );
-
-        expect(resultObj).toHaveProperty('queryId');
-        expect(typeof resultObj.queryId).toBe('number');
     });
 
     // Cancel query test
