@@ -45,7 +45,7 @@ The project includes JDK 11 compatible client libraries:
 ```
 - Start the container with `example/data` mounted to the container
   ```bash
-  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data --conf users.0.username="admin" --conf users.0.password="admin"
+  docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest --conf warehouse=/data --conf users.0.password="your password"
   ```
   This will print the following on the console:
   ```
@@ -67,7 +67,7 @@ The project includes JDK 11 compatible client libraries:
 ## Getting started in the dev setup 
  ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
-./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse --conf users.0.username="admin" --conf users.0.password="admin""
+./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse --conf users.0.password="your password""
 ```
 
 ### Supported functionality
@@ -100,7 +100,7 @@ All HTTP API endpoints are versioned with a `/v1` prefix to ensure backward comp
 The server is running on HTTP mode on port 8081 which can used to query DuckDB with POST and GET methods. This will return data in arrow format.<p>
 The return data can itself be queried with duckdb
 
-## Follow for more instruction.
+## Getting start with duckdb.
 You can learn more about Dazzleduck-sql-server [dazzleduck](https://github.com/dazzleduck-web/dazzleduck-sql-duckdb/blob/main/README.md)
 
 ## Connecting to the flight server via Flight JDBC

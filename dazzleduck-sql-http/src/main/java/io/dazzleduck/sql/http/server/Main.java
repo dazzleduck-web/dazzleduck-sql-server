@@ -277,7 +277,7 @@ public class Main {
         var httpConfig = appConfig.getConfig(CONFIG_HTTP);
         var port = httpConfig.getInt(ConfigConstants.PORT_KEY);
         var host = httpConfig.getString(ConfigConstants.HOST_KEY);
-        var auth = httpConfig.hasPath(ConfigConstants.AUTHENTICATION_KEY) ? httpConfig.getString(ConfigConstants.AUTHENTICATION_KEY) : AUTH_JWT;
+        var auth = httpConfig.getString(ConfigConstants.AUTHENTICATION_KEY);
        String base64SecretKey = appConfig.getString(ConfigConstants.SECRET_KEY_KEY);
         var secretKey = Validator.fromBase64String(base64SecretKey);
         String location = PROTOCOL_HTTP + "://%s:%s".formatted(host, port);
