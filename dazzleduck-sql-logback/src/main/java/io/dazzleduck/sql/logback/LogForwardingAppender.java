@@ -4,10 +4,6 @@ package io.dazzleduck.sql.logback;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -22,9 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * appenders with different configurations (different servers, queues, etc.)
  * can coexist in the same JVM.</p>
  *
- * <p>There are two ways to configure an appender:</p>
- *
- * <p><b>Option 1 – inline properties in logback.xml:</b></p>
+ * <p>Configure the appender inline in your logback XML file:</p>
  * <pre>{@code
  * <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
  *     <baseUrl>http://localhost:8081</baseUrl>
@@ -36,14 +30,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * </appender>
  * }</pre>
  *
- * <p><b>Option 2 – dedicated conf file per component (recommended for multiple appenders):</b></p>
+ * <p>To use a dedicated TypeSafe Config (.conf) file instead of inline properties:</p>
  * <pre>{@code
- * <appender name="CONTROLLER_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
- *     <configFile>controller-logback.conf</configFile>
- * </appender>
- *
- * <appender name="SERVICE_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
- *     <configFile>/etc/myapp/service-logback.conf</configFile>
+ * <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+ *     <configFile>myapp-logback.conf</configFile>
  * </appender>
  * }</pre>
  *
@@ -162,12 +152,7 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
         try {
             if (configFile != null && !configFile.isEmpty()) {
                 addInfo("Initializing LogForwardingAppender from configFile=" + configFile);
-                LogForwarderConfig config;
-                if (configFile.endsWith(".xml")) {
-                    config = loadConfigFromXml(configFile);
-                } else {
-                    config = LogForwarderConfigFactory.createConfig(configFile);
-                }
+                LogForwarderConfig config = LogForwarderConfigFactory.createConfig(configFile);
                 forwarder = new LogForwarder(config);
                 addInfo("LogForwardingAppender successfully initialized from " + configFile);
             } else if (baseUrl == null || baseUrl.isEmpty()) {
@@ -266,29 +251,4 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
         sequenceCounter.set(0);
     }
 
-    // -------------------------------------------------------------------------
-    // XML config-file support
-    // -------------------------------------------------------------------------
-
-    /**
-     * Load a {@link LogForwarderConfig} from an XML file by delegating to
-     * {@link AppenderXmlParser}. Resolves the path as a classpath resource
-     * first, then as a filesystem path.
-     */
-    private LogForwarderConfig loadConfigFromXml(String xmlFile) throws Exception {
-        try (InputStream is = openResource(xmlFile)) {
-            return AppenderXmlParser.parse(is).config;
-        }
-    }
-
-    /** Resolves a config file: classpath resource first, then filesystem. */
-    private InputStream openResource(String path) throws IOException {
-        InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(path);
-        if (is != null) return is;
-        is = getClass().getClassLoader().getResourceAsStream(path);
-        if (is != null) return is;
-        File f = new File(path);
-        if (f.exists()) return new FileInputStream(f);
-        throw new IOException("Cannot find config file: " + path);
-    }
 }

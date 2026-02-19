@@ -107,35 +107,6 @@
 
                     <extraDirectories>
                         <paths>
-                            <!-- Include example JARs -->
-                            <path>
-                                <from>${project.basedir}/../dazzleduck-sql-examples/target</from>
-                                <into>/app/extra</into>
-                                <includes>
-                                    <include>dazzleduck-sql-examples-*.jar</include>
-                                </includes>
-                                <excludes>
-                                    <exclude>*-sources.jar</exclude>
-                                    <exclude>*-javadoc.jar</exclude>
-                                </excludes>
-                            </path>
-                            <!-- Include example dependencies (lib folder) -->
-                            <path>
-                                <from>${project.basedir}/../dazzleduck-sql-examples/target/lib</from>
-                                <into>/app/extra</into>
-                            </path>
-                            <!-- Include logger JARs -->
-                            <path>
-                                <from>${project.basedir}/../dazzleduck-sql-logger/target</from>
-                                <into>/app/extra</into>
-                                <includes>
-                                    <include>dazzleduck-sql-logger-*.jar</include>
-                                </includes>
-                                <excludes>
-                                    <exclude>*-sources.jar</exclude>
-                                    <exclude>*-javadoc.jar</exclude>
-                                </excludes>
-                            </path>
                             <!-- Include logback JARs -->
                             <path>
                                 <from>${project.basedir}/../dazzleduck-sql-logback/target</from>
@@ -184,10 +155,17 @@
                                     <exclude>*-javadoc.jar</exclude>
                                 </excludes>
                             </path>
-                            <!-- Include logger dependencies -->
+                            <!-- Include logger JARs -->
                             <path>
-                                <from>${project.basedir}/../dazzleduck-sql-logger/target/dependency</from>
+                                <from>${project.basedir}/../dazzleduck-sql-logback/target</from>
                                 <into>/app/extra</into>
+                                <includes>
+                                    <include>dazzleduck-sql-logback-*.jar</include>
+                                </includes>
+                                <excludes>
+                                    <exclude>*-sources.jar</exclude>
+                                    <exclude>*-javadoc.jar</exclude>
+                                </excludes>
                             </path>
                             <!-- Include logback dependencies -->
                             <path>
