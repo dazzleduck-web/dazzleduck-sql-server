@@ -25,9 +25,7 @@ const ConnectionPanel = ({
     fileInputRef,
     handleSaveSession,
     handleOpenSession,
-    openFileDialog,
-    disableCompression,
-    setDisableCompression
+    openFileDialog
 }) => {
     return (
         <>
@@ -119,8 +117,6 @@ const ConnectionPanel = ({
                         register={register}
                         errors={errors}
                         isSubmitted={isSubmitted}
-                        disableCompression={disableCompression}
-                        setDisableCompression={setDisableCompression}
                     />
 
                     {/* Login Error */}
