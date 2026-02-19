@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.19</version>
+        <version>0.0.20</version>
     </parent>
 
     <artifactId>dazzleduck-sql-client-grpc</artifactId>
@@ -27,7 +27,7 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-client</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
         </dependency>
         <dependency>
             <groupId>org.apache.arrow</groupId>
@@ -48,13 +48,13 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-runtime</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-runtime</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>

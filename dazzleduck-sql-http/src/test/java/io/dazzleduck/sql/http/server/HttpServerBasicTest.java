@@ -56,7 +56,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testQueryWithPost() throws IOException, InterruptedException, SQLException {
         var query = "select * from generate_series(10) order by 1";
         var body = objectMapper.writeValueAsBytes(new QueryRequest(query));
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query"))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query"))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -70,7 +70,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testQueryWithGet() throws IOException, InterruptedException, SQLException {
         var query = "select * from generate_series(10) order by 1";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -84,7 +84,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testSetWithGet() throws IOException, InterruptedException, SQLException {
         var query = "SET enable_progress_bar = true";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -98,9 +98,24 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     }
 
     @Test
-    public void testWithDuckDB() {
+    public void testWithDuckDB() throws IOException, InterruptedException {
+        // Get JWT token for authentication
+        var jwtResponse = login();
+        String auth = jwtResponse.tokenType() + " " + jwtResponse.accessToken();
+
+        // Create secret with JWT token
+        String httpAuthSql = "CREATE SECRET http_auth (\n" +
+                "    TYPE http,\n" +
+                "    EXTRA_HTTP_HEADERS MAP {\n" +
+                "        'Authorization': '" + auth + "'\n" +
+                "    }\n" +
+                ")";
+
         String viewSql = "select * from read_arrow(concat('%s/v1/query?q=',url_encode('select 1')))".formatted(baseUrl);
+        String[] sqls = {"INSTALL arrow FROM community", "LOAD arrow", httpAuthSql};
+        ConnectionPool.executeBatch(sqls);
         ConnectionPool.execute(viewSql);
+        ConnectionPool.execute("DROP SECRET http_auth");
     }
 
     @Test
@@ -124,7 +139,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
                 streamWrite.writeBatch();
             }
             streamWrite.end();
-            var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s.%s".formatted(path, format)))
+            var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s.%s".formatted(path, format)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                     .header("Content-Type", ContentTypes.APPLICATION_ARROW)
@@ -155,7 +170,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
             var table = "table_single";
 
             Files.createDirectories(Path.of(ingestionPath, table));
-            var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(table)))
+            var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(table)))
                     .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                             new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                     .header("Content-Type", ContentTypes.APPLICATION_ARROW)
@@ -176,7 +191,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testIngestionPostFromFile() throws SQLException, IOException, InterruptedException {
         var path = "file1";
         Files.createDirectories(Path.of(ingestionPath, path));
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
                 .POST(HttpRequest.BodyPublishers.ofInputStream(() -> {
                     try {
                         return new FileInputStream("example/arrow_ipc/file1.arrow");
@@ -238,7 +253,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
                 int final1 = i;
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     try {
-                        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
+                        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
                                 .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
                                         new ByteArrayInputStream(byteArrayOutputStream.toByteArray())))
                                 .header("Content-Type", ContentTypes.APPLICATION_ARROW)
@@ -268,7 +283,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testError() throws IOException, InterruptedException {
         var query = "select fr";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HeaderValues.ACCEPT_JSON.name(), HeaderValues.ACCEPT_JSON.values()).build();
         var inputStreamResponse = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -284,7 +299,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testInvalidCompressionHeader() throws Exception {
         var query = "SELECT 1";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HEADER_ARROW_COMPRESSION, "invalid_codec")
                 .build();
@@ -299,7 +314,7 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     public void testValidCompressionHeaders(String compressionValue) throws Exception {
         var query = "SELECT 1";
         var urlEncode = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        var request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/query?q=%s".formatted(urlEncode)))
                 .GET()
                 .header(HEADER_ARROW_COMPRESSION, compressionValue)
                 .build();

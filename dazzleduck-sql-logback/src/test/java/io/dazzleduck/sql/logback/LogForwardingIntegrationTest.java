@@ -81,7 +81,7 @@ public class LogForwardingIntegrationTest {
         Files.createDirectories(Path.of(server.getWarehousePath(), DUCKLAKE_DATA_DIR, SCHEMA_NAME, TABLE_NAME));
 
         // Reset any previous state and configure logback with our test configuration
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
         configureLogback();
     }
 
@@ -111,8 +111,9 @@ public class LogForwardingIntegrationTest {
         // Wait for logs to be added to producer queue
         Thread.sleep(1000);
 
-        // Stop the appender to flush all pending data
-        LogForwardingAppender.reset();
+        // Stop all appenders to flush pending data (context.stop() calls stop() on each appender)
+        LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
+        ctx.stop();
 
         // Wait for server-side ingestion to complete
         Thread.sleep(2000);
@@ -150,7 +151,7 @@ public class LogForwardingIntegrationTest {
     @AfterAll
     void cleanup() throws Exception {
         // Reset logback appender state
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
 
         if (server != null) server.close();
 

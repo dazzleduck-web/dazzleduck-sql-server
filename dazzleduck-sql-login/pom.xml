@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.19</version>
+        <version>0.0.20</version>
     </parent>
     <artifactId>dazzleduck-sql-login</artifactId>
     <name>DazzleDuck Project Login</name>
@@ -24,7 +24,7 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
         </dependency>
         <dependency>
             <groupId>io.helidon.webserver</groupId>

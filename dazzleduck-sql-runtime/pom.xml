@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.19</version>
+        <version>0.0.20</version>
     </parent>
     <name>DazzleDuck Project Runtime</name>
     <artifactId>dazzleduck-sql-runtime</artifactId>
@@ -18,12 +18,12 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-flight</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-http</artifactId>
-            <version>0.0.19</version>
+            <version>0.0.20</version>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
@@ -55,12 +55,10 @@
             <version>${calcite.version}</version>
             <scope>test</scope>
         </dependency>
-        <!-- Exclude slf4j-simple from runtime to allow Logback/ArrowSLF4JServiceProvider to be used -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
             <version>${slf4j.version}</version>
-            <scope>test</scope>
         </dependency>
     </dependencies>
 

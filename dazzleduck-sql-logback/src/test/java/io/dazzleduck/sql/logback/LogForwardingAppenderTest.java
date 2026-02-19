@@ -19,7 +19,7 @@ class LogForwardingAppenderTest {
 
     @BeforeEach
     void setUp() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
         loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
         appender = new LogForwardingAppender();
         appender.setContext(loggerContext);
@@ -30,7 +30,7 @@ class LogForwardingAppenderTest {
     @AfterEach
     void tearDown() {
         appender.stop();
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
     }
 
     @Test
@@ -42,7 +42,7 @@ class LogForwardingAppenderTest {
 
     @Test
     void start_shouldCreateForwarderWithBaseUrl() {
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
         LogForwardingAppender newAppender = new LogForwardingAppender();
         newAppender.setContext(loggerContext);
         newAppender.setBaseUrl("http://localhost:9999");
@@ -131,7 +131,7 @@ class LogForwardingAppenderTest {
     void reset_shouldClearState() {
         LogForwardingAppender.setEnabled(false);
 
-        LogForwardingAppender.reset();
+        LogForwardingAppender.resetGlobalState();
 
         assertTrue(LogForwardingAppender.isEnabled());
     }
