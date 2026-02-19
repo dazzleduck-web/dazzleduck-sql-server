@@ -1,7 +1,7 @@
 # DazzleDuck Logback
 
 A Logback appender that forwards application logs to a DazzleDuck server in
-Apache Arrow format — with zero-configuration auto-discovery.
+Apache Arrow format.
 
 ## Overview
 
@@ -9,7 +9,7 @@ Apache Arrow format — with zero-configuration auto-discovery.
 - Buffers logs in-memory, spills to disk, then sends in Arrow format
 - Supports batching, retries, and configurable flush intervals
 - Supports column projection and date-based partitioning
-- **Auto-discovers component config files — no `logback.xml` required**
+- Standard Logback XML configuration — works with any filename via `-Dlogback.configurationFile`
 
 ## Requirements
 
@@ -27,108 +27,162 @@ Apache Arrow format — with zero-configuration auto-discovery.
 
 ---
 
-## Quick Start — Auto-discovery (no `logback.xml`)
+## Quick Start
 
-Drop a `<component>-logback.xml` file into `src/main/resources/`.
-`DazzleDuckLogbackConfigurator` is registered via Java SPI and runs automatically
-when the JVM starts. It scans the classpath for any file whose name ends in
-`-logback.xml`, parses it, and wires up the appender — including a console
-appender and infinite-loop exclusion loggers.
+Create a standard Logback XML file (any filename) in `src/main/resources/`:
 
-**`controller-logback.xml`**
+**`myapp-logback.xml`**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<appender name="CONTROLLER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-    <baseUrl>http://localhost:8081</baseUrl>
-    <username>admin</username>
-    <password>admin</password>
-    <ingestionQueue>controller-logs</ingestionQueue>
-    <project>*, CAST(timestamp AS DATE) AS date</project>
-    <partitionBy>date</partitionBy>
-</appender>
+<configuration>
+
+    <shutdownHook/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+        <baseUrl>http://localhost:8081</baseUrl>
+        <username>admin</username>
+        <password>admin</password>
+        <ingestionQueue>app-logs</ingestionQueue>
+        <project>*, CAST(timestamp AS DATE) AS date</project>
+        <partitionBy>date</partitionBy>
+    </appender>
+
+    <!-- Exclude internal packages to prevent infinite loops -->
+    <logger name="io.dazzleduck.sql.logback" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="io.dazzleduck.sql.client" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="org.apache.arrow" level="WARN" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LOG_FORWARDER"/>
+    </root>
+
+</configuration>
 ```
 
-That is the entire configuration. No `logback.xml` needed.
+Tell Logback which file to load at startup:
+
+```bash
+java -Dlogback.configurationFile=myapp-logback.xml -jar myapp.jar
+```
+
+Logback resolves the name as a classpath resource first, then as a filesystem path.
 
 ---
 
-## Multiple Services
+## Multiple Components — One `src/main/resources/`
 
-### Separate modules — no extra config needed
+When two components share the same module and resource directory, each component
+gets its own XML file and its own `-Dlogback.configurationFile` at startup.
 
-Each service has its own module and its own `src/main/resources/`. Each JVM
-sees only its own file:
-
-```
-controller-service/
-  src/main/resources/
-    controller-logback.xml      ← controller JVM picks this up
-
-executor-service/
-  src/main/resources/
-    executor-logback.xml        ← executor JVM picks this up
-
-standalone-service/
-  src/main/resources/
-    standalone-logback.xml      ← standalone JVM picks this up
-```
-
-Nothing else needed — the file name is the component identifier.
-
-### Shared `src/main/resources/` — use the component property
-
-When all components live in the same module, all files are on the same
-classpath. Set the `dazzleduck.logback.component` system property at startup
-to tell the configurator which file to load:
+**File layout:**
 
 ```
-# start the controller
-java -Ddazzleduck.logback.component=controller -jar myapp.jar
-
-# start the executor
-java -Ddazzleduck.logback.component=executor -jar myapp.jar
-
-# start standalone
-java -Ddazzleduck.logback.component=standalone -jar myapp.jar
+src/main/resources/
+    abx-logback.xml     ← component ABX
+    fn-logback.xml      ← component FN
 ```
 
-With `controller` set, only `controller-logback.xml` is loaded — the other
-files are ignored.
+**Start each component separately:**
 
-With `controller` set, only `controller-logback.xml` is loaded — the other
-files are ignored. If the named file does not exist on the classpath, a warning
-is logged and Logback falls through to its default configuration.
+```bash
+# Component ABX
+java -Dlogback.configurationFile=abx-logback.xml -jar myapp.jar
 
-If the property is not set and multiple `*-logback.xml` files are on the
-classpath, one appender is created per file. Use the optional `<logger>`
-element to route each appender to a specific logger instead of root:
+# Component FN
+java -Dlogback.configurationFile=fn-logback.xml -jar myapp.jar
+```
+
+Because each component is a separate JVM process, each reads only its own file.
+No custom configurator or auto-discovery is needed.
+
+---
+
+## Setting the Property in Maven
+
+### Running with `exec:java`
+
+```bash
+mvn exec:java \
+  -Dexec.mainClass="com.example.Main" \
+  -Dlogback.configurationFile=abx-logback.xml
+```
+
+### Maven Surefire (tests)
+
+Via `systemPropertyVariables` in `pom.xml`:
 
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<appender name="CONTROLLER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-    <baseUrl>http://localhost:8081</baseUrl>
-    <username>admin</username>
-    <password>admin</password>
-    <ingestionQueue>controller-logs</ingestionQueue>
-    <project>*, CAST(timestamp AS DATE) AS date</project>
-    <partitionBy>date</partitionBy>
-    <!-- route this appender to a specific logger instead of root -->
-    <logger>com.example.controller</logger>
-</appender>
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <configuration>
+        <systemPropertyVariables>
+            <logback.configurationFile>abx-logback.xml</logback.configurationFile>
+        </systemPropertyVariables>
+    </configuration>
+</plugin>
 ```
 
-### Scenario reference
+Or via `argLine`:
 
-| Deployment | Action |
-|------------|--------|
-| Each component has its own module / classpath | Nothing — drop the file, auto-discovery handles it |
-| All components share one module / classpath | Pass `-Ddazzleduck.logback.component=<name>` at startup |
-| Multiple components in same JVM, each logging to its own queue | No property needed — all files are loaded, use `<logger>` to route |
+```xml
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <configuration>
+        <argLine>-Dlogback.configurationFile=abx-logback.xml</argLine>
+    </configuration>
+</plugin>
+```
+
+### Maven Exec Plugin in `pom.xml`
+
+```xml
+<plugin>
+    <groupId>org.codehaus.mojo</groupId>
+    <artifactId>exec-maven-plugin</artifactId>
+    <configuration>
+        <mainClass>com.example.Main</mainClass>
+        <systemProperties>
+            <systemProperty>
+                <key>logback.configurationFile</key>
+                <value>abx-logback.xml</value>
+            </systemProperty>
+        </systemProperties>
+    </configuration>
+</plugin>
+```
 
 ---
 
-## Component XML Reference
+## File Resolution
+
+`-Dlogback.configurationFile` accepts:
+
+| Value | Resolved as |
+|-------|-------------|
+| `abx-logback.xml` | Classpath resource |
+| `./config/abx-logback.xml` | Relative filesystem path |
+| `/etc/myapp/abx-logback.xml` | Absolute filesystem path |
+| `file:/etc/myapp/abx-logback.xml` | File URL |
+
+---
+
+## Appender XML Reference
 
 All properties that can appear inside the `<appender>` element:
 
@@ -141,14 +195,14 @@ All properties that can appear inside the `<appender>` element:
 | `minBatchSize` | Min bytes to accumulate before sending | `1024` |
 | `project` | Comma-separated SQL projection expressions | _(all columns)_ |
 | `partitionBy` | Comma-separated partition column names | _(none)_ |
-| `logger` | Logger name to attach this appender to | _(root logger)_ |
+| `configFile` | Path to a TypeSafe Config `.conf` file (overrides all inline properties) | _(none)_ |
 
 ### Projection and Partitioning
 
-Add derived columns with `project` and split Parquet output files with `partitionBy`:
+Add derived columns with `project` and split Parquet output by column with `partitionBy`:
 
 ```xml
-<!-- Keep all columns and add a date column derived from timestamp -->
+<!-- Keep all columns, add a date column derived from timestamp -->
 <project>*, CAST(timestamp AS DATE) AS date</project>
 <!-- Write one Parquet file per date -->
 <partitionBy>date</partitionBy>
@@ -160,6 +214,19 @@ Add a static host label:
 <project>*, 'my-host' AS host, CAST(timestamp AS DATE) AS date</project>
 <partitionBy>date</partitionBy>
 ```
+
+### Using a TypeSafe Config File
+
+Instead of inline properties you can point to a `.conf` file:
+
+```xml
+<appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
+    <configFile>abx-logback.conf</configFile>
+</appender>
+```
+
+`configFile` is resolved as a classpath resource first, then as a filesystem path.
+When set, all inline properties are ignored.
 
 ---
 
@@ -196,62 +263,27 @@ try {
 
 ---
 
-## Alternative Configuration Styles
+## Excluded Packages
 
-Auto-discovery is the recommended approach, but two alternatives are available
-when you need features such as environment-variable substitution (which requires
-Logback's own property resolution).
+To prevent infinite loops, logs from these packages are never forwarded:
 
-### `logback.xml` with `configFile` reference
+- `io.dazzleduck.sql.logback.Log*`
+- `io.dazzleduck.sql.client`
+- `org.apache.arrow`
 
-Keep a `logback.xml` but store each component's settings in its own file:
-
-```xml
-<!-- logback.xml -->
-<appender name="CONTROLLER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-    <configFile>controller-logback.xml</configFile>
-</appender>
-
-<appender name="EXECUTOR" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-    <configFile>executor-logback.xml</configFile>
-</appender>
-
-<root level="INFO">
-    <appender-ref ref="CONTROLLER"/>
-    <appender-ref ref="EXECUTOR"/>
-</root>
-```
-
-`configFile` is resolved first as a classpath resource, then as a filesystem path.
-When `configFile` is set, all inline properties are ignored.
-
-### Inline `logback.xml`
-
-Configure everything directly in `logback.xml` — useful when environment-variable
-substitution is needed:
+Add the following to your logback XML to route these to console only:
 
 ```xml
-<!-- logback.xml -->
-<property name="BASE_URL" value="${DAZZLEDUCK_BASE_URL:-http://localhost:8081}" />
-<property name="QUEUE"    value="${DAZZLEDUCK_QUEUE:-log}" />
-
-<appender name="FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
-    <baseUrl>${BASE_URL}</baseUrl>
-    <username>admin</username>
-    <password>admin</password>
-    <ingestionQueue>${QUEUE}</ingestionQueue>
-    <project>*, CAST(timestamp AS DATE) AS date</project>
-    <partitionBy>date</partitionBy>
-</appender>
-
-<root level="INFO">
-    <appender-ref ref="FORWARDER"/>
-</root>
+<logger name="io.dazzleduck.sql.logback" level="INFO" additivity="false">
+    <appender-ref ref="CONSOLE"/>
+</logger>
+<logger name="io.dazzleduck.sql.client" level="INFO" additivity="false">
+    <appender-ref ref="CONSOLE"/>
+</logger>
+<logger name="org.apache.arrow" level="WARN" additivity="false">
+    <appender-ref ref="CONSOLE"/>
+</logger>
 ```
-
-> Define a `<property>` first and reference it — do not use `${VAR:-default}`
-> directly inside `<baseUrl>`. The appender detects unresolved `${...}` strings
-> and logs a clear error at startup.
 
 ---
 
@@ -273,39 +305,11 @@ Runtime.getRuntime().addShutdownHook(new Thread(forwarder::close));
 
 ---
 
-## Excluded Packages
-
-To prevent infinite loops, logs from these packages are never forwarded:
-
-- `io.dazzleduck.sql.logback.Log*` (LogForwarder, LogForwardingAppender, etc.)
-- `io.dazzleduck.sql.client`
-- `org.apache.arrow`
-
-When using auto-discovery these exclusions are configured automatically.
-When using `logback.xml` directly, add them manually:
-
-```xml
-<logger name="io.dazzleduck.sql.logback.LogForwarder" level="INFO" additivity="false">
-    <appender-ref ref="CONSOLE"/>
-</logger>
-<logger name="io.dazzleduck.sql.client" level="INFO" additivity="false">
-    <appender-ref ref="CONSOLE"/>
-</logger>
-<logger name="org.apache.arrow" level="WARN" additivity="false">
-    <appender-ref ref="CONSOLE"/>
-</logger>
-```
-
----
-
 ## Error Handling
 
 | Condition | Behaviour |
 |-----------|-----------|
-| `dazzleduck.logback.component=controller` but `controller-logback.xml` not found | Warning logged; falls through to `logback.xml` |
-| No `*-logback.xml` files found on classpath | Info logged; falls through to `logback.xml` |
-| `*-logback.xml` found but unparseable | Error logged at startup; that appender is skipped |
-| `baseUrl` not set | Error logged at startup; forwarding skipped |
+| `baseUrl` not set and `configFile` not set | Error logged at startup; forwarding skipped |
 | `baseUrl` contains unresolved `${...}` | Error logged with the raw value |
 | Send failure at runtime | Error logged periodically (not on every event) |
 | Queue full | Warning logged every 100 dropped entries |
