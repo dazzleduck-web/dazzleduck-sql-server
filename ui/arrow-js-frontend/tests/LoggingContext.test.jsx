@@ -23,7 +23,8 @@ describe('LoggingContext Integration Tests', () => {
 
         const hook = renderUseLogging();
         result = hook.result;
-        jwtToken = await result.current.login(SERVER_URL, USERNAME, PASSWORD);
+        // login now takes (serverUrl, username, password, splitSize, claims)
+        jwtToken = await result.current.login(SERVER_URL, USERNAME, PASSWORD, 0, null);
         Cookies.set('jwtToken', jwtToken);
     });
 
@@ -48,9 +49,7 @@ describe('LoggingContext Integration Tests', () => {
             SERVER_URL,
             'select 2+2 as sum',
             0,
-            jwtToken,
-            null,
-            true // disableCompression to avoid Arrow decompression issues in test env
+            jwtToken
         );
 
         // New format: { data: [...rows...], queryId: number }
@@ -69,9 +68,7 @@ describe('LoggingContext Integration Tests', () => {
             SERVER_URL,
             'select 1 as one',
             0,
-            jwtToken,
-            null,
-            true // disableCompression to avoid Arrow decompression issues in test env
+            jwtToken
         );
 
         expect(resultObj).toHaveProperty('data');
@@ -145,9 +142,7 @@ describe('LoggingContext Integration Tests', () => {
             SERVER_URL,
             'SELECT 1',
             0,
-            jwtToken,
-            null,
-            true // disableCompression to avoid Arrow decompression issues in test env
+            jwtToken
         );
 
         expect(resultObj).toHaveProperty('queryId');

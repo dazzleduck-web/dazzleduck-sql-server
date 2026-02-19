@@ -49,18 +49,16 @@ describe("Logging Component Integration Tests", () => {
     it("should execute a real query after connecting", async () => {
         const { container } = setup();
 
-        // Step 1: Open Advanced Settings and disable ZSTD compression
-        const advancedSettingsBtn = screen.getByRole("button", {
-            name: /advanced settings/i,
-        });
+        // Step 1: Open Advanced Settings (no longer has checkbox - just split size)
+        const advancedSettingsBtn = screen.getByText(/advanced settings/i);
         await act(async () => {
             fireEvent.click(advancedSettingsBtn);
         });
 
-        // Wait for advanced settings to expand, then check the checkbox
+        // Wait for advanced settings to expand
         await waitFor(() => {
             expect(
-                screen.getByText(/disable zstd compression/i)
+                screen.getByText(/split size/i)
             ).toBeInTheDocument();
         });
 
