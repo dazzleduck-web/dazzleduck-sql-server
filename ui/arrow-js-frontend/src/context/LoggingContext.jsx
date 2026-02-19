@@ -1,12 +1,40 @@
 import React, { createContext, useContext, useCallback, useState, useEffect } from "react";
 import axios from "axios";
-import { tableFromIPC } from "apache-arrow";
+import { tableFromIPC, compressionRegistry, CompressionType } from "apache-arrow";
 import Cookies from "js-cookie";
+import * as fzstd from "fzstd";
+
+// ZSTD decompression helper
+function decompressZSTD(compressedData) {
+    try {
+        const decompressed = fzstd.decompress(new Uint8Array(compressedData));
+        return new Uint8Array(decompressed);
+    } catch (error) {
+        throw new Error(`Failed to decompress ZSTD data: ${error.message}`);
+    }
+}
+
+// Custom ZSTD codec for Arrow
+// Note: encode is intentionally omitted since we only need decoding for reading compressed data
+const ZSTDCodec = {
+    decode: (data) => {
+        return decompressZSTD(data);
+    }
+};
 
 const LoggingContext = createContext();
 
 export const LoggingProvider = ({ children }) => {
     const FIVE_MINUTES_MS = 300000;
+
+    // Register ZSTD codec for Arrow IPC (do this once on module load)
+    useEffect(() => {
+        try {
+            compressionRegistry.set(CompressionType.ZSTD, ZSTDCodec);
+        } catch (e) {
+            console.warn("ZSTD codec registration failed:", e.message);
+        }
+    }, []);
 
     // Session state
     const [connectionInfo, setConnectionInfo] = useState(null);
@@ -57,7 +85,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Login ---
-    const login = async (serverUrl, username, password, splitSize, claims, disableCompression = false) => {
+    const login = async (serverUrl, username, password, splitSize, claims) => {
         try {
             const response = await axios.post(`${serverUrl.trim()}/v1/login`, {
                 username,
@@ -83,7 +111,6 @@ export const LoggingProvider = ({ children }) => {
                 username,
                 claims,
                 splitSize, // Default, will be updated when executing queries
-                disableCompression,
                 loginTime: new Date().toISOString()
             };
 
@@ -133,7 +160,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Core forwarder ---
-    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null, disableCompression = false) => {
+    const forwardToDazzleDuck = async (serverUrl, query, jwt, queryId = null) => {
         if (!/^https?:\/\//i.test(serverUrl.trim())) {
             throw new Error("Server URL must start with http:// or https://");
         }
@@ -145,11 +172,6 @@ export const LoggingProvider = ({ children }) => {
             Accept: "application/json, application/vnd.apache.arrow.stream",
             Authorization: token ? token : jwt,
         };
-
-        // Add compression header if disabled
-        if (disableCompression) {
-            headers["x-dd-arrow-compression"] = "none";
-        }
 
         // Prepare request body with queryId (as number)
         let requestBody;
@@ -200,7 +222,7 @@ export const LoggingProvider = ({ children }) => {
     };
 
     // --- Execute Query ---
-    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId, disableCompression = false) => {
+    const executeQuery = useCallback(async (serverUrl, query, splitSize, jwt, queryId) => {
         const cleanUrl = serverUrl.trim();
         if (!serverUrl || !query) {
             throw new Error("Please fill in all fields before running the query.");
@@ -215,7 +237,7 @@ export const LoggingProvider = ({ children }) => {
                     ? cleanUrl
                     : cleanUrl.replace(/\/+$/, "") + "/v1/query";
 
-                const result = await forwardToDazzleDuck(url, query, jwt, queryId, disableCompression);
+                const result = await forwardToDazzleDuck(url, query, jwt, queryId);
                 finalResults = result.type === "json"
                     ? parseResponseData(result.data)
                     : parseResponseData({
@@ -242,7 +264,7 @@ export const LoggingProvider = ({ children }) => {
                         ? serverUrl
                         : serverUrl.replace(/\/+$/, "") + "/v1/query";
 
-                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt, queryId, disableCompression);
+                    const splitResult = await forwardToDazzleDuck(splitUrl, sql, jwt, queryId);
                     const normalized = splitResult.type === "json"
                         ? parseResponseData(splitResult.data)
                         : parseResponseData({
@@ -345,8 +367,7 @@ export const LoggingProvider = ({ children }) => {
                 serverUrl: connectionInfo.serverUrl,
                 username: connectionInfo.username,
                 claims: connectionInfo.claims,
-                splitSize: connectionInfo.splitSize || 0,
-                disableCompression: connectionInfo.disableCompression || false
+                splitSize: connectionInfo.splitSize || 0
             },
             queries: currentQueries.map(q => ({
                 query: q.query
@@ -392,7 +413,6 @@ export const LoggingProvider = ({ children }) => {
             username: connection.username,
             claims: connection.claims,
             splitSize: connection.splitSize,
-            disableCompression: connection.disableCompression || false,
             loginTime: new Date().toISOString()
         };
 
