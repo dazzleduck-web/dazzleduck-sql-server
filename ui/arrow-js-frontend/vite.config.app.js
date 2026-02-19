@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from "vite";
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -21,9 +21,38 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
+  // Base path for deployment (useful for reverse proxies or subdirectories)
+  base: '/',
+
+  // Dev server configuration for local development
+  server: {
+    host: '0.0.0.0',
+    port: 5174,
+    strictPort: true,
+    allowedHosts: ['dazzleduck-ui.com', 'www.dazzleduck-ui.com'],
+    hmr: {
+      host: 'dazzleduck-ui.com',
+      port: 8000,
+      protocol: 'ws'
+    }
+  },
+
   build: {
-    outDir: 'dist',
+    outDir: 'dist-app',
     sourcemap: true,
     emptyOutDir: true,
+    // Production build optimizations
+    chunkSizeWarningLimit: 1000,
+    minify: 'esbuild',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          router: ['react-router-dom'],
+          charts: ['d3'],
+          utils: ['js-cookie', 'uuidv4']
+        }
+      }
+    }
   },
 });
