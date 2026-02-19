@@ -23,14 +23,16 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 # Copy only necessary files from builder
-COPY --from=builder /app/node_modules /app/node_modules
-COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/dist-app /app/dist
 
-# Expose port 5173
-EXPOSE 5173
+# Install serve package to serve static files
+RUN npm install -g serve
+
+# Expose port 5174 (matching your docker run command)
+EXPOSE 5174
 
 # Set version label
 LABEL version=0.0.20
 
 # Use production command to serve built files
-CMD ["npx", "serve", "-l", "5173", "dist/"]
+CMD ["serve", "-l", "5174", "dist/"]

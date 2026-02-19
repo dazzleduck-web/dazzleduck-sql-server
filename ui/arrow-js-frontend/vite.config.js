@@ -1,6 +1,5 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from "vite";
 import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 /**
@@ -20,47 +19,31 @@ import path from 'path';
  * - npm run dev        - Run dev server for local development
  */
 export default defineConfig({
-  plugins: [react(), tailwindcss(),],
-  server: {
-    host: '0.0.0.0',
-    port: 5174,
-    strictPort: true,
-    allowedHosts: ['dazzleduck-ui.com', 'www.dazzleduck-ui.com'],
-    // WebSocket HMR connection
-    hmr: {
-      host: 'dazzleduck-ui.com',
-      port: 8000,
-      protocol: 'ws'
-    }
-  },
+  plugins: [react()],
+
   build: {
     lib: {
-      // Use process.cwd() to resolve the entry file from the project root
-      entry: path.resolve(process.cwd(), 'src/lib/index.js'),
-      name: 'ArrowUI', // This will be the global variable name in UMD builds
-      formats: ['es', 'cjs'], // Output formats
+      entry: path.resolve(__dirname, 'src/lib/index.js'),
+      name: 'ArrowUI',
+      formats: ['es', 'cjs'],
       fileName: (format) => `arrow-ui.${format}.js`,
     },
     rollupOptions: {
-      // Externalize dependencies that your library consumers should provide
-      external: ['react', 'react-dom', 'tailwindcss'],
+      external: ['react', 'react-dom', 'react-router-dom', 'react-icons', 'react-hook-form', 'js-cookie', 'uuidv4', 'd3'],
       output: {
-        // Define global variables for UMD (Universal Module Definition) build
         globals: {
           react: 'React',
           'react-dom': 'ReactDOM',
-          tailwindcss: 'tailwindcss',
+          'react-router-dom': 'ReactRouterDOM',
+          'react-icons': 'ReactIcons',
+          'react-hook-form': 'ReactHookForm',
+          'js-cookie': 'Cookies',
+          'uuidv4': 'uuidv4',
+          'd3': 'd3',
         },
       },
     },
-    sourcemap: true,  // Generate sourcemaps for easier debugging
-    emptyOutDir: true, // Clean the 'dist' folder before each build
-  },
-
-  // Vitest configuration
-  test: {
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: ["./tests/setup.js"],
+    sourcemap: true,
+    emptyOutDir: true,
   },
 });
