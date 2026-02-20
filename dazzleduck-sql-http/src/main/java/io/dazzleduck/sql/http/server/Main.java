@@ -286,7 +286,7 @@ public class Main {
         var jwtExpiration = appConfig.getDuration(CONFIG_JWT_EXPIRATION);
         var cors = CorsSupport.builder()
                 .addCrossOrigin(CrossOriginConfig.builder()
-                        .allowOrigins(appConfig.hasPath(CONFIG_ALLOW_ORIGIN) ? appConfig.getString(CONFIG_ALLOW_ORIGIN) : CORS_DEFAULT_ALLOW_ORIGIN)
+                        .allowOrigins(httpConfig.getStringList(CONFIG_ALLOW_ORIGIN).toArray(new String[0]))
                         .allowMethods(HTTP_METHOD_GET, HTTP_METHOD_POST)
                         .allowHeaders(HEADER_CONTENT_TYPE, HEADER_AUTHORIZATION, HEADER_ARROW_COMPRESSION)
                         .build())
