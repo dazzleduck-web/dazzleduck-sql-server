@@ -157,6 +157,22 @@ This creates a `dist-app/` folder containing the production-ready static files. 
 
 ---
 
+# Docker Support
+
+## 🛠️ Build the Docker Image
+From the project root (where the `Dockerfile` is located), run:
+
+```bash
+docker build -t dazzleduck-frontend .
+
+```
+
+## 🛠️ Start the container
+```bash
+docker run -p 5174:5174 dazzleduck-frontend
+```
+---
+
 ## Backend API Integration
 
 The frontend integrates with the DazzleDuck SQL HTTP Server via the following endpoints:
