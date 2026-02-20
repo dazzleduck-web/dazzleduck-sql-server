@@ -5,31 +5,27 @@ import java.util.Map;
 
 /**
  * Represents a single collected metric entry from a Prometheus endpoint.
+ * Schema matches ArrowMetricSchema from dazzleduck-sql-micrometer.
  */
 public record CollectedMetric(
     Instant timestamp,
     String name,
     String type,
-    String sourceUrl,
-    String collectorId,
-    String collectorName,
-    String collectorHost,
-    Map<String, String> labels,
-    double value
+    Map<String, String> tags,
+    double value,
+    double min,
+    double max,
+    double mean
 ) {
     /**
-     * Create a metric with current timestamp.
+     * Create a metric with current timestamp and zero min/max/mean.
+     * Used for Prometheus counter/gauge metrics which do not expose aggregates.
      */
     public CollectedMetric(
             String name,
             String type,
-            String sourceUrl,
-            String collectorId,
-            String collectorName,
-            String collectorHost,
-            Map<String, String> labels,
+            Map<String, String> tags,
             double value) {
-        this(Instant.now(), name, type, sourceUrl,
-             collectorId, collectorName, collectorHost, labels, value);
+        this(Instant.now(), name, type, tags, value, 0.0, 0.0, 0.0);
     }
 }

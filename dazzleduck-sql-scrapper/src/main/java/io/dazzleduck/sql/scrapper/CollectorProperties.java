@@ -147,6 +147,10 @@ public class CollectorProperties {
      */
     private long maxOnDiskSize = 1024 * 1024 * 1024;
 
+    private List<String> project = List.of();
+
+    private List<String> partition = List.of();
+
     // Getters and Setters
 
     public boolean isEnabled() {
@@ -331,6 +335,22 @@ public class CollectorProperties {
 
     public void setMaxOnDiskSize(long maxOnDiskSize) {
         this.maxOnDiskSize = maxOnDiskSize;
+    }
+
+    public List<String> getProject() {
+        return project;
+    }
+
+    public List<String> getPartition() {
+        return partition;
+    }
+
+    public void setProject(List<String> project) {
+        this.project = project;
+    }
+
+    public void setPartition(List<String> partition) {
+        this.partition = partition;
     }
 
     /**

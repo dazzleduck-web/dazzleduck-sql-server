@@ -103,24 +103,23 @@ class MetricsForwarderTest {
     }
 
     @Test
-    @DisplayName("Should have correct Arrow schema")
+    @DisplayName("Should have correct Arrow schema matching ArrowMetricSchema")
     void getArrowSchema_HasCorrectFields() {
         MetricsForwarder forwarder = new MetricsForwarder(properties);
         try {
             Schema schema = forwarder.getArrowSchema();
 
             assertNotNull(schema);
-            assertEquals(9, schema.getFields().size());
+            assertEquals(8, schema.getFields().size());
 
             assertEquals("timestamp", schema.getFields().get(0).getName());
             assertEquals("name", schema.getFields().get(1).getName());
             assertEquals("type", schema.getFields().get(2).getName());
-            assertEquals("source_url", schema.getFields().get(3).getName());
-            assertEquals("collector_id", schema.getFields().get(4).getName());
-            assertEquals("collector_name", schema.getFields().get(5).getName());
-            assertEquals("collector_host", schema.getFields().get(6).getName());
-            assertEquals("labels", schema.getFields().get(7).getName());
-            assertEquals("value", schema.getFields().get(8).getName());
+            assertEquals("tags", schema.getFields().get(3).getName());
+            assertEquals("value", schema.getFields().get(4).getName());
+            assertEquals("min", schema.getFields().get(5).getName());
+            assertEquals("max", schema.getFields().get(6).getName());
+            assertEquals("mean", schema.getFields().get(7).getName());
         } finally {
             forwarder.close();
         }
@@ -147,18 +146,17 @@ class MetricsForwarderTest {
     }
 
     @Test
-    @DisplayName("Should handle metrics with labels")
-    void sendMetrics_WithLabels() {
+    @DisplayName("Should handle metrics with tags")
+    void sendMetrics_WithTags() {
         MetricsForwarder forwarder = new MetricsForwarder(properties);
         try {
             CollectedMetric metric = new CollectedMetric(
                 "labeled_metric",
                 "counter",
-                "http://app:8080/metrics",
-                "collector-1",
-                "my-collector",
-                "host1",
-                Map.of("env", "prod", "region", "us-east", "service", "api"),
+                Map.of("env", "prod", "region", "us-east", "service", "api",
+                       "source_url", "http://app:8080/metrics",
+                       "collector_id", "collector-1",
+                       "collector_host", "host1"),
                 999.0
             );
 
@@ -175,11 +173,10 @@ class MetricsForwarderTest {
         return new CollectedMetric(
             name,
             "gauge",
-            "http://localhost:8080/metrics",
-            "test-collector",
-            "Test Collector",
-            "localhost",
-            Map.of("env", "test"),
+            Map.of("env", "test",
+                   "source_url", "http://localhost:8080/metrics",
+                   "collector_id", "test-collector",
+                   "collector_host", "localhost"),
             value
         );
     }

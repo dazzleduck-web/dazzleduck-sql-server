@@ -281,6 +281,14 @@ public class CollectorConfig {
         return getLong("producer.max-on-disk-size", 1024 * 1024 * 1024);
     }
 
+    public List<String> getProject() {
+        return getStringList("project", new ArrayList<>());
+    }
+
+    public List<String> getPartition() {
+        return getStringList("partition", new ArrayList<>());
+    }
+
     /**
      * Convert this configuration to CollectorProperties.
      * This provides backward compatibility with existing code.
@@ -310,6 +318,8 @@ public class CollectorConfig {
         props.setMaxBatchSize(getMaxBatchSize());
         props.setMaxInMemorySize(getMaxInMemorySize());
         props.setMaxOnDiskSize(getMaxOnDiskSize());
+        props.setProject(getProject());
+        props.setPartition(getPartition());
         return props;
     }
 
@@ -388,6 +398,8 @@ public class CollectorConfig {
                 ", flushIntervalMs=" + getFlushIntervalMs() +
                 ", maxBufferSize=" + getMaxBufferSize() +
                 ", collectorId='" + getCollectorId() + '\'' +
+                ", project=" + getProject() + '\'' +
+                ", partition=" + getPartition() + '\'' +
                 '}';
     }
 }

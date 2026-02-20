@@ -112,6 +112,41 @@
                     </archive>
                 </configuration>
             </plugin>
+            <!-- Jib Plugin for building Docker images without a Dockerfile -->
+            <plugin>
+                <groupId>com.google.cloud.tools</groupId>
+                <artifactId>jib-maven-plugin</artifactId>
+                <version>3.5.1</version>
+                <configuration>
+                    <from>
+                        <image>eclipse-temurin:21-jre</image>
+                    </from>
+                    <to>
+                        <image>dazzleduck-sql-scrapper:latest</image>
+                    </to>
+                    <container>
+                        <entrypoint>
+                            <arg>bash</arg>
+                            <arg>/app/entrypoint.sh</arg>
+                        </entrypoint>
+                    </container>
+                    <extraDirectories>
+                        <paths>
+                            <path>
+                                <from>${project.basedir}/docker</from>
+                                <into>/app</into>
+                            </path>
+                        </paths>
+                        <permissions>
+                            <permission>
+                                <file>/app/entrypoint.sh</file>
+                                <mode>755</mode>
+                            </permission>
+                        </permissions>
+                    </extraDirectories>
+                </configuration>
+            </plugin>
+
             <!-- Maven Shade Plugin for executable fat JAR -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

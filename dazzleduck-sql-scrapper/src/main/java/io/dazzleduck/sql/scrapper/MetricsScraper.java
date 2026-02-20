@@ -103,21 +103,28 @@ public class MetricsScraper {
 
     /**
      * Parse Prometheus text format into CollectedMetric objects.
+     * Uses two passes: first to collect all raw metric data and accumulate _sum/_count
+     * for histogram/summary types, then to build final CollectedMetric objects with
+     * computed mean values.
      */
     private List<CollectedMetric> parsePrometheusFormat(String body, String sourceUrl) {
-        List<CollectedMetric> metrics = new ArrayList<>();
         Map<String, String> metricTypes = new HashMap<>();
 
-        String[] lines = body.split("\n");
+        record RawMetric(String name, String type, Map<String, String> labels, double value) {}
+        List<RawMetric> rawMetrics = new ArrayList<>();
 
-        for (String line : lines) {
+        // Keyed by baseName + ":" + labelsWithoutHistogramKeys (le, quantile removed)
+        Map<String, Double> sumMap = new HashMap<>();
+        Map<String, Double> countMap = new HashMap<>();
+
+        // Phase 1: parse all lines
+        for (String line : body.split("\n")) {
             line = line.trim();
 
             if (line.isEmpty() || line.startsWith("# HELP")) {
                 continue;
             }
 
-            // Parse TYPE comments
             Matcher typeMatcher = TYPE_COMMENT_PATTERN.matcher(line);
             if (typeMatcher.matches()) {
                 metricTypes.put(typeMatcher.group(1), typeMatcher.group(2));
@@ -128,7 +135,6 @@ public class MetricsScraper {
                 continue;
             }
 
-            // Parse metric lines
             Matcher metricMatcher = METRIC_LINE_PATTERN.matcher(line);
             if (metricMatcher.matches()) {
                 String name = metricMatcher.group(1);
@@ -158,24 +164,70 @@ public class MetricsScraper {
                     continue;
                 }
 
-                // Get type from TYPE comments, default to "gauge"
-                // For histogram/summary, sub-metrics have suffixes like _bucket, _sum, _count
                 String type = getMetricType(name, metricTypes);
+                rawMetrics.add(new RawMetric(name, type, labels, value));
 
-                metrics.add(new CollectedMetric(
-                    name,
-                    type,
-                    sourceUrl,
-                    properties.getCollectorId(),
-                    properties.getCollectorName(),
-                    collectorHost,
-                    labels,
-                    value
-                ));
+                // Accumulate _sum and _count for histogram/summary mean computation
+                if ("histogram".equals(type) || "summary".equals(type)) {
+                    if (name.endsWith("_sum")) {
+                        String baseName = name.substring(0, name.length() - "_sum".length());
+                        sumMap.put(meanKey(baseName, labels), value);
+                    } else if (name.endsWith("_count")) {
+                        String baseName = name.substring(0, name.length() - "_count".length());
+                        countMap.put(meanKey(baseName, labels), value);
+                    }
+                }
             }
         }
 
+        // Phase 2: build CollectedMetrics with computed mean
+        List<CollectedMetric> metrics = new ArrayList<>();
+        for (RawMetric raw : rawMetrics) {
+            double mean = 0.0;
+            if ("histogram".equals(raw.type()) || "summary".equals(raw.type())) {
+                String baseName = getBaseName(raw.name());
+                String key = meanKey(baseName, raw.labels());
+                Double sum = sumMap.get(key);
+                Double count = countMap.get(key);
+                if (sum != null && count != null && count > 0) {
+                    mean = sum / count;
+                }
+            }
+
+            Map<String, String> tags = new LinkedHashMap<>(raw.labels());
+            tags.put("source_url", sourceUrl);
+            tags.put("collector_id", properties.getCollectorId());
+            tags.put("collector_host", collectorHost);
+
+            metrics.add(new CollectedMetric(java.time.Instant.now(), raw.name(), raw.type(), tags, raw.value(), 0.0, 0.0, mean));
+        }
+
         return metrics;
+    }
+
+    /**
+     * Build a stable lookup key for matching _sum/_count to their histogram/summary family.
+     * Strips "le" (histogram bucket label) and "quantile" (summary quantile label) so that
+     * _bucket{method="GET",le="0.1"} and _sum{method="GET"} share the same key.
+     */
+    private String meanKey(String baseName, Map<String, String> labels) {
+        TreeMap<String, String> sorted = new TreeMap<>(labels);
+        sorted.remove("le");
+        sorted.remove("quantile");
+        return baseName + ":" + sorted;
+    }
+
+    /**
+     * Strip histogram/summary suffixes to get the base metric family name.
+     */
+    private String getBaseName(String metricName) {
+        String[] suffixes = {"_bucket", "_sum", "_count"};
+        for (String suffix : suffixes) {
+            if (metricName.endsWith(suffix)) {
+                return metricName.substring(0, metricName.length() - suffix.length());
+            }
+        }
+        return metricName;
     }
 
     /**

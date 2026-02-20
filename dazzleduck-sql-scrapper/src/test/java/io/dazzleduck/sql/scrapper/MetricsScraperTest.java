@@ -60,12 +60,12 @@ class MetricsScraperTest {
         assertEquals(3, metrics.size());
 
         CollectedMetric getRequest = metrics.stream()
-            .filter(m -> m.name().equals("http_requests_total") && "GET".equals(m.labels().get("method")))
+            .filter(m -> m.name().equals("http_requests_total") && "GET".equals(m.tags().get("method")))
             .findFirst()
             .orElseThrow();
         assertEquals("counter", getRequest.type());
         assertEquals(1234.0, getRequest.value());
-        assertEquals("200", getRequest.labels().get("status"));
+        assertEquals("200", getRequest.tags().get("status"));
 
         CollectedMetric cpuUsage = metrics.stream()
             .filter(m -> m.name().equals("process_cpu_usage"))
@@ -90,11 +90,11 @@ class MetricsScraperTest {
         assertEquals(2, metrics.size());
 
         CollectedMetric heapMetric = metrics.stream()
-            .filter(m -> "heap".equals(m.labels().get("area")))
+            .filter(m -> "heap".equals(m.tags().get("area")))
             .findFirst()
             .orElseThrow();
         assertEquals("jvm_memory_used", heapMetric.name());
-        assertEquals("G1 Eden Space", heapMetric.labels().get("id"));
+        assertEquals("G1 Eden Space", heapMetric.tags().get("id"));
         assertEquals(12345678.0, heapMetric.value());
     }
 
@@ -112,7 +112,13 @@ class MetricsScraperTest {
         assertEquals(1, metrics.size());
         assertEquals("simple_metric", metrics.get(0).name());
         assertEquals(42.5, metrics.get(0).value());
-        assertTrue(metrics.get(0).labels().isEmpty());
+        // identity tags (source_url, collector_id, collector_host) are always injected
+        assertFalse(metrics.get(0).tags().isEmpty());
+        assertTrue(metrics.get(0).tags().containsKey("source_url"));
+        // non-histogram/summary metrics default to 0.0
+        assertEquals(0.0, metrics.get(0).min());
+        assertEquals(0.0, metrics.get(0).max());
+        assertEquals(0.0, metrics.get(0).mean());
     }
 
     @Test
@@ -239,7 +245,7 @@ class MetricsScraperTest {
     }
 
     @Test
-    @DisplayName("Should set collector metadata on metrics")
+    @DisplayName("Should inject collector metadata as tags")
     void scrapeTarget_SetsMetadata() throws Exception {
         String prometheusData = "test_metric 42\n";
         targetServer.enqueue(new MockResponse().setBody(prometheusData).setResponseCode(200));
@@ -248,9 +254,9 @@ class MetricsScraperTest {
 
         assertEquals(1, metrics.size());
         CollectedMetric metric = metrics.get(0);
-        assertEquals("test-collector", metric.collectorId());
-        assertEquals("Test Collector", metric.collectorName());
-        assertNotNull(metric.sourceUrl());
+        assertEquals("test-collector", metric.tags().get("collector_id"));
+        assertNotNull(metric.tags().get("source_url"));
+        assertNotNull(metric.tags().get("collector_host"));
         assertNotNull(metric.timestamp());
     }
 
@@ -272,6 +278,41 @@ class MetricsScraperTest {
 
         assertEquals(6, metrics.size());
         assertEquals(6, metrics.stream().filter(m -> "histogram".equals(m.type())).count());
+
+        // mean = _sum / _count = 53423 / 144320 for all histogram sub-metrics
+        double expectedMean = 53423.0 / 144320.0;
+        for (CollectedMetric m : metrics) {
+            assertEquals(expectedMean, m.mean(), 1e-9);
+            assertEquals(0.0, m.min());
+            assertEquals(0.0, m.max());
+        }
+    }
+
+    @Test
+    @DisplayName("Should compute mean for summary metrics from _sum/_count")
+    void scrapeTarget_SummaryMean() throws Exception {
+        String prometheusData = """
+            # TYPE rpc_duration_seconds summary
+            rpc_duration_seconds{quantile="0.01"} 3102
+            rpc_duration_seconds{quantile="0.5"} 4773
+            rpc_duration_seconds{quantile="0.99"} 76656
+            rpc_duration_seconds_sum 17560473
+            rpc_duration_seconds_count 2693
+            """;
+        targetServer.enqueue(new MockResponse().setBody(prometheusData).setResponseCode(200));
+
+        List<CollectedMetric> metrics = scraper.scrapeTarget(targetServer.url("/actuator/prometheus").toString());
+
+        assertEquals(5, metrics.size());
+        assertEquals(5, metrics.stream().filter(m -> "summary".equals(m.type())).count());
+
+        // mean = _sum / _count = 17560473 / 2693 for all summary sub-metrics
+        double expectedMean = 17560473.0 / 2693.0;
+        for (CollectedMetric m : metrics) {
+            assertEquals(expectedMean, m.mean(), 1e-6);
+            assertEquals(0.0, m.min());
+            assertEquals(0.0, m.max());
+        }
     }
 
     @Test
