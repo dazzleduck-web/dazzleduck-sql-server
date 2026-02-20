@@ -140,11 +140,9 @@ class MetricsBufferTest {
         return new CollectedMetric(
             name,
             "gauge",
-            "http://localhost:8080/metrics",
-            "test-collector",
-            "Test Collector",
-            "localhost",
-            Map.of(),
+            Map.of("source_url", "http://localhost:8080/metrics",
+                   "collector_id", "test-collector",
+                   "collector_host", "localhost"),
             value
         );
     }
