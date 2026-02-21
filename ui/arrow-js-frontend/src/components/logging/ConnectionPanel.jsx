@@ -66,7 +66,7 @@ const ConnectionPanel = ({
                         <input
                             type="text"
                             {...register("url", { required: "Server URL is required" })}
-                            placeholder="Enter Server URL"
+                            placeholder="http://localhost:8081"
                             className="w-full border border-gray-400 rounded-lg py-1 px-2"
                         />
                         {isSubmitted && errors.url && (
