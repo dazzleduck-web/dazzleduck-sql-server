@@ -370,7 +370,8 @@ export const LoggingProvider = ({ children }) => {
                 splitSize: connectionInfo.splitSize || 0
             },
             queries: currentQueries.map(q => ({
-                query: q.query
+                query: q.query,
+                variables: q.variables || {}
             }))
         };
     }, [connectionInfo]);

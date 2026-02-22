@@ -5,7 +5,7 @@ const DEFAULT_VIEW = "table";
 
 export const useQueryManagement = (executeQuery, cancelQuery, isConnected, connection) => {
     const [rows, setRows] = useState([
-        { id: "1-" + uuidv4(), showPanel: true, query: "", view: DEFAULT_VIEW },
+        { id: "1-" + uuidv4(), showPanel: true, query: "", view: DEFAULT_VIEW, variables: {} },
     ]);
     const [results, setResults] = useState({});
     const [queryIds, setQueryIds] = useState({});
@@ -23,11 +23,31 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
         return queryIdCounter.current++;
     };
 
+    // Substitute variables in the query (also strips default values like {variable:default})
+    const substituteVariables = (query, variables) => {
+        let substitutedQuery = query;
+        Object.entries(variables).forEach(([name, value]) => {
+            // Skip empty variable names (to avoid replacing {})
+            if (!name || name.trim() === "") {
+                return;
+            }
+            // Replace {variable_name} or {variable_name:default} with the value
+            // Escape special regex characters in variable name
+            const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // Match {name} or {name:default} patterns that are NOT preceded by \
+            const pattern = new RegExp(`(?<!\\\\)\\{${escapedName}(?::[^}]*)?\\}`, 'g');
+            substitutedQuery = substitutedQuery.replace(pattern, value || '');
+        });
+        // Convert escaped braces back to literal braces (\{ -> {, \} -> })
+        substitutedQuery = substitutedQuery.replace(/\\{/g, '{').replace(/\\}/g, '}');
+        return substitutedQuery;
+    };
+
     const addRow = () => {
         const newId = nextId.current++ + "-" + uuidv4();
         setRows((prev) => [
             ...prev,
-            { id: newId, showPanel: true, query: "", view: DEFAULT_VIEW },
+            { id: newId, showPanel: true, query: "", view: DEFAULT_VIEW, variables: {} },
         ]);
     };
 
@@ -62,11 +82,14 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
             return { logs: [], error: "Empty query — skipped", queryId: null };
         }
 
+        // Substitute variables in the query
+        const queryWithVars = substituteVariables(row.query, row.variables || {});
+
         const queryId = generateQueryId();
         setQueryIds(prev => ({ ...prev, [row.id]: queryId }));
 
         try {
-            const result = await executeQuery(url, row.query, splitSize, null, queryId);
+            const result = await executeQuery(url, queryWithVars, splitSize, null, queryId);
             return { logs: result.data, error: null, queryId: result.queryId };
         } catch (err) {
             return { logs: [], error: err?.message || "Query failed", queryId: null };
@@ -227,7 +250,7 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
     };
 
     const resetRows = () => {
-        setRows([{ id: "1-" + uuidv4(), showPanel: true, query: "", view: DEFAULT_VIEW }]);
+        setRows([{ id: "1-" + uuidv4(), showPanel: true, query: "", view: DEFAULT_VIEW, variables: {} }]);
         setResults({});
         setQueryIds({});
         nextId.current = 2;
@@ -239,7 +262,8 @@ export const useQueryManagement = (executeQuery, cancelQuery, isConnected, conne
                 id: (index + 1) + "-" + uuidv4(),
                 showPanel: true,
                 query: q.query,
-                view: DEFAULT_VIEW
+                view: DEFAULT_VIEW,
+                variables: q.variables || {}
             }));
 
             setRows(restoredRows);

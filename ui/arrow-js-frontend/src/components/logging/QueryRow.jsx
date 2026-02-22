@@ -1,6 +1,7 @@
 import React from "react";
 import { HiOutlineChevronDoubleUp, HiOutlineChevronDoubleDown, HiOutlineX } from "react-icons/hi";
 import QueryResults from "./QueryResults";
+import VariableManager from "./VariableManager";
 
 const QueryRow = ({
     row,
@@ -16,6 +17,12 @@ const QueryRow = ({
     clearRowLogs
 }) => {
     const { logs = [], loading = false, error = null } = result || {};
+    const variables = row.variables || {};
+
+    // Handle updating variables for this row
+    const handleUpdateVariables = (updatedVariables) => {
+        updateRow(row.id, "variables", updatedVariables);
+    };
 
     return (
         <div className="relative max-w-[85dvw] mx-auto bg-white rounded-2xl shadow-2xl p-8 border border-gray-300 flex flex-col overflow-hidden">
@@ -51,19 +58,27 @@ const QueryRow = ({
             {/* Query Editor */}
             <div
                 className={`overflow-hidden mt-5 shadow-lg rounded-xl transition-all duration-500 ease-in-out ${row.showPanel
-                        ? "max-h-[600px] opacity-100"
-                        : "max-h-0 opacity-0"
+                    ? "max-h-150 opacity-100"
+                    : "max-h-0 opacity-0"
                     }`}
             >
                 <div className="flex flex-col flex-1 bg-gray-50 rounded-xl border border-gray-300 p-6">
-                    <h2 className="text-2xl font-semibold text-gray-800 mb-2">
-                        SQL Query #{row.id.split("-")[0]}
-                        {queryId && (
-                            <span className="text-sm text-gray-500 ml-2">
-                                (Query ID: {queryId})
-                            </span>
-                        )}
-                    </h2>
+                    <div className="flex justify-between items-start mb-2">
+                        <h2 className="text-2xl w-full font-semibold text-gray-800">
+                            SQL Query #{row.id.split("-")[0]}
+                            {queryId && (
+                                <span className="text-sm text-gray-500 ml-2">
+                                    (Query ID: {queryId})
+                                </span>
+                            )}
+                        </h2>
+                        {/* Variable Manager - top right */}
+                        <VariableManager
+                            query={row.query}
+                            variables={variables}
+                            onUpdateVariables={handleUpdateVariables}
+                        />
+                    </div>
                     <textarea
                         value={row.query}
                         onChange={(e) => updateRow(row.id, "query", e.target.value)}
