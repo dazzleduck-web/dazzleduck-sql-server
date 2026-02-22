@@ -27,7 +27,7 @@ describe("Logging Component Integration Tests", () => {
     it("should connect successfully when valid credentials are provided", async () => {
         setup();
 
-        const urlInput = screen.getByPlaceholderText(/enter server url/i);
+        const urlInput = screen.getByPlaceholderText(/http:\/\/localhost:8081/i);
         const usernameInput = screen.getByPlaceholderText(/enter username/i);
         const passwordInput = screen.getByPlaceholderText(/enter password/i);
 
@@ -63,7 +63,7 @@ describe("Logging Component Integration Tests", () => {
         });
 
         // Step 2: Fill connection fields
-        fireEvent.change(screen.getByPlaceholderText(/enter server url/i), {
+        fireEvent.change(screen.getByPlaceholderText(/http:\/\/localhost:8081/i), {
             target: { value: SERVER_URL },
         });
         fireEvent.change(screen.getByPlaceholderText(/enter username/i), {
@@ -123,6 +123,107 @@ describe("Logging Component Integration Tests", () => {
                 // Then check for the result value in any element
                 const allText = container.textContent;
                 expect(allText).toContain("2");
+            },
+            { timeout: 15000 }
+        );
+    }, 30000);
+
+    it("should handle variable substitution in queries", async () => {
+        const { container } = setup();
+
+        // Step 1: Connect
+        fireEvent.change(screen.getByPlaceholderText(/http:\/\/localhost:8081/i), {
+            target: { value: SERVER_URL },
+        });
+        fireEvent.change(screen.getByPlaceholderText(/enter username/i), {
+            target: { value: USERNAME },
+        });
+        fireEvent.change(screen.getByPlaceholderText(/enter password/i), {
+            target: { value: PASSWORD },
+        });
+
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+        });
+
+        await waitFor(
+            () => {
+                expect(Cookies.get("jwtToken")).toBeDefined();
+            },
+            { timeout: 10000 }
+        );
+
+        await act(async () => {
+            await new Promise((r) => setTimeout(r, 2000));
+        });
+
+        // Step 2: Enter query with variable
+        const queryTextarea = screen.getAllByPlaceholderText(
+            /e\.g\. select \* from read_arrow/i
+        )[0];
+
+        await act(async () => {
+            fireEvent.change(queryTextarea, {
+                target: { value: "select {value} as result" },
+            });
+        });
+
+        // Step 3: Verify Variables button appears
+        await waitFor(() => {
+            const variablesBtn = screen.getByText(/variables \(1\)/i);
+            expect(variablesBtn).toBeInTheDocument();
+            expect(variablesBtn).not.toBeDisabled();
+        });
+
+        // Step 4: Open Variables dropdown
+        const variablesBtn = screen.getByText(/variables \(1\)/i);
+        await act(async () => {
+            fireEvent.click(variablesBtn);
+        });
+
+        // Step 5: Verify variable is displayed and edit it
+        await waitFor(() => {
+            const variableDisplay = screen.getByText(/no value set/i);
+            expect(variableDisplay).toBeInTheDocument();
+        });
+
+        // Double-click to edit variable
+        const variableDisplay = screen.getByText(/no value set/i);
+        await act(async () => {
+            fireEvent.doubleClick(variableDisplay);
+        });
+
+        // Wait for input to appear and set value
+        await waitFor(() => {
+            const input = container.querySelector('input[placeholder="Enter value..."]');
+            expect(input).toBeInTheDocument();
+            fireEvent.change(input, { target: { value: "42" } });
+        });
+
+        // Press Enter to save
+        await act(async () => {
+            const input = container.querySelector('input[placeholder="Enter value..."]');
+            fireEvent.keyDown(input, { key: "Enter" });
+        });
+
+        // Step 6: Run query
+        const runBtn = await waitFor(() => {
+            const btns = screen
+                .getAllByRole("button")
+                .filter((btn) => btn.textContent.trim() === "Run");
+            expect(btns[0]).not.toBeDisabled();
+            return btns[0];
+        });
+
+        await act(async () => {
+            fireEvent.click(runBtn);
+        });
+
+        // Step 7: Wait for results with substituted value
+        await waitFor(
+            () => {
+                const allText = container.textContent;
+                expect(allText).toContain("42");
             },
             { timeout: 15000 }
         );
