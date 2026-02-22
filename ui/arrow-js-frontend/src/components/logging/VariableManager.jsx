@@ -151,7 +151,7 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
                 <button
                     ref={tipRef}
                     onClick={() => setShowTip(!showTip)}
-                    className="p-2 rounded-full hover:bg-gray-200 transition cursor-pointer"
+                    className="p-2 rounded-full hover:bg-gray-200 transition ease-in-out duration-300 cursor-pointer"
                     title="Show variable tips"
                 >
                     {showTip ? (
@@ -163,13 +163,13 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
 
                 {/* Tip popup - appears when bulb icon is clicked */}
                 {showTip && (
-                    <div className="absolute right-0 top-full mt-2 bg-gray-800 text-white text-xs px-3 py-2 rounded-lg shadow-lg z-20 max-w-xs">
+                    <div className="absolute right-20 top-8 mt-2 bg-gray-800 text-white text-xs px-3 py-2 rounded-lg shadow-lg z-20 max-w-xs">
                         <p className="mb-1">
-                            Use <code className="bg-gray-700 px-1 rounded">{"{variable}"}</code> or{" "}
-                            <code className="bg-gray-700 px-1 rounded">{"{variable:default}"}</code>
+                            Use <code className="bg-gray-700 px-1 rounded text-yellow-400">{"{variable}"}</code> or{" "}
+                            <code className="bg-gray-700 px-1 rounded text-yellow-400">{"{variable:default}"}</code>
                         </p>
                         <p className="text-gray-300">
-                            Escape with <code className="bg-gray-700 px-1 rounded">{"\\{variable\\}"}</code> for literal
+                            Escape with <code className="bg-gray-700 px-1 rounded text-yellow-400">{"\\{variable\\}"}</code> for literal
                         </p>
                     </div>
                 )}
@@ -178,9 +178,9 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
                 <button
                     onClick={() => variableCount > 0 && setShowModal(true)}
                     disabled={variableCount === 0}
-                    className={`flex items-center gap-1 text-sm font-medium py-2 px-3 rounded-md transition ${variableCount > 0
-                            ? "bg-green-600 hover:bg-green-700 text-white cursor-pointer"
-                            : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    className={`flex items-center gap-1 text-sm font-medium py-2 px-3 rounded-md transition-all ${variableCount > 0
+                        ? "bg-green-600 hover:bg-green-700 text-white cursor-pointer"
+                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
                         }`}
                 >
                     <HiOutlineVariable className="text-base" />
@@ -191,13 +191,13 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
             {/* Variables Dropdown Panel - appears beside the button */}
             {showModal && (
                 <div ref={dropdownRef} className="absolute right-13 top-29 bg-white rounded-xl shadow-2xl p-4 w-80 max-h-96 overflow-y-auto z-30 border border-gray-200">
-                    <div className="flex justify-between items-center mb-3">
+                    <div className="flex justify-between items-center mb-2">
                         <h3 className="text-lg font-semibold text-gray-800">
                             Query Variables
                         </h3>
                         <button
                             onClick={() => setShowModal(false)}
-                            className="text-gray-500 hover:text-gray-700 transition cursor-pointer"
+                            className="text-gray-500 hover:text-gray-700 transition-all cursor-pointer"
                         >
                             <HiX className="text-xl" />
                         </button>
@@ -238,7 +238,7 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
                                                 onChange={(e) => setTempValue(e.target.value)}
                                                 onKeyDown={handleKeyDown}
                                                 placeholder="Enter value..."
-                                                className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                                className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                                                 autoFocus
                                             />
                                             <button
@@ -259,8 +259,9 @@ const VariableManager = ({ query, variables, onUpdateVariables }) => {
                                     ) : (
                                         <div className="flex-1 flex items-center gap-1">
                                             <div
-                                                className="flex-1 px-2 py-1 text-xs bg-white border border-gray-200 rounded min-h-6 flex items-center"
+                                                className="flex-1 px-2 py-1 text-xs bg-white border border-gray-200 rounded min-h-6 flex items-center cursor-text hover:bg-gray-50 transition"
                                                 title={value || "No value set"}
+                                                onDoubleClick={() => startEdit(name, value)}
                                             >
                                                 <span className={value ? "text-gray-800" : "text-gray-400 italic"}>
                                                     {value || "No value set"}
