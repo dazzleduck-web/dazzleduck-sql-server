@@ -1,13 +1,13 @@
 package io.dazzleduck.sql.commons.authorization;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
-import io.dazzleduck.sql.commons.ExpressionConstants;
 import io.dazzleduck.sql.commons.Transformations;
 
 import java.util.Map;
+
+import static io.dazzleduck.sql.common.Headers.HEADER_TOKEN_REDIRECT;
 
 /**
  * JWT Claim-based Authorizer for SQL query and write access authorization.
@@ -61,20 +61,15 @@ public class JwtClaimBasedAuthorizer implements SqlAuthorizer {
 
     }
 
-    private JsonNode withUpdatedDatabaseSchema(JsonNode tree, String database, String schema ) {
-        var copy = tree.deepCopy();
-        var f = Transformations.identity().andThen(Transformations::getFirstStatementNode).apply(copy);
-        var fromTable = (ObjectNode)f.get(ExpressionConstants.FIELD_FROM_TABLE);
-        var type = fromTable.get(ExpressionConstants.FIELD_TYPE).asText();
-        if( type.equals( ExpressionConstants.BASE_TABLE_TYPE)) {
-            fromTable.put(ExpressionConstants.FIELD_CATALOG_NAME, database);
-            fromTable.put(ExpressionConstants.FIELD_SCHEMA_NAME,  schema);
-            return copy;
-        }
-        return tree;
-    }
     @Override
     public JsonNode authorize(String user, String database, String schema, JsonNode query, Map<String, String> verifiedClaims) throws UnauthorizedException {
+        // Dispatch to redirect authorizer when the token signals redirect mode
+        String tokenType = verifiedClaims.get(Headers.HEADER_TOKEN_TYPE);
+        if (HEADER_TOKEN_REDIRECT.equalsIgnoreCase(tokenType)) {
+            return RedirectAuthorizer.INSTANCE.authorize(user, database, schema, query, verifiedClaims);
+        }
+
+        // --- Inline mode (original logic) ---
         var catalogSchemaTables =
                 Transformations.getAllTablesOrPathsFromSelect(Transformations.getFirstStatementNode(query), database, schema);
 
@@ -82,7 +77,7 @@ public class JwtClaimBasedAuthorizer implements SqlAuthorizer {
             throw new UnauthorizedException("No table or path found in query");
         }
 
-        var updatedQuery = withUpdatedDatabaseSchema(query, database, schema );
+        var updatedQuery = SqlAuthorizer.withUpdatedDatabaseSchema(query, database, schema);
         var path = verifiedClaims.get(Headers.HEADER_PATH);
         var functionName = verifiedClaims.get(Headers.HEADER_FUNCTION);
         var table = verifiedClaims.get(Headers.HEADER_TABLE);

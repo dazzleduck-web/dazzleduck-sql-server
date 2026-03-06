@@ -37,6 +37,17 @@ public class Headers {
     public static final String HEADER_APP_DATA_TRANSFORMATION = "x-dd-udf-transformation";
     public static final String HEADER_ARROW_COMPRESSION = "x-dd-arrow-compression";
 
+    // Token type claim for redirect vs inline authorization ("inline" or "redirect")
+    public static final String HEADER_TOKEN_TYPE = "token_type";
+    public static final String HEADER_TOKEN_REDIRECT = "redirect";
+    public static final String HEADER_TOKEN_INLINE = "inline";
+
+    public static final String HEADER_REDIRECT_URL = "redirect_url";
+
+    // Reserved internal key used to carry the raw bearer token through verifiedClaims
+    // so that RedirectAuthorizer can forward it to the resolve endpoint
+    public static final String HEADER_BEARER_TOKEN = "x-dd-bearer-token";
+
     public static final Set<String> SUPPORTED_HEADERS = Set.of(HEADER_FETCH_SIZE, HEADER_DATABASE, HEADER_SCHEMA, HEADER_SPLIT_SIZE,
             HEADER_DATA_PARTITION, HEADER_DATA_FORMAT, HEADER_PRODUCER_ID, HEADER_PRODUCER_BATCH_ID, HEADER_SORT_ORDER,
             HEADER_DATA_PROJECT, HEADER_APP_DATA_TRANSFORMATION, HEADER_PATH, HEADER_TABLE, HEADER_FUNCTION, HEADER_FILTER, HEADER_ACCESS_TYPE,

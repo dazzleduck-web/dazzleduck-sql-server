@@ -8,6 +8,7 @@ import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
 import io.dazzleduck.sql.commons.ExpressionConstants;
 import io.dazzleduck.sql.commons.ExpressionFactory;
 import io.dazzleduck.sql.commons.Transformations;
+import java.util.function.Function;
 
 import java.sql.SQLException;
 import java.util.Map;
@@ -97,6 +98,28 @@ public interface SqlAuthorizer {
                 schema.equals(queried.schema()) &&
                 database.equals(queried.catalog()) &&
                 queried.type() == Transformations.TableType.BASE_TABLE;
+    }
+
+    /**
+     * Returns a copy of {@code tree} with the catalog and schema names set on the FROM table,
+     * but only when the FROM clause is a BASE_TABLE. For TABLE_FUNCTION queries the original
+     * tree is returned unchanged.
+     */
+    static JsonNode withUpdatedDatabaseSchema(JsonNode tree, String database, String schema) {
+        var copy = tree.deepCopy();
+        Function<JsonNode, JsonNode> identity = t -> t;
+        var f = identity.andThen(Transformations::getFirstStatementNode).apply(copy);
+        var fromTable = (ObjectNode) f.get(ExpressionConstants.FIELD_FROM_TABLE);
+        if (fromTable == null) {
+            return tree;
+        }
+        var typeNode = fromTable.get(ExpressionConstants.FIELD_TYPE);
+        if (typeNode != null && typeNode.asText().equals(ExpressionConstants.BASE_TABLE_TYPE)) {
+            fromTable.put(ExpressionConstants.FIELD_CATALOG_NAME, database);
+            fromTable.put(ExpressionConstants.FIELD_SCHEMA_NAME, schema);
+            return copy;
+        }
+        return tree;
     }
 
 }
