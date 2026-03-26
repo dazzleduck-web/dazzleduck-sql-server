@@ -303,8 +303,11 @@ public class Main {
             loginService = new LoginService(appConfig, secretKey, jwtExpiration);
         }
 
-        // All versioned endpoints now require JWT authentication
-        logger.info("JWT authentication is required for all versioned API endpoints (auth={}, accessMode={})", auth, accessMode);
+        if (AUTH_JWT.equalsIgnoreCase(auth)) {
+            logger.info("JWT authentication is required for all versioned API endpoints (auth={}, accessMode={})", auth, accessMode);
+        } else {
+            logger.info("JWT authentication is disabled for versioned API endpoints (auth={}, accessMode={})", auth, accessMode);
+        }
 
         var serverBuilder = WebServer.builder()
                 .config(helidonConfig.get(ConfigConstants.CONFIG_PATH))
@@ -320,13 +323,15 @@ public class Main {
                             .register(ENDPOINT_INGEST, new IngestionService(producer))
                             .register(ENDPOINT_UI, new UIService(producer));
 
-                    // JWT filter is always applied to all versioned endpoints
-                    b.addFilter(new JwtAuthenticationFilter(
-                            List.of(ENDPOINT_QUERY, ENDPOINT_PLAN, ENDPOINT_INGEST, ENDPOINT_CANCEL, ENDPOINT_UI),
-                            appConfig,
-                            secretKey,
-                            producer.getSqlAuthorizer()
-                    ));
+                    // Apply JWT filter only when explicitly configured.
+                    if (AUTH_JWT.equalsIgnoreCase(auth)) {
+                        b.addFilter(new JwtAuthenticationFilter(
+                                List.of(ENDPOINT_QUERY, ENDPOINT_PLAN, ENDPOINT_INGEST, ENDPOINT_CANCEL, ENDPOINT_UI),
+                                appConfig,
+                                secretKey,
+                                producer.getSqlAuthorizer()
+                        ));
+                    }
                 })
                 .port(port)
                 .host(host);
