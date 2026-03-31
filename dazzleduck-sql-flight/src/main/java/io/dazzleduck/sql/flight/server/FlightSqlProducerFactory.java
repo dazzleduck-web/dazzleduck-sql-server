@@ -504,10 +504,17 @@ public final class FlightSqlProducerFactory {
             return IngestionConfig.fromConfig(config.getConfig(ConfigConstants.INGESTION_KEY));
         }
 
-        private static io.dazzleduck.sql.flight.FlightRecorder buildRecorder(String producerId) {
+        private static FlightRecorder buildRecorder(String producerId) {
             try {
                 var registry = new io.micrometer.core.instrument.logging.LoggingMeterRegistry();
                 setupCommonTags(registry, producerId);
+
+                new io.micrometer.core.instrument.binder.system.ProcessorMetrics().bindTo(registry);
+                new io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics().bindTo(registry);
+                new io.micrometer.core.instrument.binder.jvm.JvmGcMetrics().bindTo(registry);
+                new io.micrometer.core.instrument.binder.system.DiskSpaceMetrics(
+                        new java.io.File(System.getProperty("user.dir"))).bindTo(registry);
+
                 return new io.dazzleduck.sql.flight.MicroMeterFlightRecorder(registry, producerId);
             } catch (Throwable t) {
                 return new SimpleFlightRecorder();
