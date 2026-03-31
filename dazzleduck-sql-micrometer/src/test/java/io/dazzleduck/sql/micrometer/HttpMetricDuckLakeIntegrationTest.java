@@ -117,6 +117,153 @@ public class HttpMetricDuckLakeIntegrationTest {
         );
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // System metrics tests (CPU, JVM memory, disk)
+    // Each test creates its own registry, binds system metrics, closes it to
+    // force a publish, waits for server-side ingestion, then queries the table.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Verifies that CPU metrics are published and stored.
+     *
+     * ProcessorMetrics binds:
+     *   system.cpu.count  – number of available processors (always > 0)
+     *   system.cpu.usage  – system-wide CPU load [0.0, 1.0]  (may be -1 on some JVMs)
+     *   process.cpu.usage – JVM process CPU load [0.0, 1.0]  (may be -1 on some JVMs)
+     */
+    @Test
+    void testCpuMetricsPublished() throws Exception {
+        MeterRegistry registry = MetricsRegistryFactory.create();
+        try {
+            SystemMetricsPublisher.bind(registry, warehouse.toString());
+            Thread.sleep(200);
+        } finally {
+            registry.close();
+        }
+        Thread.sleep(500);
+
+        String table = fullTableRef();
+
+        // system.cpu.count must exist and its value must equal Runtime.availableProcessors()
+        Long rowCount = ConnectionPool.collectFirst(
+                "SELECT count(*) FROM %s WHERE name = 'system.cpu.count' AND type = 'gauge'".formatted(table),
+                Long.class);
+        Assertions.assertTrue(rowCount > 0,
+                "system.cpu.count gauge row must be present in the metrics table");
+
+        Double cpuCount = ConnectionPool.collectFirst(
+                "SELECT max(value) FROM %s WHERE name = 'system.cpu.count' AND type = 'gauge'".formatted(table),
+                Double.class);
+        Assertions.assertEquals(
+                (double) java.lang.Runtime.getRuntime().availableProcessors(),
+                cpuCount,
+                "system.cpu.count must equal Runtime.availableProcessors()");
+
+        // system.cpu.usage must exist (value may legitimately be -1.0 on some JVMs when unavailable)
+        Long cpuUsageRows = ConnectionPool.collectFirst(
+                "SELECT count(*) FROM %s WHERE name = 'system.cpu.usage' AND type = 'gauge'".formatted(table),
+                Long.class);
+        Assertions.assertTrue(cpuUsageRows > 0,
+                "system.cpu.usage gauge row must be present in the metrics table");
+    }
+
+    /**
+     * Verifies that JVM memory metrics (heap and non-heap) are published and stored.
+     *
+     * JvmMemoryMetrics binds gauges with tag area=heap|nonheap:
+     *   jvm.memory.used      – bytes currently used
+     *   jvm.memory.committed – bytes committed by the OS
+     *   jvm.memory.max       – maximum bytes available (-1 if unlimited)
+     */
+    @Test
+    void testJvmMemoryMetricsPublished() throws Exception {
+        MeterRegistry registry = MetricsRegistryFactory.create();
+        try {
+            SystemMetricsPublisher.bind(registry, warehouse.toString());
+            Thread.sleep(200);
+        } finally {
+            registry.close();
+        }
+        Thread.sleep(500);
+
+        String table = fullTableRef();
+
+        // jvm.memory.used with area=heap must be present and positive
+        Long heapRows = ConnectionPool.collectFirst(
+                "SELECT count(*) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'heap'"
+                        .formatted(table),
+                Long.class);
+        Assertions.assertTrue(heapRows > 0,
+                "jvm.memory.used (area=heap) gauge rows must be present");
+
+        Double heapUsed = ConnectionPool.collectFirst(
+                "SELECT max(value) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'heap'"
+                        .formatted(table),
+                Double.class);
+        Assertions.assertTrue(heapUsed > 0,
+                "jvm.memory.used (area=heap) must be > 0 bytes");
+
+        // jvm.memory.used with area=nonheap must also be present and positive
+        Long nonHeapRows = ConnectionPool.collectFirst(
+                "SELECT count(*) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'nonheap'"
+                        .formatted(table),
+                Long.class);
+        Assertions.assertTrue(nonHeapRows > 0,
+                "jvm.memory.used (area=nonheap) gauge rows must be present");
+
+        // jvm.memory.committed for heap must be >= jvm.memory.used for heap
+        Double heapCommitted = ConnectionPool.collectFirst(
+                "SELECT max(value) FROM %s WHERE name = 'jvm.memory.committed' AND type = 'gauge' AND tags['area'] = 'heap'"
+                        .formatted(table),
+                Double.class);
+        Assertions.assertTrue(heapCommitted >= heapUsed,
+                "jvm.memory.committed (heap) must be >= jvm.memory.used (heap)");
+    }
+
+    /**
+     * Verifies that disk space metrics are published and stored.
+     *
+     * DiskSpaceMetrics binds gauges with a path tag pointing to the warehouse path:
+     *   disk.free   – free bytes on the filesystem
+     *   disk.total  – total bytes on the filesystem
+     *   disk.usable – usable bytes (free bytes available to JVM)
+     */
+    @Test
+    void testDiskMetricsPublished() throws Exception {
+        MeterRegistry registry = MetricsRegistryFactory.create();
+        try {
+            SystemMetricsPublisher.bind(registry, warehouse.toString());
+            Thread.sleep(200);
+        } finally {
+            registry.close();
+        }
+        Thread.sleep(500);
+
+        String table = fullTableRef();
+
+        // disk.free must be present and positive
+        Long diskFreeRows = ConnectionPool.collectFirst(
+                "SELECT count(*) FROM %s WHERE name = 'disk.free' AND type = 'gauge'".formatted(table),
+                Long.class);
+        Assertions.assertTrue(diskFreeRows > 0,
+                "disk.free gauge rows must be present");
+
+        Double diskFree = ConnectionPool.collectFirst(
+                "SELECT max(value) FROM %s WHERE name = 'disk.free' AND type = 'gauge'".formatted(table),
+                Double.class);
+        Assertions.assertTrue(diskFree > 0,
+                "disk.free must be > 0 bytes");
+
+        // disk.total must be present and >= disk.free
+        Double diskTotal = ConnectionPool.collectFirst(
+                "SELECT max(value) FROM %s WHERE name = 'disk.total' AND type = 'gauge'".formatted(table),
+                Double.class);
+        Assertions.assertTrue(diskTotal > 0,
+                "disk.total must be > 0 bytes");
+        Assertions.assertTrue(diskTotal >= diskFree,
+                "disk.total must be >= disk.free");
+    }
+
     @AfterAll
     void cleanup() throws Exception {
         if (server != null) server.close();
@@ -134,6 +281,10 @@ public class HttpMetricDuckLakeIntegrationTest {
         }
 
         Files.createDirectories(path);
+    }
+
+    private String fullTableRef() {
+        return "%s.%s.%s".formatted(CATALOG_NAME, SCHEMA_NAME, TABLE_NAME);
     }
 
     private Path waitForMetricFile(String warehousePath) throws Exception {
