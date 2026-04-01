@@ -1,7 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import com.typesafe.config.Config;
-import io.dazzleduck.sql.common.ConfigConstants;
 
 import java.nio.file.Path;
 
@@ -28,8 +27,8 @@ public class NOOPIngestionTaskFactoryProvider implements IngestionTaskFactoryPro
     }
 
     @Override
-    public IngestionTaskFactory getIngestionTaskFactory() {
-        return new IngestionTaskFactory() {
+    public IngestionHandler getIngestionTaskFactory() {
+        return new IngestionHandler() {
             @Override
             public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
                 return PostIngestionTask.NOOP;

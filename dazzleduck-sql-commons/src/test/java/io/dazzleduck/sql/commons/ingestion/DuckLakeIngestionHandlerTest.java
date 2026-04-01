@@ -15,7 +15,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class DuckLakeIngestionTaskFactoryTest {
+class DuckLakeIngestionHandlerTest {
 
     @TempDir
     Path tempDir;
@@ -55,7 +55,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldResolveTargetPathFromCatalogOnConstruction() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         String path = factory.getTargetPath(QUEUE_ID);
         assertNotNull(path, "Expected resolved path, got null");
         assertFalse(path.isBlank());
@@ -65,7 +65,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldReturnNullTargetPathForUnknownQueueId() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         assertNull(factory.getTargetPath("unknown-queue"));
     }
 
@@ -75,7 +75,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldCreateTaskForDirectQueueIdMatch() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         var result = new IngestionResult(QUEUE_ID, 1L, "app", Map.of(), 0L, List.of());
         PostIngestionTask task = factory.createPostIngestionTask(result);
         assertNotNull(task);
@@ -89,7 +89,7 @@ class DuckLakeIngestionTaskFactoryTest {
     @Test
     void shouldCreateTaskUsingSuffixFallbackWhenQueueNameIsAPath() {
         // Mapping key is "events"; result queueName is a path whose last segment is "events"
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         String pathQueueName = "/tmp/otel-output/" + QUEUE_ID;
         var result = new IngestionResult(pathQueueName, 1L, "app", Map.of(), 0L, List.of());
         PostIngestionTask task = factory.createPostIngestionTask(result);
@@ -99,7 +99,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldCreateTaskUsingSuffixFallbackWithBackslashPath() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         String windowsPath = "C:\\output\\" + QUEUE_ID;
         var result = new IngestionResult(windowsPath, 1L, "app", Map.of(), 0L, List.of());
         PostIngestionTask task = factory.createPostIngestionTask(result);
@@ -113,7 +113,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldThrowForUnknownQueueIdWithNoSuffixMatch() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         var result = new IngestionResult("completely-unknown", 1L, "app", Map.of(), 0L, List.of());
         var ex = assertThrows(IllegalArgumentException.class,
                 () -> factory.createPostIngestionTask(result));
@@ -125,7 +125,7 @@ class DuckLakeIngestionTaskFactoryTest {
 
     @Test
     void shouldThrowWhenPathSuffixDoesNotMatchAnyMappingKey() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         // last segment is "other", not "events"
         var result = new IngestionResult("/tmp/output/other", 1L, "app", Map.of(), 0L, List.of());
         assertThrows(IllegalArgumentException.class, () -> factory.createPostIngestionTask(result));
@@ -138,26 +138,26 @@ class DuckLakeIngestionTaskFactoryTest {
     @Test
     void shouldReturnTransformationForKnownQueue() {
         String sql = "SELECT id, upper(msg) AS msg FROM __this";
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, sql)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, sql)));
         assertEquals(sql, factory.getTransformation(QUEUE_ID));
     }
 
     @Test
     void shouldReturnNullTransformationWhenNotConfigured() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         assertNull(factory.getTransformation(QUEUE_ID));
     }
 
     @Test
     void shouldReturnNullTransformationForUnknownQueue() {
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
         assertNull(factory.getTransformation("no-such-queue"));
     }
 
     @Test
     void shouldReturnTransformationViaSuffixFallback() {
         String sql = "SELECT * FROM __this WHERE id > 0";
-        var factory = new DuckLakeIngestionTaskFactory(Map.of(QUEUE_ID, mapping(QUEUE_ID, sql)));
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, sql)));
         assertEquals(sql, factory.getTransformation("/var/data/" + QUEUE_ID));
     }
 
@@ -176,7 +176,7 @@ class DuckLakeIngestionTaskFactoryTest {
                 "events", new QueueIdToTableMapping("events", CATALOG, SCHEMA, TABLE, Map.of(), null),
                 "metrics", new QueueIdToTableMapping("metrics", CATALOG, SCHEMA, table2, Map.of(), null)
         );
-        var factory = new DuckLakeIngestionTaskFactory(mappings);
+        var factory = new DuckLakeIngestionHandler(mappings);
 
         assertNotNull(factory.getTargetPath("events"));
         assertNotNull(factory.getTargetPath("metrics"));

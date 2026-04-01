@@ -33,6 +33,7 @@ public final class LogForwarderConfig {
 
     // Feature flags
     private final boolean enabled;
+    private final boolean captureCallerData;
 
     public LogForwarderConfig(
             String baseUrl,
@@ -52,7 +53,8 @@ public final class LogForwarderConfig {
             long retryIntervalMillis,
             List<String> project,
             List<String> partitionBy,
-            boolean enabled) {
+            boolean enabled,
+            boolean captureCallerData) {
         Objects.requireNonNull(baseUrl, "baseUrl must not be null");
         Objects.requireNonNull(username, "username must not be null");
         Objects.requireNonNull(password, "password must not be null");
@@ -79,6 +81,7 @@ public final class LogForwarderConfig {
         this.project = Collections.unmodifiableList(new ArrayList<>(project));
         this.partitionBy = Collections.unmodifiableList(new ArrayList<>(partitionBy));
         this.enabled = enabled;
+        this.captureCallerData = captureCallerData;
     }
 
     public String baseUrl() {
@@ -153,6 +156,10 @@ public final class LogForwarderConfig {
         return enabled;
     }
 
+    public boolean captureCallerData() {
+        return captureCallerData;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -166,6 +173,7 @@ public final class LogForwarderConfig {
                retryCount == that.retryCount &&
                retryIntervalMillis == that.retryIntervalMillis &&
                enabled == that.enabled &&
+               captureCallerData == that.captureCallerData &&
                Objects.equals(baseUrl, that.baseUrl) &&
                Objects.equals(username, that.username) &&
                Objects.equals(password, that.password) &&
@@ -182,7 +190,7 @@ public final class LogForwarderConfig {
         return Objects.hash(baseUrl, username, password, ingestionQueue, httpClientTimeout,
                 maxBufferSize, pollInterval, minBatchSize, maxBatchSize, maxSendInterval,
                 maxInMemorySize, maxOnDiskSize, retryCount, retryIntervalMillis,
-                project, partitionBy, enabled);
+                project, partitionBy, enabled, captureCallerData);
     }
 
     @Override
@@ -206,6 +214,7 @@ public final class LogForwarderConfig {
                ", project=" + project +
                ", partitionBy=" + partitionBy +
                ", enabled=" + enabled +
+               ", captureCallerData=" + captureCallerData +
                "]";
     }
 
@@ -232,6 +241,7 @@ public final class LogForwarderConfig {
         private List<String> project = Collections.emptyList();
         private List<String> partitionBy = Collections.emptyList();
         private boolean enabled = true;
+        private boolean captureCallerData = false;
 
         private Builder() {
         }
@@ -328,6 +338,11 @@ public final class LogForwarderConfig {
             return this;
         }
 
+        public Builder captureCallerData(boolean captureCallerData) {
+            this.captureCallerData = captureCallerData;
+            return this;
+        }
+
         public Builder claims(Map<String, String> claims) {
             this.claims = Objects.requireNonNull(claims);
             return this;
@@ -352,7 +367,8 @@ public final class LogForwarderConfig {
                     retryIntervalMillis,
                     project,
                     partitionBy,
-                    enabled
+                    enabled,
+                    captureCallerData
             );
         }
     }

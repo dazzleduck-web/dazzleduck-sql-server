@@ -80,13 +80,14 @@ public class OtelCollectorBenchmark {
 
         CollectorProperties props = new CollectorProperties();
         props.setGrpcPort(port);
-        props.setLogsOutputPath(logsDir.toString());
-        props.setTracesOutputPath(outputDir.resolve("traces").toString());
-        props.setMetricsOutputPath(outputDir.resolve("metrics").toString());
+        props.setLogIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                logsDir.toString(), java.util.List.of(), null, MIN_BUCKET_BYTES, 1000L));
+        props.setTraceIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                outputDir.resolve("traces").toString(), java.util.List.of(), null, MIN_BUCKET_BYTES, 1000L));
+        props.setMetricIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                outputDir.resolve("metrics").toString(), java.util.List.of(), null, MIN_BUCKET_BYTES, 1000L));
         props.setSecretKey(SECRET_KEY_BASE64);
         props.setUsers(Map.of("admin", "admin"));
-        props.setMinBucketSizeBytes(MIN_BUCKET_BYTES);  // 2 MB bucket
-        props.setMaxDelayMs(1000);    // 1s max delay
 
         OtelCollectorServer server = new OtelCollectorServer(props);
         server.start();

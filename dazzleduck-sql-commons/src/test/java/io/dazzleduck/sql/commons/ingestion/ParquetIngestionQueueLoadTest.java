@@ -254,7 +254,7 @@ public class ParquetIngestionQueueLoadTest {
         }
 
         // Create post-ingestion task factory (no-op for load testing)
-        var postTaskFactory = new IngestionTaskFactory() {
+        var postTaskFactory = new IngestionHandler() {
             @Override
             public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
                 return () -> {}; // No-op

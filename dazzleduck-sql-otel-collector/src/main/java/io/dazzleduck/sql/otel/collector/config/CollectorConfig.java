@@ -3,7 +3,7 @@ package io.dazzleduck.sql.otel.collector.config;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.dazzleduck.sql.commons.config.ConfigBasedProvider;
-import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactory;
+import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactoryProvider;
 import io.dazzleduck.sql.commons.ingestion.NOOPIngestionTaskFactoryProvider;
 import org.slf4j.Logger;
@@ -108,51 +108,61 @@ public class CollectorConfig {
         return getInt("grpc_port", 4317);
     }
 
-    public String getLogsOutputPath() {
-        return getString("logs_output_path", "./otel-logs");
-    }
-
-    public String getTracesOutputPath() {
-        return getString("traces_output_path", "./otel-traces");
-    }
-
-    public String getMetricsOutputPath() {
-        return getString("metrics_output_path", "./otel-metrics");
-    }
-
-    public long getMinBucketSizeBytes() {
-        return getLong("ingestion.min_bucket_size", 1_048_576L);
-    }
-
-    public long getMaxDelayMs() {
-        return getLong("ingestion.max_delay_ms", 5000);
-    }
-
-    public List<String> getPartitionBy() {
-        return getStringList("partition_by", List.of());
-    }
-
-    public String getTransformations() {
-        return getString("transformations", null);
-    }
-
     public String getStartupScript() {
         return getString("startup_script", "INSTALL arrow FROM community; LOAD arrow;");
     }
 
-    public IngestionTaskFactory getLogIngestionTaskFactory() {
-        return loadIngestionTaskFactory("log_ingestion_task_factory_provider", getLogsOutputPath());
+    public SignalIngestionConfig getLogIngestionConfig() {
+        return readSignalConfig("log_ingestion");
     }
 
-    public IngestionTaskFactory getTraceIngestionTaskFactory() {
-        return loadIngestionTaskFactory("trace_ingestion_task_factory_provider", getTracesOutputPath());
+    public SignalIngestionConfig getTraceIngestionConfig() {
+        return readSignalConfig("trace_ingestion");
     }
 
-    public IngestionTaskFactory getMetricIngestionTaskFactory() {
-        return loadIngestionTaskFactory("metric_ingestion_task_factory_provider", getMetricsOutputPath());
+    public SignalIngestionConfig getMetricIngestionConfig() {
+        return readSignalConfig("metric_ingestion");
     }
 
-    private IngestionTaskFactory loadIngestionTaskFactory(String providerKey, String defaultPath) {
+    private SignalIngestionConfig readSignalConfig(String signalKey) {
+        String prefix = CONFIG_PREFIX + "." + signalKey;
+        String outputPath = config.getString(prefix + ".output_path");
+        List<String> partitionBy = List.of();
+        String transformation = null;
+        long minBucketSizeBytes = getLong("ingestion.min_bucket_size", 1_048_576L);
+        long maxDelayMs = getLong("ingestion.max_delay_ms", 5000L);
+        try {
+            if (config.hasPath(prefix + ".partition_by")) {
+                partitionBy = config.getStringList(prefix + ".partition_by");
+            }
+            if (config.hasPath(prefix + ".transformation")) {
+                transformation = config.getString(prefix + ".transformation");
+            }
+            if (config.hasPath(prefix + ".min_bucket_size")) {
+                minBucketSizeBytes = config.getLong(prefix + ".min_bucket_size");
+            }
+            if (config.hasPath(prefix + ".max_delay_ms")) {
+                maxDelayMs = config.getLong(prefix + ".max_delay_ms");
+            }
+        } catch (Exception e) {
+            log.debug("Error reading signal config for {}: {}", signalKey, e.getMessage());
+        }
+        return new SignalIngestionConfig(outputPath, partitionBy, transformation, minBucketSizeBytes, maxDelayMs);
+    }
+
+    public IngestionHandler getLogIngestionTaskFactory() {
+        return loadIngestionTaskFactory("log_ingestion_task_factory_provider", getLogIngestionConfig().outputPath());
+    }
+
+    public IngestionHandler getTraceIngestionTaskFactory() {
+        return loadIngestionTaskFactory("trace_ingestion_task_factory_provider", getTraceIngestionConfig().outputPath());
+    }
+
+    public IngestionHandler getMetricIngestionTaskFactory() {
+        return loadIngestionTaskFactory("metric_ingestion_task_factory_provider", getMetricIngestionConfig().outputPath());
+    }
+
+    private IngestionHandler loadIngestionTaskFactory(String providerKey, String defaultPath) {
         try {
             var defaultProvider = new NOOPIngestionTaskFactoryProvider(defaultPath);
             var provider = ConfigBasedProvider.load(
@@ -211,13 +221,6 @@ public class CollectorConfig {
     public CollectorProperties toProperties() {
         CollectorProperties props = new CollectorProperties();
         props.setGrpcPort(getGrpcPort());
-        props.setLogsOutputPath(getLogsOutputPath());
-        props.setTracesOutputPath(getTracesOutputPath());
-        props.setMetricsOutputPath(getMetricsOutputPath());
-        props.setMinBucketSizeBytes(getMinBucketSizeBytes());
-        props.setMaxDelayMs(getMaxDelayMs());
-        props.setPartitionBy(getPartitionBy());
-        props.setTransformations(getTransformations());
         props.setStartupScript(getStartupScript());
         props.setAuthentication(getAuthentication());
         props.setSecretKey(getSecretKey());
@@ -225,6 +228,9 @@ public class CollectorConfig {
         props.setUsers(getUsers());
         props.setJwtExpiration(getJwtExpiration());
         props.setServiceName(getServiceName());
+        props.setLogIngestionConfig(getLogIngestionConfig());
+        props.setTraceIngestionConfig(getTraceIngestionConfig());
+        props.setMetricIngestionConfig(getMetricIngestionConfig());
         props.setLogIngestionTaskFactory(getLogIngestionTaskFactory());
         props.setTraceIngestionTaskFactory(getTraceIngestionTaskFactory());
         props.setMetricIngestionTaskFactory(getMetricIngestionTaskFactory());

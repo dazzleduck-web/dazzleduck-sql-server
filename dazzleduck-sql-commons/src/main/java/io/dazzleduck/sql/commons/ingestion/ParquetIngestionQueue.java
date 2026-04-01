@@ -27,10 +27,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
     private final String outputPath;
     private final String queueId;
-    private final IngestionTaskFactory postIngestionTaskFactory;
+    private final IngestionHandler postIngestionHandler;
     private final String applicationId;
     private final String inputFormat;
-    private final String transformation;
+    private volatile String transformation;
 
 
 
@@ -45,7 +45,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * @param maxBatches      maximum number of batches in a bucket. Write will be performed when this limit is reached
      * @param maxPendingWrite maximum pending bytes allowed before rejecting new batches
      * @param maxDelay        write will be performed just after this delay.
-     * @param postIngestionTaskFactory
+     * @param postIngestionHandler
      * @param executorService Executor service.
      * @param clock
      */
@@ -58,11 +58,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                                  int maxBatches,
                                  long maxPendingWrite,
                                  Duration maxDelay,
-                                 IngestionTaskFactory postIngestionTaskFactory,
+                                 IngestionHandler postIngestionHandler,
                                  ScheduledExecutorService executorService,
                                  Clock clock) {
         this(applicationId, inputFormat, outputPath, ingestionQueue, minBucketSize, maxBucketSize,
-                maxBatches, maxPendingWrite, maxDelay, postIngestionTaskFactory, executorService, clock, null);
+                maxBatches, maxPendingWrite, maxDelay, postIngestionHandler, executorService, clock, null);
     }
 
     public ParquetIngestionQueue(String applicationId,
@@ -74,14 +74,14 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                                  int maxBatches,
                                  long maxPendingWrite,
                                  Duration maxDelay,
-                                 IngestionTaskFactory postIngestionTaskFactory,
+                                 IngestionHandler postIngestionHandler,
                                  ScheduledExecutorService executorService,
                                  Clock clock,
                                  String transformation) {
         super(ingestionQueue, minBucketSize, maxBucketSize, maxBatches, maxPendingWrite, maxDelay, executorService, clock);
         this.outputPath = outputPath;
         this.queueId = ingestionQueue;
-        this.postIngestionTaskFactory = postIngestionTaskFactory;
+        this.postIngestionHandler = postIngestionHandler;
         this.applicationId = applicationId;
         this.inputFormat = inputFormat;
         this.transformation = transformation;
@@ -93,7 +93,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 queueId, writeTask.bucket().batches().size(), outputPath);
         try {
             IngestionResult ingestionResult = tryWrite(writeTask);
-            var postIngestionTask = postIngestionTaskFactory.createPostIngestionTask(ingestionResult);
+            var postIngestionTask = postIngestionHandler.createPostIngestionTask(ingestionResult);
             postIngestionTask.execute();
             writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
         } catch (Exception e) {
@@ -118,6 +118,17 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     logger.warn("Failed to delete temporary input file: {}", filePath, e);
                 }
             });
+        }
+    }
+
+    public void setTransformation(String transformation) {
+        validateTransformation(transformation);
+        this.transformation = transformation;
+    }
+
+    protected void validateTransformation(String transformation) {
+        if (transformation != null && !transformation.isBlank()) {
+            DuckLakeIngestionTaskFactoryProvider.validateTransformation(queueId, transformation);
         }
     }
 
@@ -197,7 +208,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 }
             }
         }
-        logger.info("COPY completed for queue '{}': {} rows written, {} files: {}",
+        logger.debug("COPY completed for queue '{}': {} rows written, {} files: {}",
                 queueId, count, files.size(), files);
         return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
                 writeTask.bucket().getProducerMaxBatchId(),

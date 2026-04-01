@@ -160,6 +160,11 @@ public class ErrorHandling {
             handleSQLSyntaxErrorException(listener, e);
         } else if (t instanceof SQLException s) {
             handleSqlException(listener, s);
+        } else if (t instanceof IllegalArgumentException e) {
+            listener.onError(CallStatus.INVALID_ARGUMENT
+                    .withDescription(e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException());
         } else if (t instanceof Exception e) {
             var exception = CallStatus.INTERNAL
                     .withDescription(e.getMessage())

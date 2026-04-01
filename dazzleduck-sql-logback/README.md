@@ -8,7 +8,6 @@ Apache Arrow format.
 - Captures log events via standard SLF4J/Logback
 - Buffers logs in-memory, spills to disk, then sends in Arrow format
 - Supports batching, retries, and configurable flush intervals
-- Supports column projection and date-based partitioning
 - Standard Logback XML configuration — works with any filename via `-Dlogback.configurationFile`
 
 ## Requirements
@@ -55,8 +54,6 @@ Create a standard Logback XML file (any filename) in `src/main/resources/`:
             <environment>production</environment>
         </claims>
         <ingestionQueue>app-logs</ingestionQueue>
-        <project>*, CAST(timestamp AS DATE) AS date</project>
-        <partitionBy>date</partitionBy>
     </appender>
 
     <!-- Exclude internal packages to prevent infinite loops -->
@@ -199,26 +196,36 @@ All properties that can appear inside the `<appender>` element:
 | `claims` | Custom JWT claims for row-level security | `{}` |
 | `ingestionQueue` | Target ingestion queue name | `log` |
 | `minBatchSize` | Min bytes to accumulate before sending | `1024` |
-| `project` | Comma-separated SQL projection expressions | _(all columns)_ |
 | `partitionBy` | Comma-separated partition column names | _(none)_ |
+| `captureCallerData` | Capture call-site class/method/file/line (triggers a stack walk per log call) | `false` |
 | `configFile` | Path to a TypeSafe Config `.conf` file (overrides all inline properties) | _(none)_ |
 
-### Projection and Partitioning
+### Partitioning
 
-Add derived columns with `project` and split Parquet output by column with `partitionBy`:
+Split Parquet output by column with `partitionBy`:
 
 ```xml
-<!-- Keep all columns, add a date column derived from timestamp -->
-<project>*, CAST(timestamp AS DATE) AS date</project>
-<!-- Write one Parquet file per date -->
 <partitionBy>date</partitionBy>
 ```
 
-Add a static host label:
+### Server-side Transformations
+
+Derived columns (e.g. `application_host`, `date`) are computed server-side via the
+`transformation` setting in the DuckLake ingestion task mapping, not by the client.
+Example server configuration:
+
+```
+ingestion_task_factory_provider.ingestion_queue_table_mapping.0.transformation=\
+  SELECT *, 'my-host' AS application_host, CAST(timestamp AS DATE) AS date FROM __this
+```
+
+### Caller Data
+
+When `captureCallerData` is enabled, four additional columns are populated per log entry.
+This is disabled by default because it triggers a stack walk on every log call:
 
 ```xml
-<project>*, 'my-host' AS host, CAST(timestamp AS DATE) AS date</project>
-<partitionBy>date</partitionBy>
+<captureCallerData>true</captureCallerData>
 ```
 
 ### Using a TypeSafe Config File
@@ -242,14 +249,41 @@ Each forwarded log entry contains the following columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `s_no` | Long | Global sequence number |
-| `timestamp` | Timestamp | Event time (millisecond precision) |
-| `level` | String | Log level (TRACE, DEBUG, INFO, WARN, ERROR) |
-| `logger` | String | Logger name |
-| `thread` | String | Thread name |
-| `message` | String | Formatted log message |
-| `mdc` | Map | MDC context key/value pairs |
-| `marker` | String | Log marker (if present) |
+| `sequence_number` | BIGINT | Logback built-in sequence number |
+| `timestamp` | TIMESTAMP | Event time (millisecond precision) |
+| `level` | VARCHAR | Log level (TRACE, DEBUG, INFO, WARN, ERROR) |
+| `logger` | VARCHAR | Logger name |
+| `thread` | VARCHAR | Thread name |
+| `message` | VARCHAR | Formatted log message |
+| `mdc` | MAP(VARCHAR, VARCHAR) | MDC context key/value pairs |
+| `throwable` | VARCHAR | Formatted stack trace (null if no exception) |
+| `marker` | VARCHAR[] | SLF4J markers (null if none) |
+| `key_value_pairs` | MAP(VARCHAR, VARCHAR) | SLF4J 2.x fluent key-value pairs (null if none) |
+| `caller_class` | VARCHAR | Call-site class name (null if `captureCallerData` is disabled) |
+| `caller_method` | VARCHAR | Call-site method name (null if `captureCallerData` is disabled) |
+| `caller_file` | VARCHAR | Call-site source file (null if `captureCallerData` is disabled) |
+| `caller_line` | INTEGER | Call-site line number (null if `captureCallerData` is disabled) |
+
+### DuckDB Table DDL
+
+```sql
+CREATE TABLE logs (
+    sequence_number BIGINT,
+    timestamp       TIMESTAMP,
+    level           VARCHAR,
+    logger          VARCHAR,
+    thread          VARCHAR,
+    message         VARCHAR,
+    mdc             MAP(VARCHAR, VARCHAR),
+    throwable       VARCHAR,
+    marker          VARCHAR[],
+    key_value_pairs MAP(VARCHAR, VARCHAR),
+    caller_class    VARCHAR,
+    caller_method   VARCHAR,
+    caller_file     VARCHAR,
+    caller_line     INTEGER
+);
+```
 
 ---
 
@@ -308,8 +342,8 @@ LogForwarderConfig config = LogForwarderConfig.builder()
             "environment", "production"
         ))
         .ingestionQueue("log")
-        .project(List.of("*", "CAST(timestamp AS DATE) AS date"))
         .partitionBy(List.of("date"))
+        .captureCallerData(false) // set true to capture class/method/file/line
         .build();
 
 LogForwarder forwarder = new LogForwarder(config);

@@ -4,7 +4,7 @@ import com.typesafe.config.Config;
 import io.dazzleduck.sql.commons.config.ConfigBasedProvider;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
-import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactory;
+import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactoryProvider;
 import io.dazzleduck.sql.flight.FlightRecorder;
 import io.dazzleduck.sql.flight.SimpleFlightRecorder;
@@ -106,7 +106,7 @@ public final class FlightSqlProducerFactory {
         private Path tempWriteDir;
         private AccessMode accessMode;
         private BufferAllocator allocator;
-        private IngestionTaskFactory ingestionTaskFactory;
+        private IngestionHandler ingestionHandler;
         private QueryOptimizer queryOptimizer;
         private ScheduledExecutorService scheduledExecutorService;
         private Duration queryTimeout;
@@ -155,7 +155,7 @@ public final class FlightSqlProducerFactory {
             // Load providers (query optimizer, post-ingestion factory)
             try {
                 this.queryOptimizer = loadQueryOptimizer(config);
-                this.ingestionTaskFactory = loadIngestionTaskFactory(config);
+                this.ingestionHandler = loadIngestionTaskFactory(config);
             } catch (Exception e) {
                 throw new RuntimeException("Failed to load providers from config", e);
             }
@@ -221,8 +221,8 @@ public final class FlightSqlProducerFactory {
         /**
          * @return the configured post-ingestion task factory
          */
-        public IngestionTaskFactory getIngestionTaskFactory() {
-            return ingestionTaskFactory;
+        public IngestionHandler getIngestionTaskFactory() {
+            return ingestionHandler;
         }
 
         /**
@@ -317,8 +317,8 @@ public final class FlightSqlProducerFactory {
          * @param factory the post-ingestion task factory
          * @return this builder
          */
-        public ProducerBuilder withPostIngestionTaskFactory(IngestionTaskFactory factory) {
-            this.ingestionTaskFactory = factory;
+        public ProducerBuilder withPostIngestionTaskFactory(IngestionHandler factory) {
+            this.ingestionHandler = factory;
             return this;
         }
 
@@ -421,7 +421,7 @@ public final class FlightSqlProducerFactory {
                     finalAllocator,
                     warehousePath,
                     tempWriteDir,
-                        ingestionTaskFactory,
+                        ingestionHandler,
                     finalExecutorService,
                     queryTimeout,
                     clock,
@@ -439,7 +439,7 @@ public final class FlightSqlProducerFactory {
                     warehousePath,
                     accessMode,
                     tempWriteDir,
-                        ingestionTaskFactory,
+                        ingestionHandler,
                     finalExecutorService,
                     queryTimeout,
                     clock,
@@ -481,12 +481,12 @@ public final class FlightSqlProducerFactory {
                 .toList();
         }
 
-        private static IngestionTaskFactory loadIngestionTaskFactory(Config config) throws Exception {
+        private static IngestionHandler loadIngestionTaskFactory(Config config) throws Exception {
             IngestionTaskFactoryProvider provider = ConfigBasedProvider.load(
                 config,
                 ConfigConstants.INGESTION_CONFIG_PREFIX
             );
-            IngestionTaskFactory factory = provider.getIngestionTaskFactory();
+            IngestionHandler factory = provider.getIngestionTaskFactory();
             provider.validate();
             return factory;
         }

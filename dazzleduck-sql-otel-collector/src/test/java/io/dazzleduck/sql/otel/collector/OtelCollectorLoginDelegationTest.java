@@ -118,7 +118,8 @@ public class OtelCollectorLoginDelegationTest {
 
             CollectorProperties props = new CollectorProperties();
             props.setGrpcPort(otelPort);
-            props.setLogsOutputPath(outputPath.toString());
+            props.setLogIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                    outputPath.toString(), java.util.List.of(), null, 1_048_576L, 5000L));
             props.setAuthentication("jwt");
             props.setSecretKey(SECRET_KEY_BASE64);
             props.setLoginUrl("http://localhost:" + stubPort + "/v1/login");
@@ -247,7 +248,8 @@ public class OtelCollectorLoginDelegationTest {
 
             CollectorProperties props = new CollectorProperties();
             props.setGrpcPort(otelPort);
-            props.setLogsOutputPath(outputPath.toString());
+            props.setLogIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                    outputPath.toString(), java.util.List.of(), null, 1_048_576L, 5000L));
             props.setAuthentication("jwt");
             props.setSecretKey(SECRET_KEY_BASE64);
             props.setUsers(Map.of(VALID_USER, VALID_PASS));
@@ -324,12 +326,10 @@ public class OtelCollectorLoginDelegationTest {
 
             CollectorProperties props = new CollectorProperties();
             props.setGrpcPort(otelPort);
-            props.setLogsOutputPath(outputPath.toString());
+            props.setLogIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                    outputPath.toString(), java.util.List.of(), "severity_number * 2 as doubled_severity", 1L, 60_000L));
             props.setAuthentication("jwt");
             props.setSecretKey(SECRET_KEY_BASE64);
-            props.setMinBucketSizeBytes(1);       // flush synchronously after each record
-            props.setMaxDelayMs(60_000); // disable timer-based flush
-            props.setTransformations("severity_number * 2 as doubled_severity");
 
             otelServer = new OtelCollectorServer(props);
             otelServer.start();
@@ -400,11 +400,10 @@ public class OtelCollectorLoginDelegationTest {
 
             CollectorProperties props = new CollectorProperties();
             props.setGrpcPort(otelPort);
-            props.setTracesOutputPath(tracesOutputPath.toString());
+            props.setTraceIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                    tracesOutputPath.toString(), java.util.List.of(), null, 1L, 60_000L));
             props.setAuthentication("jwt");
             props.setSecretKey(SECRET_KEY_BASE64);
-            props.setMinBucketSizeBytes(1);
-            props.setMaxDelayMs(60_000);
 
             otelServer = new OtelCollectorServer(props);
             otelServer.start();
@@ -480,11 +479,10 @@ public class OtelCollectorLoginDelegationTest {
 
             CollectorProperties props = new CollectorProperties();
             props.setGrpcPort(otelPort);
-            props.setMetricsOutputPath(metricsOutputPath.toString());
+            props.setMetricIngestionConfig(new io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig(
+                    metricsOutputPath.toString(), java.util.List.of(), null, 1L, 60_000L));
             props.setAuthentication("jwt");
             props.setSecretKey(SECRET_KEY_BASE64);
-            props.setMinBucketSizeBytes(1);
-            props.setMaxDelayMs(60_000);
 
             otelServer = new OtelCollectorServer(props);
             otelServer.start();

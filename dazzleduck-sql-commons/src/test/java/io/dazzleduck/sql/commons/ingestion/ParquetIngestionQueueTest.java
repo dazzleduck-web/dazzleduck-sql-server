@@ -174,7 +174,7 @@ public class ParquetIngestionQueueTest {
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
 
         AtomicInteger postTaskCount = new AtomicInteger(0);
-        var postTaskFactory = new IngestionTaskFactory() {
+        var postTaskFactory = new IngestionHandler() {
             @Override
             public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
                 return postTaskCount::incrementAndGet;
@@ -551,8 +551,8 @@ public class ParquetIngestionQueueTest {
         );
     }
 
-    private IngestionTaskFactory createPostTaskFactory(AtomicBoolean executed, boolean shouldFail) {
-        return new IngestionTaskFactory() {
+    private IngestionHandler createPostTaskFactory(AtomicBoolean executed, boolean shouldFail) {
+        return new IngestionHandler() {
             @Override
             public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
                 return new PostIngestionTask() {

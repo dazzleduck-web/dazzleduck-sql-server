@@ -53,7 +53,7 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
             "org.apache.arrow"
     };
 
-    // Global sequence number counter for unique s_no values across all appender instances
+    // Counter used for error/warn throttling only (not for LogEntry sequence numbers)
     private static final AtomicLong sequenceCounter = new AtomicLong(0);
 
     /**
@@ -63,6 +63,10 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
 
     // Per-instance forwarder - each appender has its own independent forwarder
     private volatile LogForwarder forwarder;
+
+    // Whether to capture call-site caller data (class/method/file/line) for each log entry.
+    // Disabled by default — enabling triggers a stack walk on every log call.
+    private volatile boolean captureCallerData = false;
 
     // Optional path to a dedicated .conf file for this appender.
     // When set, all config is loaded from this file and inline properties are ignored.
@@ -151,6 +155,14 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
     }
 
     /**
+     * Enable or disable capture of call-site caller data (class, method, file, line).
+     * Disabled by default. Enabling this triggers a stack walk on every log call.
+     */
+    public void setCaptureCallerData(boolean captureCallerData) {
+        this.captureCallerData = captureCallerData;
+    }
+
+    /**
      * Check if forwarding is enabled.
      *
      * @return true if enabled
@@ -174,6 +186,7 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
             if (configFile != null && !configFile.isEmpty()) {
                 addInfo("Initializing LogForwardingAppender from configFile=" + configFile);
                 LogForwarderConfig config = LogForwarderConfigFactory.createConfig(configFile);
+                this.captureCallerData = config.captureCallerData();
                 forwarder = new LogForwarder(config);
                 addInfo("LogForwardingAppender successfully initialized from " + configFile);
             } else if (baseUrl == null || baseUrl.isEmpty()) {
@@ -195,6 +208,7 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
                         .minBatchSize(minBatchSize)
                         .project(project)
                         .partitionBy(partitionBy)
+                        .captureCallerData(captureCallerData)
                         .build();
                 forwarder = new LogForwarder(config);
                 addInfo("LogForwardingAppender successfully initialized");
@@ -237,13 +251,13 @@ public class LogForwardingAppender extends AppenderBase<ILoggingEvent> {
             return;
         }
 
-        LogEntry entry = LogEntry.from(sequenceCounter.incrementAndGet(), event);
+        long seq = sequenceCounter.incrementAndGet();
+        LogEntry entry = LogEntry.from(event, captureCallerData);
 
         // Add directly to forwarder - it handles batching via ArrowProducer
         try {
             if (!forwarder.addLogEntry(entry)) {
                 // Queue full or forwarder not running - log this warning periodically
-                long seq = sequenceCounter.get();
                 if (seq == 1 || seq % 100 == 0) {
                     addWarn("Log forwarder queue full, dropping entry (seq=" + seq + ")");
                 }

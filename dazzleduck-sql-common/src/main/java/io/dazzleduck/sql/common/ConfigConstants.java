@@ -95,6 +95,7 @@ public class ConfigConstants {
 
     // Feature flags
     public static final String ENABLED_KEY = "enabled";
+    public static final String CAPTURE_CALLER_DATA_KEY = "capture_caller_data";
 
     // Metrics specific
     public static final String STEP_INTERVAL_MS_KEY = "step_interval_ms";

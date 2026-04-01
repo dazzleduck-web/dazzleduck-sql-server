@@ -19,7 +19,6 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -182,7 +181,7 @@ class DuckLakeIngestionIntegrationTest {
         // Mapping key matches the last segment of the output path ("events")
         var mappings = Map.of(TABLE,
                 new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null));
-        var factory = new DuckLakeIngestionTaskFactory(mappings);
+        var factory = new DuckLakeIngestionHandler(mappings);
         var scheduler = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
 
@@ -225,9 +224,9 @@ class DuckLakeIngestionIntegrationTest {
         return file;
     }
 
-    private DuckLakeIngestionTaskFactory factoryFor(String table, String transformation) {
+    private DuckLakeIngestionHandler factoryFor(String table, String transformation) {
         var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, table, Map.of(), transformation);
-        return new DuckLakeIngestionTaskFactory(Map.of(TABLE, mapping));
+        return new DuckLakeIngestionHandler(Map.of(TABLE, mapping));
     }
 
     private Batch<String> batch(Path file, long batchId, long size) {
@@ -235,7 +234,7 @@ class DuckLakeIngestionIntegrationTest {
                 "producer1", batchId, size, "parquet", Instant.now());
     }
 
-    private ParquetIngestionQueue queue(DuckLakeIngestionTaskFactory factory,
+    private ParquetIngestionQueue queue(DuckLakeIngestionHandler factory,
                                         DeterministicScheduler scheduler,
                                         MutableClock clock) {
         return new ParquetIngestionQueue(
@@ -245,10 +244,10 @@ class DuckLakeIngestionIntegrationTest {
                 Duration.ofSeconds(5), factory, scheduler, clock);
     }
 
-    private ParquetIngestionQueue queueWithTransformation(DuckLakeIngestionTaskFactory factory,
-                                                           String transformation,
-                                                           DeterministicScheduler scheduler,
-                                                           MutableClock clock) {
+    private ParquetIngestionQueue queueWithTransformation(DuckLakeIngestionHandler factory,
+                                                          String transformation,
+                                                          DeterministicScheduler scheduler,
+                                                          MutableClock clock) {
         return new ParquetIngestionQueue(
                 "test-app", "parquet",
                 outputDir.toString(), TABLE,

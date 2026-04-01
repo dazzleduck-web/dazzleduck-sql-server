@@ -1,9 +1,10 @@
 package io.dazzleduck.sql.otel.collector;
 
 import io.dazzleduck.sql.commons.ingestion.Batch;
-import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactory;
+import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.ParquetIngestionQueue;
 import io.dazzleduck.sql.commons.ingestion.Stats;
+import io.dazzleduck.sql.otel.collector.config.SignalIngestionConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Accepts Arrow batches from OTLP services, spills each batch to a temp Arrow
@@ -30,31 +32,35 @@ import java.util.concurrent.ScheduledExecutorService;
  *
  * <p>Flush is triggered when accumulated file bytes reach {@code minBucketSizeBytes}
  * or after {@code maxDelayMs} elapses since the first batch in the current bucket.
+ *
+ * <p>The transformation is refreshed every 2 minutes from
+ * {@link IngestionHandler#getTransformation(String)} using the signal's queue ID.
  */
 public class SignalWriter implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(SignalWriter.class);
 
-    private static final long MAX_BUCKET_SIZE  = 100L * 1024 * 1024; // 100 MB
+    private static final long MAX_BUCKET_SIZE   = 100L * 1024 * 1024; // 100 MB
     private static final long MAX_PENDING_WRITE = 500L * 1024 * 1024; // 500 MB
+    private static final long TRANSFORMATION_REFRESH_MINUTES = 2;
 
+    private final String queueId;
     private final String outputPath;
     private final ParquetIngestionQueue queue;
     private final String[] partitions;
     private final ScheduledExecutorService scheduler;
 
-    public SignalWriter(String outputPath, List<String> partitionBy, String transformations,
-                        long minBucketSizeBytes, long maxDelayMs,
-                        IngestionTaskFactory ingestionTaskFactory) throws IOException {
-        this.outputPath = outputPath;
+    public SignalWriter(String queueId, SignalIngestionConfig config,
+                        IngestionHandler ingestionHandler) throws IOException {
+        this.queueId = queueId;
+        this.outputPath = config.outputPath();
         Files.createDirectories(Path.of(outputPath));
-        this.partitions = partitionBy.toArray(new String[0]);
-        // Build a transformation SQL for the ParquetIngestionQueue.
-        // Otel transformations are additive (SELECT *, <expr> FROM __this).
-        String queueTransformation = (transformations != null && !transformations.isBlank())
-                ? "SELECT *, " + transformations + " FROM __this" : null;
+        this.partitions = config.partitionBy().toArray(new String[0]);
+
+        String queueTransformation = toQueueTransformation(config.transformation());
+
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "otel-signal-scheduler[" + outputPath + "]");
+            Thread t = new Thread(r, "otel-signal-scheduler[" + queueId + "]");
             t.setDaemon(true);
             return t;
         });
@@ -63,17 +69,28 @@ public class SignalWriter implements Closeable {
                 "otel-collector",
                 "arrow",
                 outputPath,
-                outputPath,
-                minBucketSizeBytes,
+                queueId,
+                config.minBucketSizeBytes(),
                 MAX_BUCKET_SIZE,
                 Integer.MAX_VALUE,
                 MAX_PENDING_WRITE,
-                Duration.ofMillis(maxDelayMs),
-                ingestionTaskFactory,
+                Duration.ofMillis(config.maxDelayMs()),
+                ingestionHandler,
                 scheduler,
                 Clock.systemUTC(),
                 queueTransformation
         );
+
+        // Refresh transformation from the handler every 2 minutes.
+        // Allows DuckLake or ServiceIngestionHandler to push updates at runtime.
+        scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                String updated = ingestionHandler.getTransformation(queueId);
+                queue.setTransformation(toQueueTransformation(updated));
+            } catch (Exception e) {
+                log.warn("Failed to refresh transformation for signal '{}': {}", queueId, e.getMessage());
+            }
+        }, TRANSFORMATION_REFRESH_MINUTES, TRANSFORMATION_REFRESH_MINUTES, TimeUnit.MINUTES);
     }
 
     /**
@@ -108,9 +125,19 @@ public class SignalWriter implements Closeable {
         try {
             queue.close();
         } catch (Exception e) {
-            log.warn("Error closing ingestion queue for {}", outputPath, e);
+            log.warn("Error closing ingestion queue for '{}'", queueId, e);
         }
         scheduler.shutdown();
-        log.info("SignalWriter[{}] closed", outputPath);
+        log.info("SignalWriter[{}] closed", queueId);
+    }
+
+    /**
+     * Converts a user-supplied transformation expression (comma-separated SQL expressions)
+     * into the full CTE-compatible SQL expected by ParquetIngestionQueue.
+     * Returns null if the transformation is blank.
+     */
+    private static String toQueueTransformation(String transformation) {
+        if (transformation == null || transformation.isBlank()) return null;
+        return "SELECT *, " + transformation + " FROM __this";
     }
 }

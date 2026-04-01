@@ -49,13 +49,20 @@ public class LogForwardingIntegrationTest {
                 " (DATA_PATH '" + warehouse + "/" + DUCKLAKE_DATA_DIR + "');\n" +
                 "USE " + CATALOG_NAME + ";\n" +
                 "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " (\n" +
-                "    s_no BIGINT,\n" +
+                "    sequence_number BIGINT,\n" +
                 "    timestamp TIMESTAMP,\n" +
                 "    level VARCHAR,\n" +
                 "    logger VARCHAR,\n" +
                 "    thread VARCHAR,\n" +
                 "    message VARCHAR,\n" +
                 "    mdc MAP(VARCHAR, VARCHAR),\n" +
+                "    throwable VARCHAR,\n" +
+                "    marker VARCHAR[],\n" +
+                "    key_value_pairs MAP(VARCHAR, VARCHAR),\n" +
+                "    caller_class VARCHAR,\n" +
+                "    caller_method VARCHAR,\n" +
+                "    caller_file VARCHAR,\n" +
+                "    caller_line INTEGER,\n" +
                 "    application_host VARCHAR,\n" +
                 "    date DATE\n" +
                 ");\n";

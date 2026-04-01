@@ -52,14 +52,15 @@ public class OtelCollectorMetrics {
     private final LongAdder metricErrors     = new LongAdder();
     private final Timer     metricExportTimer;
 
-    public OtelCollectorMetrics(MeterRegistry registry, long maxDelayMs) {
+    public OtelCollectorMetrics(MeterRegistry registry,
+                                long logMaxDelayMs, long traceMaxDelayMs, long metricMaxDelayMs) {
         this.registry = registry;
         registerExportCounters("logs",    logRequests,    logRecords,      logErrors);
         registerExportCounters("traces",  traceRequests,  traceSpans,      traceErrors);
         registerExportCounters("metrics", metricRequests, metricDataPoints, metricErrors);
-        logExportTimer    = buildExportTimer("logs",    maxDelayMs);
-        traceExportTimer  = buildExportTimer("traces",  maxDelayMs);
-        metricExportTimer = buildExportTimer("metrics", maxDelayMs);
+        logExportTimer    = buildExportTimer("logs",    logMaxDelayMs);
+        traceExportTimer  = buildExportTimer("traces",  traceMaxDelayMs);
+        metricExportTimer = buildExportTimer("metrics", metricMaxDelayMs);
     }
 
     private Timer buildExportTimer(String signal, long maxDelayMs) {

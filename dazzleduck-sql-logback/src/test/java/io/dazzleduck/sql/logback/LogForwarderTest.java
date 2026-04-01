@@ -104,7 +104,8 @@ class LogForwarderTest {
                 "INFO",
                 "TestLogger",
                 "main",
-                message
+                message,
+                null, null, null, null, null
         );
     }
 }

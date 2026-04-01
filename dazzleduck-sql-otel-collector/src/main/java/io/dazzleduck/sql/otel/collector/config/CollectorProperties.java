@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.otel.collector.config;
 
-import io.dazzleduck.sql.commons.ingestion.IngestionTaskFactory;
+import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.NOOPIngestionTaskFactoryProvider;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -13,20 +13,19 @@ import java.util.Map;
 public class CollectorProperties {
 
     private int grpcPort = 4317;
-    private String logsOutputPath = "./otel-logs";
-    private String tracesOutputPath = "./otel-traces";
-    private String metricsOutputPath = "./otel-metrics";
-    private long minBucketSizeBytes = 1_048_576; // 1 MB
-    private long maxDelayMs = 5000;
-    private IngestionTaskFactory logIngestionTaskFactory =
-            new NOOPIngestionTaskFactoryProvider(logsOutputPath).getIngestionTaskFactory();
-    private IngestionTaskFactory traceIngestionTaskFactory =
-            new NOOPIngestionTaskFactoryProvider(tracesOutputPath).getIngestionTaskFactory();
-    private IngestionTaskFactory metricIngestionTaskFactory =
-            new NOOPIngestionTaskFactoryProvider(metricsOutputPath).getIngestionTaskFactory();
+    private SignalIngestionConfig logIngestionConfig =
+            new SignalIngestionConfig("./otel-logs", List.of(), null, 1_048_576L, 5000L);
+    private SignalIngestionConfig traceIngestionConfig =
+            new SignalIngestionConfig("./otel-traces", List.of(), null, 1_048_576L, 5000L);
+    private SignalIngestionConfig metricIngestionConfig =
+            new SignalIngestionConfig("./otel-metrics", List.of(), null, 1_048_576L, 5000L);
+    private IngestionHandler logIngestionHandler =
+            new NOOPIngestionTaskFactoryProvider("./otel-logs").getIngestionTaskFactory();
+    private IngestionHandler traceIngestionHandler =
+            new NOOPIngestionTaskFactoryProvider("./otel-traces").getIngestionTaskFactory();
+    private IngestionHandler metricIngestionHandler =
+            new NOOPIngestionTaskFactoryProvider("./otel-metrics").getIngestionTaskFactory();
     private String startupScript = "INSTALL arrow FROM community; LOAD arrow;";
-    private List<String> partitionBy = List.of();
-    private String transformations = null;
     private String serviceName = "open-telemetry-collector";
     private String authentication = "jwt";
     private String secretKey = null;
@@ -43,84 +42,52 @@ public class CollectorProperties {
         this.grpcPort = grpcPort;
     }
 
-    public String getLogsOutputPath() {
-        return logsOutputPath;
+    public SignalIngestionConfig getLogIngestionConfig() {
+        return logIngestionConfig;
     }
 
-    public void setLogsOutputPath(String logsOutputPath) {
-        this.logsOutputPath = logsOutputPath;
+    public void setLogIngestionConfig(SignalIngestionConfig logIngestionConfig) {
+        this.logIngestionConfig = logIngestionConfig;
     }
 
-    public String getTracesOutputPath() {
-        return tracesOutputPath;
+    public SignalIngestionConfig getTraceIngestionConfig() {
+        return traceIngestionConfig;
     }
 
-    public void setTracesOutputPath(String tracesOutputPath) {
-        this.tracesOutputPath = tracesOutputPath;
+    public void setTraceIngestionConfig(SignalIngestionConfig traceIngestionConfig) {
+        this.traceIngestionConfig = traceIngestionConfig;
     }
 
-    public String getMetricsOutputPath() {
-        return metricsOutputPath;
+    public SignalIngestionConfig getMetricIngestionConfig() {
+        return metricIngestionConfig;
     }
 
-    public void setMetricsOutputPath(String metricsOutputPath) {
-        this.metricsOutputPath = metricsOutputPath;
+    public void setMetricIngestionConfig(SignalIngestionConfig metricIngestionConfig) {
+        this.metricIngestionConfig = metricIngestionConfig;
     }
 
-    public IngestionTaskFactory getLogIngestionTaskFactory() {
-        return logIngestionTaskFactory;
+    public IngestionHandler getLogIngestionTaskFactory() {
+        return logIngestionHandler;
     }
 
-    public void setLogIngestionTaskFactory(IngestionTaskFactory logIngestionTaskFactory) {
-        this.logIngestionTaskFactory = logIngestionTaskFactory;
+    public void setLogIngestionTaskFactory(IngestionHandler logIngestionHandler) {
+        this.logIngestionHandler = logIngestionHandler;
     }
 
-    public IngestionTaskFactory getTraceIngestionTaskFactory() {
-        return traceIngestionTaskFactory;
+    public IngestionHandler getTraceIngestionTaskFactory() {
+        return traceIngestionHandler;
     }
 
-    public void setTraceIngestionTaskFactory(IngestionTaskFactory traceIngestionTaskFactory) {
-        this.traceIngestionTaskFactory = traceIngestionTaskFactory;
+    public void setTraceIngestionTaskFactory(IngestionHandler traceIngestionHandler) {
+        this.traceIngestionHandler = traceIngestionHandler;
     }
 
-    public IngestionTaskFactory getMetricIngestionTaskFactory() {
-        return metricIngestionTaskFactory;
+    public IngestionHandler getMetricIngestionTaskFactory() {
+        return metricIngestionHandler;
     }
 
-    public void setMetricIngestionTaskFactory(IngestionTaskFactory metricIngestionTaskFactory) {
-        this.metricIngestionTaskFactory = metricIngestionTaskFactory;
-    }
-
-    public long getMinBucketSizeBytes() {
-        return minBucketSizeBytes;
-    }
-
-    public void setMinBucketSizeBytes(long minBucketSizeBytes) {
-        this.minBucketSizeBytes = minBucketSizeBytes;
-    }
-
-    public long getMaxDelayMs() {
-        return maxDelayMs;
-    }
-
-    public void setMaxDelayMs(long maxDelayMs) {
-        this.maxDelayMs = maxDelayMs;
-    }
-
-    public List<String> getPartitionBy() {
-        return partitionBy;
-    }
-
-    public void setPartitionBy(List<String> partitionBy) {
-        this.partitionBy = partitionBy;
-    }
-
-    public String getTransformations() {
-        return transformations;
-    }
-
-    public void setTransformations(String transformations) {
-        this.transformations = transformations;
+    public void setMetricIngestionTaskFactory(IngestionHandler metricIngestionHandler) {
+        this.metricIngestionHandler = metricIngestionHandler;
     }
 
     public String getServiceName() {

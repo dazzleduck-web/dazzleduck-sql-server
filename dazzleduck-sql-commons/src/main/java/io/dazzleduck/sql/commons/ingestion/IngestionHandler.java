@@ -1,6 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
 
-public interface IngestionTaskFactory {
+public interface IngestionHandler {
     PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult);
 
     String getTargetPath(String queueId);

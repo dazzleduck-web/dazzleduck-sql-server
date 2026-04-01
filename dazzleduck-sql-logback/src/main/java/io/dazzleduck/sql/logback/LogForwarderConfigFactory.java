@@ -134,6 +134,7 @@ public final class LogForwarderConfigFactory {
                 .project(config.getStringList(ConfigConstants.PROJECT_KEY))
                 .partitionBy(config.getStringList(ConfigConstants.PARTITION_BY_KEY))
                 .enabled(config.getBoolean(ConfigConstants.ENABLED_KEY))
+                .captureCallerData(config.getBoolean(ConfigConstants.CAPTURE_CALLER_DATA_KEY))
                 .build();
     }
 }

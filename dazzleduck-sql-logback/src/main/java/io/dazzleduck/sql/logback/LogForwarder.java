@@ -83,18 +83,27 @@ public final class LogForwarder implements Closeable {
 
     /**
      * Convert a LogEntry to a JavaRow for the HttpArrowProducer.
-     * The field order must match the schema from LogToArrowConverter:
-     * s_no, timestamp (epoch millis), level, logger, thread, message, mdc
+     * Field order must match the schema from LogToArrowConverter:
+     * sequence_number, timestamp (epoch millis), level, logger, thread, message, mdc,
+     * throwable, marker, key_value_pairs, caller_class, caller_method, caller_file, caller_line
      */
     private JavaRow convertToJavaRow(LogEntry entry) {
-        Object[] fields = new Object[7];
-        fields[0] = entry.sNo();
+        Object[] fields = new Object[14];
+        fields[0] = entry.sequenceNumber();
         fields[1] = entry.timestamp() != null ? entry.timestamp().toEpochMilli() : null;
         fields[2] = entry.level();
         fields[3] = entry.logger();
         fields[4] = entry.thread();
         fields[5] = entry.message();
-        fields[6] = entry.mdc();
+        fields[6] = entry.mdc().isEmpty() ? null : entry.mdc();
+        fields[7] = entry.throwable();
+        fields[8] = entry.markers().isEmpty() ? null : entry.markers();
+        fields[9] = entry.keyValuePairs().isEmpty() ? null : entry.keyValuePairs();
+        LogEntry.CallerData cd = entry.callerData();
+        fields[10] = cd != null ? cd.className() : null;
+        fields[11] = cd != null ? cd.method() : null;
+        fields[12] = cd != null ? cd.file() : null;
+        fields[13] = cd != null ? cd.line() : null;
         return new JavaRow(fields);
     }
 
@@ -126,7 +135,6 @@ public final class LogForwarder implements Closeable {
                 logger.error("Error closing HttpArrowProducer", e);
             }
 
-            converter.close();
             logger.info("LogForwarder closed");
         }
     }

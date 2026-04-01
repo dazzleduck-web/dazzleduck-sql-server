@@ -39,18 +39,15 @@ public class OtelCollectorServer implements Closeable {
             ConnectionPool.executeOnSingleton(startupScript);
         }
 
-        logWriter = new SignalWriter(props.getLogsOutputPath(), props.getPartitionBy(),
-                props.getTransformations(), props.getMinBucketSizeBytes(), props.getMaxDelayMs(),
-                props.getLogIngestionTaskFactory());
-        traceWriter = new SignalWriter(props.getTracesOutputPath(), props.getPartitionBy(),
-                null, props.getMinBucketSizeBytes(), props.getMaxDelayMs(),
-                props.getTraceIngestionTaskFactory());
-        metricsWriter = new SignalWriter(props.getMetricsOutputPath(), props.getPartitionBy(),
-                null, props.getMinBucketSizeBytes(), props.getMaxDelayMs(),
-                props.getMetricIngestionTaskFactory());
+        logWriter     = new SignalWriter("logs",    props.getLogIngestionConfig(),    props.getLogIngestionTaskFactory());
+        traceWriter   = new SignalWriter("traces",  props.getTraceIngestionConfig(),  props.getTraceIngestionTaskFactory());
+        metricsWriter = new SignalWriter("metrics", props.getMetricIngestionConfig(), props.getMetricIngestionTaskFactory());
 
         setupCommonTags(props.getMeterRegistry(), props.getServiceName());
-        OtelCollectorMetrics metrics = new OtelCollectorMetrics(props.getMeterRegistry(), props.getMaxDelayMs());
+        OtelCollectorMetrics metrics = new OtelCollectorMetrics(props.getMeterRegistry(),
+                props.getLogIngestionConfig().maxDelayMs(),
+                props.getTraceIngestionConfig().maxDelayMs(),
+                props.getMetricIngestionConfig().maxDelayMs());
         metrics.registerWriter("logs",    logWriter);
         metrics.registerWriter("traces",  traceWriter);
         metrics.registerWriter("metrics", metricsWriter);
@@ -80,8 +77,10 @@ public class OtelCollectorServer implements Closeable {
         grpcServer = builder.build().start();
 
         log.info("OTLP gRPC server started on port {} — logs={}, traces={}, metrics={}",
-                props.getGrpcPort(), props.getLogsOutputPath(),
-                props.getTracesOutputPath(), props.getMetricsOutputPath());
+                props.getGrpcPort(),
+                props.getLogIngestionConfig().outputPath(),
+                props.getTraceIngestionConfig().outputPath(),
+                props.getMetricIngestionConfig().outputPath());
     }
 
     private static void setupCommonTags(MeterRegistry registry, String serviceName) {

@@ -9,7 +9,6 @@ import com.google.protobuf.*;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.authorization.SqlAuthorizer;
 import io.dazzleduck.sql.commons.ingestion.*;
@@ -24,13 +23,11 @@ import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
 import org.apache.arrow.adapter.jdbc.JdbcParameterBinder;
 import org.apache.arrow.adapter.jdbc.JdbcToArrowUtils;
 import org.apache.arrow.flight.*;
-import org.apache.arrow.flight.sql.FlightSqlProducer;
 import org.apache.arrow.flight.sql.FlightSqlUtils;
 import org.apache.arrow.flight.sql.SqlInfoBuilder;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
@@ -242,10 +239,10 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
     private final SqlInfoBuilder sqlInfoBuilder;
 
     private final IngestionConfig bulkIngestionConfig;
-    private final ConcurrentHashMap<String, BulkIngestQueue<String, IngestionResult>> ingestionQueueMap =
+    private final ConcurrentHashMap<String, ParquetIngestionQueue> ingestionQueueMap =
             new ConcurrentHashMap<>();
 
-    private final IngestionTaskFactory ingestionTaskFactory;
+    private final IngestionHandler ingestionHandler;
 
     private final Path tempDir;
 
@@ -294,11 +291,11 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                                    String warehousePath,
                                    AccessMode accessMode,
                                    Path tempDir,
-                                   IngestionTaskFactory ingestionTaskFactory,
+                                   IngestionHandler ingestionHandler,
                                    ScheduledExecutorService scheduledExecutorService,
                                    Duration queryTimeout,
                                    IngestionConfig ingestionConfig) {
-        this(serverLocation, producerId, secretKey, allocator, warehousePath, accessMode, tempDir, ingestionTaskFactory,
+        this(serverLocation, producerId, secretKey, allocator, warehousePath, accessMode, tempDir, ingestionHandler,
                 scheduledExecutorService, queryTimeout, Clock.systemDefaultZone(),
                 buildRecorder(producerId), ingestionConfig, List.of());
 
@@ -310,13 +307,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                                    String warehousePath,
                                    AccessMode accessMode,
                                    Path tempDir,
-                                   IngestionTaskFactory ingestionTaskFactory,
+                                   IngestionHandler ingestionHandler,
                                    ScheduledExecutorService scheduledExecutorService,
                                    Duration queryTimeout,
                                    Clock clock,
                                    FlightRecorder recorder,
                                    IngestionConfig bulkIngestionConfig) {
-        this(serverLocation, producerId, secretKey, allocator, warehousePath, accessMode, tempDir, ingestionTaskFactory,
+        this(serverLocation, producerId, secretKey, allocator, warehousePath, accessMode, tempDir, ingestionHandler,
                 scheduledExecutorService, queryTimeout, clock, recorder, bulkIngestionConfig, List.of());
     }
 
@@ -327,7 +324,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                                    String warehousePath,
                                    AccessMode accessMode,
                                    Path tempDir,
-                                   IngestionTaskFactory ingestionTaskFactory,
+                                   IngestionHandler ingestionHandler,
                                    ScheduledExecutorService scheduledExecutorService,
                                    Duration queryTimeout,
                                    Clock clock,
@@ -351,7 +348,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
             this.sqlAuthorizer = SqlAuthorizer.NOOP_AUTHORIZER;
         }
 
-        this.ingestionTaskFactory = ingestionTaskFactory;
+        this.ingestionHandler = ingestionHandler;
         this.bulkIngestionConfig = bulkIngestionConfig;
         preparedStatementLoadingCache =
                 CacheBuilder.newBuilder()
@@ -428,6 +425,20 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                     FlightSql.SqlInfo.FLIGHT_SQL_SERVER_INGEST_TRANSACTIONS_SUPPORTED_VALUE,
                     FlightSql.SqlInfo.SQL_TRANSACTIONS_SUPPORTED_VALUE
             );
+
+            scheduledExecutorService.scheduleWithFixedDelay(() -> {
+                try {
+                    ingestionQueueMap.forEach((queueId, queue) -> {
+                        try {
+                            queue.setTransformation(ingestionHandler.getTransformation(queueId));
+                        } catch (Exception e) {
+                            logger.atWarn().setCause(e).log("Failed to refresh transformation for queue '{}'", queueId);
+                        }
+                    });
+                } catch (Exception e) {
+                    logger.atError().setCause(e).log("Error refreshing ingestion transformations");
+                }
+            }, 2, 2, TimeUnit.MINUTES);
 
             scheduledExecutorService.scheduleWithFixedDelay(() -> {
                 try {
@@ -776,16 +787,16 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
      * @param path the relative path for the ingestion queue
      * @return the BulkIngestQueue for the specified queue
      */
-    protected BulkIngestQueue<String, IngestionResult> getOrCreateParquetIngestionQueue(String queueId, String path) {
+    protected BulkIngestQueue<String, IngestionResult> getOrCreateIngestionQueue(String queueId, String path) {
         return ingestionQueueMap.computeIfAbsent(queueId, p -> {
-            String transformation = ingestionTaskFactory.getTransformation(p);
+            String transformation = ingestionHandler.getTransformation(p);
             var queue = new ParquetIngestionQueue(producerId, TEMP_WRITE_FORMAT, path, p,
                     bulkIngestionConfig.minBucketSize(),
                     bulkIngestionConfig.maxBucketSize(),
                     bulkIngestionConfig.maxBatches(),
                     bulkIngestionConfig.maxPendingWrite(),
                     bulkIngestionConfig.maxDelay(),
-                    ingestionTaskFactory,
+                    ingestionHandler,
                     Executors.newSingleThreadScheduledExecutor(),
                     Clock.systemDefaultZone(),
                     transformation);
@@ -809,26 +820,13 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
             FlightStream flightStream,
             StreamListener<PutResult> ackStream) {
         IngestionParameters ingestionParameters = IngestionParameters.getIngestionParameters(command);
-        String path = ingestionTaskFactory.getTargetPath(ingestionParameters.ingestionQueue());
-        var queue = ingestionParameters.ingestionQueue();
-        FlightStreamReader reader = FlightStreamReader.of(flightStream, allocator);
-        return () -> {
-            Path tempFile;
-            try (reader) {
-                tempFile = BulkIngestQueue.writeAndValidateTempArrowFile(tempDir, reader);
-                long fileSize = Files.size(tempFile);
-                recorder.recordIngestReceived(fileSize);
-                var batch = ingestionParameters.constructBatch(fileSize, tempFile.toAbsolutePath().toString());
-                var ingestionQueue = getOrCreateParquetIngestionQueue(queue, path);
-                var result = ingestionQueue.add(batch);
-                result.get();
-                ackStream.onNext(PutResult.empty());
-                ackStream.onCompleted();
-            } catch (Throwable throwable) {
-                recorder.recordIngestError();
-                ErrorHandling.handleThrowable(ackStream, throwable);
-            }
-        };
+        String path = ingestionHandler.getTargetPath(ingestionParameters.ingestionQueue());
+        if (path == null) {
+            return () -> ErrorHandling.handleThrowable(ackStream,
+                    new IllegalArgumentException("Ingestion queue '" + ingestionParameters.ingestionQueue() + "' not found. No target path is configured for this queue."));
+        }
+        var ingestionQueue = getOrCreateIngestionQueue(ingestionParameters.ingestionQueue(), path);
+        return ingestFromReader(FlightStreamReader.of(flightStream, allocator), ingestionQueue, ingestionParameters, ackStream);
     }
 
     @Override
@@ -837,16 +835,26 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
             IngestionParameters ingestionParameters,
             InputStream inputStream,
             StreamListener<PutResult> ackStream) {
-        String path = ingestionTaskFactory.getTargetPath(ingestionParameters.ingestionQueue());
+        String path = ingestionHandler.getTargetPath(ingestionParameters.ingestionQueue());
+        if (path == null) {
+            return () -> ErrorHandling.handleThrowable(ackStream,
+                    new IllegalArgumentException("Ingestion queue '" + ingestionParameters.ingestionQueue() + "' not found. No target path is configured for this queue."));
+        }
+        var ingestionQueue = getOrCreateIngestionQueue(ingestionParameters.ingestionQueue(), path);
+        return ingestFromReader(new ArrowStreamReader(inputStream, allocator), ingestionQueue, ingestionParameters, ackStream);
+    }
+
+    private Runnable ingestFromReader(
+            ArrowReader reader,
+            BulkIngestQueue<String, IngestionResult> ingestionQueue,
+            IngestionParameters ingestionParameters,
+            StreamListener<PutResult> ackStream) {
         return () -> {
-            Path tempFile;
-            try (ArrowReader inputReader = new ArrowStreamReader(inputStream, allocator)) {
-                tempFile = BulkIngestQueue.writeAndValidateTempArrowFile(tempDir, inputReader);
+            try (reader) {
+                Path tempFile = BulkIngestQueue.writeAndValidateTempArrowFile(tempDir, reader);
                 long fileSize = Files.size(tempFile);
                 recorder.recordIngestReceived(fileSize);
                 var batch = ingestionParameters.constructBatch(fileSize, tempFile.toAbsolutePath().toString());
-                var ingestionQueue = getOrCreateParquetIngestionQueue(ingestionParameters.ingestionQueue(),
-                        path);
                 var result = ingestionQueue.add(batch);
                 result.get();
                 ackStream.onNext(PutResult.empty());

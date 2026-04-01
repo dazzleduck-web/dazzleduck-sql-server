@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.0.28</version>
+        <version>0.0.29</version>
     </parent>
 
     <artifactId>dazzleduck-sql-flight</artifactId>
@@ -43,19 +43,19 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.28</version>
+            <version>0.0.29</version>
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.28</version>
+            <version>0.0.29</version>
             <classifier>tests</classifier>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId> <!-- ✅ fixed -->
             <artifactId>dazzleduck-sql-login</artifactId>
-            <version>0.0.28</version>
+            <version>0.0.29</version>
         </dependency>
         <dependency>
             <groupId>org.apache.arrow</groupId>

@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 
+import java.util.Collections;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class LogEntryTest {
@@ -26,24 +28,29 @@ class LogEntryTest {
         event.setThreadName("test-thread");
         event.setTimeStamp(1705312200000L); // 2024-01-15T10:30:00Z
 
-        LogEntry entry = LogEntry.from(42, event);
+        LogEntry entry = LogEntry.from(event, false);
 
-        assertEquals(42, entry.sNo());
         assertEquals(Instant.ofEpochMilli(1705312200000L), entry.timestamp());
         assertEquals("ERROR", entry.level());
         assertEquals("com.example.TestLogger", entry.logger());
         assertEquals("test-thread", entry.thread());
         assertEquals("Test error message", entry.message());
         assertNotNull(entry.mdc());
+        assertNull(entry.throwable());
+        assertTrue(entry.markers().isEmpty());
+        assertNull(entry.callerData());
     }
 
     @Test
     void record_shouldSupportEquality() {
         Instant now = Instant.now();
 
-        LogEntry entry1 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg");
-        LogEntry entry2 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg");
-        LogEntry entry3 = new LogEntry(1, now, "ERROR", "Logger1", "main", "msg");
+        LogEntry entry1 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg",
+                null, null, null, null, null);
+        LogEntry entry2 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg",
+                null, null, null, null, null);
+        LogEntry entry3 = new LogEntry(1, now, "ERROR", "Logger1", "main", "msg",
+                null, null, null, null, null);
 
         assertEquals(entry1, entry2);
         assertNotEquals(entry1, entry3);
@@ -53,8 +60,10 @@ class LogEntryTest {
     void record_shouldGenerateHashCode() {
         Instant now = Instant.now();
 
-        LogEntry entry1 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg");
-        LogEntry entry2 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg");
+        LogEntry entry1 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg",
+                null, null, null, null, null);
+        LogEntry entry2 = new LogEntry(1, now, "INFO", "Logger1", "main", "msg",
+                null, null, null, null, null);
 
         assertEquals(entry1.hashCode(), entry2.hashCode());
     }
@@ -67,7 +76,8 @@ class LogEntryTest {
                 "INFO",
                 "TestLogger",
                 "main",
-                "Test message"
+                "Test message",
+                null, null, null, null, null
         );
 
         String toString = entry.toString();
@@ -79,7 +89,8 @@ class LogEntryTest {
 
     @Test
     void record_shouldAllowNullValues() {
-        LogEntry entry = new LogEntry(1, null, null, null, null, null);
+        LogEntry entry = new LogEntry(1, null, null, null, null, null,
+                null, null, null, null, null);
 
         assertNull(entry.timestamp());
         assertNull(entry.level());

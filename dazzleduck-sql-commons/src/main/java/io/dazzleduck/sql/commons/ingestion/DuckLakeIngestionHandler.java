@@ -12,9 +12,9 @@ import java.util.Map;
  * Factory for creating DuckLakePostIngestionTask instances.
  * Uses a map for fast lookup based on ingestion path.
  */
-public class DuckLakeIngestionTaskFactory implements IngestionTaskFactory {
+public class DuckLakeIngestionHandler implements IngestionHandler {
 
-    private static final Logger logger = LoggerFactory.getLogger(DuckLakeIngestionTaskFactory.class);
+    private static final Logger logger = LoggerFactory.getLogger(DuckLakeIngestionHandler.class);
 
     private static final String TABLE_PATH_QUERY =
             """
@@ -38,7 +38,7 @@ public class DuckLakeIngestionTaskFactory implements IngestionTaskFactory {
 
 
 
-    public DuckLakeIngestionTaskFactory(Map<String, QueueIdToTableMapping> queueIdToTableMappingMap
+    public DuckLakeIngestionHandler(Map<String, QueueIdToTableMapping> queueIdToTableMappingMap
     ) {
         this.queueIdsToTableMappings = queueIdToTableMappingMap;
         var map  =  new HashMap<String, String>();

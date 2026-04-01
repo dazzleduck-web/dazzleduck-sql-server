@@ -7,7 +7,7 @@ public interface IngestionTaskFactoryProvider extends ConfigBasedProvider {
 
     void setConfig(Config config);
 
-    IngestionTaskFactory getIngestionTaskFactory();
+    IngestionHandler getIngestionTaskFactory();
 
     /**
      * Validates provider configuration eagerly at server startup.
