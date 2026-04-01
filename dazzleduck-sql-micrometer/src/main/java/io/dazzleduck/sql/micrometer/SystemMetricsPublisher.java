@@ -45,9 +45,6 @@ public final class SystemMetricsPublisher {
         new JvmGcMetrics().bindTo(registry);
         logger.info("Bound JVM GC metrics (jvm.gc.*) to registry");
 
-        File diskPath = resolveDiskPath(warehousePath);
-        new DiskSpaceMetrics(diskPath).bindTo(registry);
-        logger.info("Bound disk space metrics for path: {}", diskPath.getAbsolutePath());
     }
 
     private static File resolveDiskPath(String warehousePath) {
