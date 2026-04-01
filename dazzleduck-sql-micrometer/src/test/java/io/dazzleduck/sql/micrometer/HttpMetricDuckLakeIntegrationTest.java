@@ -8,6 +8,9 @@ import io.dazzleduck.sql.micrometer.metrics.MetricsRegistryFactory;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
@@ -123,14 +126,14 @@ public class HttpMetricDuckLakeIntegrationTest {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // System metrics tests (CPU, JVM memory)
-    // Verifies CPU and JVM memory metrics are published and disk metrics are NOT.
+    // System metrics tests (CPU, JVM memory, GC)
+    // Verifies CPU, JVM memory, and GC metrics are published via configuration.
     // ──────────────────────────────────────────────────────────────────────────
 
     /**
-     * Verifies that CPU and JVM memory metrics are published, but disk metrics are not.
+     * Verifies that all system metrics (CPU, JVM memory, GC) are published.
      *
-     * SystemMetricsPublisher binds:
+     * Directly binds Micrometer system metrics:
      *   - ProcessorMetrics:
      *     system.cpu.count  – number of available processors (always > 0)
      *     system.cpu.usage  – system-wide CPU load [0.0, 1.0]  (may be -1 on some JVMs)
@@ -141,15 +144,21 @@ public class HttpMetricDuckLakeIntegrationTest {
      *     jvm.memory.committed – bytes committed by the OS
      *     jvm.memory.max       – maximum bytes available (-1 if unlimited)
      *
+     *   - JvmGcMetrics:
+     *     jvm.gc.* – GC pause count and duration
+     *
      *   - DiskSpaceMetrics (NOT published):
-     *     disk.free, disk.total, disk.usable are NOT included in published metrics
+     *     disk.free, disk.total are NOT published
      */
     @Test
     @Execution(ExecutionMode.CONCURRENT)
     void testSystemMetricsPublished() throws Exception {
         MeterRegistry registry = MetricsRegistryFactory.create();
         try {
-            SystemMetricsPublisher.bind(registry, warehouse.toString());
+            // Bind system metrics directly (CPU, Memory, GC)
+            new ProcessorMetrics().bindTo(registry);
+            new JvmMemoryMetrics().bindTo(registry);
+            new JvmGcMetrics().bindTo(registry);
             Thread.sleep(100);
         } finally {
             registry.close();

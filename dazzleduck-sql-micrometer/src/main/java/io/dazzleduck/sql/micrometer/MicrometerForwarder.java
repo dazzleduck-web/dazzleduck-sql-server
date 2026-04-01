@@ -5,6 +5,10 @@ import io.dazzleduck.sql.micrometer.config.MicrometerForwarderConfig;
 import io.dazzleduck.sql.micrometer.service.ArrowMicroMeterRegistry;
 import io.dazzleduck.sql.micrometer.util.ArrowMetricSchema;
 import io.micrometer.core.instrument.Clock;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -121,6 +125,18 @@ public final class MicrometerForwarder implements Closeable {
 
             // Add to composite registry
             this.registry.add(arrowRegistry);
+
+            // Bind system metrics if configured
+            if (config.publishSystemMetrics()) {
+                new ProcessorMetrics().bindTo(this.registry);
+                logger.info("Bound CPU metrics (system.cpu.*) to registry");
+
+                new JvmMemoryMetrics().bindTo(this.registry);
+                logger.info("Bound JVM memory metrics (jvm.memory.*) to registry");
+
+                new JvmGcMetrics().bindTo(this.registry);
+                logger.info("Bound JVM GC metrics (jvm.gc.*) to registry");
+            }
 
             arrowRegistry.start(runnable -> {
                 Thread thread = new Thread(runnable, "micrometer-forwarder");
