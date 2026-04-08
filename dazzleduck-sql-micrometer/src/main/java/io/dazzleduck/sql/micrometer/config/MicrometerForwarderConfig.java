@@ -34,7 +34,10 @@ public record MicrometerForwarderConfig(
         List<String> partitionBy,
 
         // Feature flags
-        boolean enabled
+        boolean enabled,
+
+        // System metrics flag
+        boolean publishSystemMetrics
 ) {
     public MicrometerForwarderConfig {
         Objects.requireNonNull(baseUrl, "baseUrl must not be null");
@@ -71,6 +74,9 @@ public record MicrometerForwarderConfig(
         private long retryIntervalMillis = 1000; // 1 second
         private List<String> partitionBy = List.of();
         private boolean enabled = true;
+
+        // System metrics default - enabled by default
+        private boolean publishSystemMetrics = true;
 
         private Builder() {
         }
@@ -166,6 +172,11 @@ public record MicrometerForwarderConfig(
             return this;
         }
 
+        public Builder publishSystemMetrics(boolean publishSystemMetrics) {
+            this.publishSystemMetrics = publishSystemMetrics;
+            return this;
+        }
+
         public MicrometerForwarderConfig build() {
             return new MicrometerForwarderConfig(
                     baseUrl,
@@ -184,7 +195,8 @@ public record MicrometerForwarderConfig(
                     retryCount,
                     retryIntervalMillis,
                     partitionBy,
-                    enabled
+                    enabled,
+                    publishSystemMetrics
             );
         }
     }

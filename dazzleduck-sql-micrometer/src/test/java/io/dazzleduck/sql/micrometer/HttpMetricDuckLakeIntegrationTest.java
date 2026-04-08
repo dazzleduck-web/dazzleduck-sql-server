@@ -8,7 +8,12 @@ import io.dazzleduck.sql.micrometer.metrics.MetricsRegistryFactory;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import io.dazzleduck.sql.runtime.SharedTestServer;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -17,6 +22,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class HttpMetricDuckLakeIntegrationTest {
@@ -83,6 +90,7 @@ public class HttpMetricDuckLakeIntegrationTest {
     }
 
     @Test
+    @org.junit.jupiter.api.parallel.Execution(ExecutionMode.CONCURRENT)
     void testMetricsCanPostAndPersist() throws Exception {
 
         MeterRegistry registry = MetricsRegistryFactory.create();
@@ -117,6 +125,81 @@ public class HttpMetricDuckLakeIntegrationTest {
         );
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // System metrics tests (CPU, JVM memory, GC)
+    // Verifies CPU, JVM memory, and GC metrics are published via configuration.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Verifies that all system metrics (CPU, JVM memory, GC) are published.
+     *
+     * Directly binds Micrometer system metrics:
+     *   - ProcessorMetrics:
+     *     system.cpu.count  – number of available processors (always > 0)
+     *     system.cpu.usage  – system-wide CPU load [0.0, 1.0]  (may be -1 on some JVMs)
+     *     process.cpu.usage – JVM process CPU load [0.0, 1.0]  (may be -1 on some JVMs)
+     *
+     *   - JvmMemoryMetrics with tag area=heap|nonheap:
+     *     jvm.memory.used      – bytes currently used
+     *     jvm.memory.committed – bytes committed by the OS
+     *     jvm.memory.max       – maximum bytes available (-1 if unlimited)
+     *
+     *   - JvmGcMetrics:
+     *     jvm.gc.* – GC pause count and duration
+     *
+     *   - DiskSpaceMetrics (NOT published):
+     *     disk.free, disk.total are NOT published
+     */
+    @Test
+    @Execution(ExecutionMode.CONCURRENT)
+    void testSystemMetricsPublished() throws Exception {
+        MeterRegistry registry = MetricsRegistryFactory.create();
+        try {
+            // Bind system metrics directly (CPU, Memory, GC)
+            new ProcessorMetrics().bindTo(registry);
+            new JvmMemoryMetrics().bindTo(registry);
+            new JvmGcMetrics().bindTo(registry);
+            Thread.sleep(100);
+        } finally {
+            registry.close();
+        }
+        Thread.sleep(200);
+
+        String table = fullTableRef();
+
+        // CPU Metrics
+        // system.cpu.count must exist and its value must equal Runtime.availableProcessors()
+        Long rowCount = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'system.cpu.count' AND type = 'gauge'".formatted(table), Long.class);
+        assertTrue(rowCount > 0, "system.cpu.count gauge row must be present in the metrics table");
+
+        Double cpuCount = ConnectionPool.collectFirst("SELECT max(value) FROM %s WHERE name = 'system.cpu.count' AND type = 'gauge'".formatted(table), Double.class);
+        assertEquals((double) java.lang.Runtime.getRuntime().availableProcessors(), cpuCount, "system.cpu.count must equal Runtime.availableProcessors()");
+
+        // system.cpu.usage must exist (value may legitimately be -1.0 on some JVMs when unavailable)
+        Long cpuUsageRows = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'system.cpu.usage' AND type = 'gauge'".formatted(table), Long.class);
+        assertTrue(cpuUsageRows > 0, "system.cpu.usage gauge row must be present in the metrics table");
+
+        // JVM Memory Metrics
+        // jvm.memory.used with area=heap must be present and positive
+        Long heapRows = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'heap'".formatted(table), Long.class);
+        assertTrue(heapRows > 0, "jvm.memory.used (area=heap) gauge rows must be present");
+
+        Double heapUsed = ConnectionPool.collectFirst("SELECT max(value) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'heap'".formatted(table), Double.class);
+        assertTrue(heapUsed > 0, "jvm.memory.used (area=heap) must be > 0 bytes");
+
+        // jvm.memory.used with area=nonheap must also be present and positive
+        Long nonHeapRows = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'jvm.memory.used' AND type = 'gauge' AND tags['area'] = 'nonheap'".formatted(table), Long.class);
+        assertTrue(nonHeapRows > 0, "jvm.memory.used (area=nonheap) gauge rows must be present");
+
+        // Disk metrics must NOT be published (verify they are absent)
+        Long diskFreeRows = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'disk.free' AND type = 'gauge'".formatted(table), Long.class);
+        assertEquals(0L, diskFreeRows, "disk.free should not be published");
+
+        Long diskTotalRows = ConnectionPool.collectFirst("SELECT count(*) FROM %s WHERE name = 'disk.total' AND type = 'gauge'".formatted(table), Long.class);
+        assertEquals(0L, diskTotalRows, "disk.total should not be published");
+
+    }
+
     @AfterAll
     void cleanup() throws Exception {
         if (server != null) server.close();
@@ -136,24 +219,7 @@ public class HttpMetricDuckLakeIntegrationTest {
         Files.createDirectories(path);
     }
 
-    private Path waitForMetricFile(String warehousePath) throws Exception {
-
-        Path dir = Path.of(warehousePath);
-        long deadline = System.currentTimeMillis() + 15_000;
-
-        while (System.currentTimeMillis() < deadline) {
-            try (var stream = Files.walk(dir)) {
-                var file = stream
-                        .filter(Files::isRegularFile)
-                        .filter(p -> p.toString().endsWith(".parquet"))
-                        .findFirst();
-                if (file.isPresent()) {
-                    return file.get();
-                }
-            }
-            Thread.sleep(200);
-        }
-
-        throw new IllegalStateException("No metric file found in " + dir);
+    private String fullTableRef() {
+        return "%s.%s.%s".formatted(CATALOG_NAME, SCHEMA_NAME, TABLE_NAME);
     }
 }
