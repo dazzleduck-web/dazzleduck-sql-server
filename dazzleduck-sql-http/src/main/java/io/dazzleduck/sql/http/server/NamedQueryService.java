@@ -42,12 +42,14 @@ public class NamedQueryService implements HttpService, ControllerService {
     @Override
     public void routing(HttpRules rules) {
         rules.get("/", this::handleList)
+             .get("/groups", this::handleListGroups)
              .get("/{name}", this::handleGetByName)
              .post("/", this::handlePost);
     }
 
-    /** GET / — returns a paginated list of named queries. */
+    /** GET / — returns a paginated list of named queries, optionally filtered by group. */
     private void handleList(ServerRequest request, ServerResponse response) {
+        var groupParam = request.query().first("group");
         long offset = ParameterUtils.getParameterValue("offset", request, 0L, Long.class);
         int limit   = ParameterUtils.getParameterValue("limit",  request, DEFAULT_PAGE_LIMIT, Integer.class);
         if (offset < 0) offset = 0;
@@ -56,9 +58,27 @@ public class NamedQueryService implements HttpService, ControllerService {
 
         var callContext = ControllerService.createContext(request);
         response.headers().set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_JSON);
-        var future = adaptor.listItemsDirect(offset, limit, callContext, () -> response.outputStream());
+
+        CompletableFuture<Void> future;
+        if (groupParam.isPresent()) {
+            future = adaptor.listItemsByGroupDirect(groupParam.get(), offset, limit, callContext, () -> response.outputStream());
+        } else {
+            future = adaptor.listItemsDirect(offset, limit, callContext, () -> response.outputStream());
+        }
+
         await(future, response, (cause, res) -> {
             logger.error("Error listing named queries", cause);
+            ControllerService.sendFlightError(res, cause);
+        });
+    }
+
+    /** GET /groups — returns all groups with their query IDs and names. */
+    private void handleListGroups(ServerRequest request, ServerResponse response) {
+        var callContext = ControllerService.createContext(request);
+        response.headers().set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_JSON);
+        var future = adaptor.listAllGroupsDirect(callContext, () -> response.outputStream());
+        await(future, response, (cause, res) -> {
+            logger.error("Error listing named query groups", cause);
             ControllerService.sendFlightError(res, cause);
         });
     }

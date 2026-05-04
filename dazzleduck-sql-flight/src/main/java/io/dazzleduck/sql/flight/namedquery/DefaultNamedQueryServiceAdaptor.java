@@ -51,7 +51,7 @@ public class DefaultNamedQueryServiceAdaptor implements NamedQueryServiceAdaptor
 
     private NamedQueryDefinition loadFromDb(String name) throws SQLException, NamedQueryServiceAdaptor.TemplateNotFoundException {
         String safeName = name.replace("'", "''");
-        String sql = ("SELECT id, name, template, validators, description, parameter_descriptions, preferred_display" +
+        String sql = ("SELECT id, name, template, validators, description, parameter_descriptions, preferred_display, query_group" +
                       " FROM %s WHERE name = '%s'")
             .formatted(this.name, safeName);
         try (DuckDBConnection connection = ConnectionPool.getConnection()) {

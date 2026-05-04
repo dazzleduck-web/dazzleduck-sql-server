@@ -50,6 +50,25 @@ public interface NamedQueryServiceAdaptor {
         return streamJson(sql, context, outputStreamSupplier, true);
     }
 
+    default CompletableFuture<Void> listItemsByGroupDirect(String group, long offset, int limit,
+                                                          FlightProducer.CallContext context,
+                                                          Supplier<OutputStream> outputStreamSupplier) {
+        String safeGroup = group.replace("'", "''");
+        String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
+                      " validators AS validatorDescriptions FROM %s " +
+                      "WHERE query_group = '%s' AND id > %d ORDER BY id LIMIT %d")
+                .formatted(getTemplateTable(context), safeGroup, offset, limit);
+        return streamJson(sql, context, outputStreamSupplier, true);
+    }
+
+    default CompletableFuture<Void> listAllGroupsDirect(FlightProducer.CallContext context,
+                                                        Supplier<OutputStream> outputStreamSupplier) {
+        String sql = ("SELECT query_group, array_agg(id) as ids, array_agg(name) as names " +
+                      "FROM %s GROUP BY query_group ORDER BY query_group")
+                .formatted(getTemplateTable(context));
+        return streamJson(sql, context, outputStreamSupplier, true);
+    }
+
     default CompletableFuture<Void> getNamedQueryDirect(String name,
                                                        FlightProducer.CallContext context,
                                                        Supplier<OutputStream> outputStreamSupplier) {
