@@ -44,7 +44,7 @@ public interface NamedQueryServiceAdaptor {
                                                    FlightProducer.CallContext context,
                                                    Supplier<OutputStream> outputStreamSupplier) {
         String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
-                      " validators AS validatorDescriptions FROM %s " +
+                      " validators AS validatorDescriptions, preferred_display, query_group FROM %s " +
                       "WHERE id > %d ORDER BY id LIMIT %d")
                 .formatted(getTemplateTable(context), offset, limit);
         return streamJson(sql, context, outputStreamSupplier, true);
@@ -55,7 +55,7 @@ public interface NamedQueryServiceAdaptor {
                                                           Supplier<OutputStream> outputStreamSupplier) {
         String safeGroup = group.replace("'", "''");
         String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
-                      " validators AS validatorDescriptions FROM %s " +
+                      " validators AS validatorDescriptions, preferred_display, query_group FROM %s " +
                       "WHERE query_group = '%s' AND id > %d ORDER BY id LIMIT %d")
                 .formatted(getTemplateTable(context), safeGroup, offset, limit);
         return streamJson(sql, context, outputStreamSupplier, true);
@@ -73,8 +73,8 @@ public interface NamedQueryServiceAdaptor {
                                                        FlightProducer.CallContext context,
                                                        Supplier<OutputStream> outputStreamSupplier) {
         String safeName = name.replace("'", "''");
-        String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
-                      " validators AS validatorDescriptions FROM %s " +
+        String sql = ("SELECT id, name, template, description, parameter_descriptions AS parameterDescriptions," +
+                      " validators AS validatorDescriptions, preferred_display, query_group FROM %s " +
                       "WHERE name = '%s'")
                 .formatted(getTemplateTable(context), safeName);
         return streamJson(sql, context, outputStreamSupplier, false)

@@ -300,6 +300,10 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals("validated_query",       items.get(2).get("name"));
         assertEquals(4, items.get(3).get("id"));
         assertEquals("multi_validator_query", items.get(3).get("name"));
+
+        // Verify new fields are present in list responses
+        assertTrue(items.get(0).containsKey("preferredDisplay"), "List items must include preferredDisplay");
+        assertTrue(items.get(0).containsKey("queryGroup"), "List items must include queryGroup");
     }
 
     @Test
@@ -352,6 +356,10 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals("Returns the first N integers", info.get("description"));
         assertTrue(info.containsKey("parameterDescriptions"), "Full object must include parameterDescriptions");
         assertTrue(info.containsKey("validatorDescriptions"), "Full object must include validatorDescriptions");
+        assertTrue(info.containsKey("template"), "Full object must include template");
+        assertTrue(info.containsKey("preferredDisplay"), "Full object must include preferredDisplay");
+        assertTrue(info.containsKey("queryGroup"), "Full object must include queryGroup");
+        assertEquals("General", info.get("queryGroup"), "Default query_group should be 'General'");
     }
 
     @Test
