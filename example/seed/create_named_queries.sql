@@ -97,7 +97,7 @@ LIMIT {{ limit | default(''20'') }}',
     MAP {
         'limit': 'Maximum number of campaigns to return (default 20)'
     },
-        'table',
+        'line',
         'marketing');
 
 -- 3. Leads by campaign
@@ -122,7 +122,7 @@ ORDER BY l.created_at DESC',
     MAP {
         'campaign_name': 'Exact campaign name to look up'
     },
-        'table',
+        'pie',
         'marketing');
 
 -- 4. Channel ROI
@@ -181,7 +181,7 @@ LIMIT {{ limit | default(''50'') }}',
         'type':  'Optional: filter by conversion type (signup | purchase | trial). Leave blank for all.',
         'limit': 'Maximum number of rows to return (default 50)'
     },
-        'table',
+        'bar',
         'marketing');
 
 -- ============================================================
@@ -249,7 +249,7 @@ LIMIT {{ limit | default(''20'') }}',
         'environment': 'Optional: filter by environment (prod | dev | staging). Leave blank for all.',
         'limit':       'Maximum number of hosts to return (default 20)'
     },
-        'table',
+        'bar',
         'siem');
 
 -- 8. User activity
@@ -283,7 +283,7 @@ LIMIT {{ limit | default(''100'') }}',
         'event_type': 'Optional: filter by event type (login | logout | file_access | network_connection | privilege_escalation | process_spawn | dns_query). Leave blank for all.',
         'limit':      'Maximum number of events to return (default 100)'
     },
-        'table',
+        'line',
         'siem');
 
 -- 9. MITRE heatmap
@@ -345,7 +345,7 @@ LIMIT {{ limit | default(''50'') }}',
         'environment': 'Optional: restrict to a specific environment (prod | dev | staging). Leave blank for all.',
         'limit':       'Maximum number of events to return (default 50)'
     },
-        'table',
+        'pie',
         'siem');
 
 SELECT count(*) AS named_queries_inserted FROM named_queries;
