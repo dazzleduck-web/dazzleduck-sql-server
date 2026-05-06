@@ -1,4 +1,4 @@
--- Creates and seeds of named_queries database.
+-- Creates and seeds the named_queries database.
 -- Run against the target file:
 --   duckdb /data/named_queries.duckdb < create_named_queries.sql
 --
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS named_queries (
     description            VARCHAR,
     parameter_descriptions MAP(VARCHAR, VARCHAR),
     preferred_display      VARCHAR,
-    query_group VARCHAR DEFAULT 'general'
+    query_group             VARCHAR DEFAULT 'general'
 );
 
 DELETE FROM named_queries WHERE name IN (

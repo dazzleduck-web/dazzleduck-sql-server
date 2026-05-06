@@ -15,7 +15,7 @@ import java.util.Map;
  *       description            VARCHAR,
  *       parameter_descriptions MAP(VARCHAR, VARCHAR),
  *       preferred_display      VARCHAR,
- *       query_group             VARCHAR DEFAULT 'General'
+ *       query_group             VARCHAR DEFAULT 'general'
  *   );
  * }</pre>
  *

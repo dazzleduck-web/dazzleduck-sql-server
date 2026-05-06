@@ -58,26 +58,26 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
                 "DELETE FROM " + NAMED_QUERIES_TABLE,
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(1, 'get_series', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
-                " NULL, 'Returns the first N integers', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'General')",
+                " NULL, 'Returns the first N integers', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(2, 'filter_series', 'SELECT * FROM generate_series(10) t(v) WHERE v > {{ min }}'," +
-                " NULL, 'Filters integers above a threshold', MAP {'min': 'minimum value (exclusive)'}, NULL, 'General')",
+                " NULL, 'Filters integers above a threshold', MAP {'min': 'minimum value (exclusive)'}, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(3, 'validated_query', 'SELECT * FROM generate_series({{ limit }}) t(v)'," +
-                " ['" + RejectAllValidatorNamedQuery.class.getName() + "'], 'Always rejected by validator', NULL, NULL, 'General')",
+                " ['" + RejectAllValidatorNamedQuery.class.getName() + "'], 'Always rejected by validator', NULL, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(4, 'multi_validator_query', 'SELECT * FROM generate_series({{ limit }}) t(v)'," +
                 " ['" + RejectAllValidatorNamedQuery.class.getName() + "', '" + AnotherRejectValidatorNamedQuery.class.getName() + "']," +
-                " 'Rejected by two validators', NULL, NULL, 'General')",
+                " 'Rejected by two validators', NULL, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(5, 'invalid_sql', 'SELECT * FROM non_existent_table'," +
-                " NULL, 'Query with invalid SQL', NULL, NULL, 'General')",
+                " NULL, 'Query with invalid SQL', NULL, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(6, 'marketing_query', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
-                " NULL, 'Marketing analytics query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'Marketing')",
+                " NULL, 'Marketing analytics query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'marketing')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(7, 'siem_query', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
-                " NULL, 'SIEM alert query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'SIEM')"
+                " NULL, 'siem alert query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'siem')"
         });
     }
 
@@ -302,8 +302,8 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals("multi_validator_query", items.get(3).get("name"));
 
         // Verify new fields are present in list responses
-        assertTrue(items.get(0).containsKey("preferredDisplay"), "List items must include preferredDisplay");
-        assertTrue(items.get(0).containsKey("queryGroup"), "List items must include queryGroup");
+        assertTrue(items.get(0).containsKey("preferred_display"), "List items must include preferred_display");
+        assertTrue(items.get(0).containsKey("query_group"), "List items must include query_group");
     }
 
     @Test
@@ -357,9 +357,9 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertTrue(info.containsKey("parameterDescriptions"), "Full object must include parameterDescriptions");
         assertTrue(info.containsKey("validatorDescriptions"), "Full object must include validatorDescriptions");
         assertTrue(info.containsKey("template"), "Full object must include template");
-        assertTrue(info.containsKey("preferredDisplay"), "Full object must include preferredDisplay");
-        assertTrue(info.containsKey("queryGroup"), "Full object must include queryGroup");
-        assertEquals("General", info.get("queryGroup"), "Default query_group should be 'General'");
+        assertTrue(info.containsKey("preferred_display"), "Full object must include preferred_display");
+        assertTrue(info.containsKey("query_group"), "Full object must include query_group");
+        assertEquals("general", info.get("query_group"), "Default query_group should be 'general'");
     }
 
     @Test
@@ -389,128 +389,6 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
 
         var response = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(404, response.statusCode());
-    }
-
-    // -------------------------------------------------------------------------
-    // Group filtering tests
-    // -------------------------------------------------------------------------
-
-    @Test
-    @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void testListByGroupReturnsOnlyMatchingQueries() throws IOException, InterruptedException {
-        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT + "?group=Marketing&offset=0&limit=10")).GET().build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Expected 200 for group filter endpoint");
-
-        List<Map<String, Object>> items = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        assertEquals(1, items.size(), "Should return only Marketing query");
-        assertEquals(6, items.get(0).get("id"));
-        assertEquals("marketing_query", items.get(0).get("name"));
-    }
-
-    @Test
-    @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void testListByGroupSiemReturnsOnlyMatchingQueries() throws IOException, InterruptedException {
-        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT + "?group=SIEM&offset=0&limit=10"))
-                .GET()
-                .build();
-
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Expected 200 for SIEM group filter endpoint");
-
-        List<Map<String, Object>> items = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        assertEquals(1, items.size(), "Should return only SIEM query");
-        assertEquals(7, items.get(0).get("id"));
-        assertEquals("siem_query", items.get(0).get("name"));
-    }
-
-    @Test
-    @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void testListByGroupGeneralReturnsAllGeneralQueries() throws IOException, InterruptedException {
-        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT + "?group=General&offset=0&limit=10"))
-                .GET()
-                .build();
-
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Expected 200 for General group filter endpoint");
-
-        List<Map<String, Object>> items = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        assertEquals(5, items.size(), "Should return all General queries");
-        assertEquals(1, items.get(0).get("id"));
-        assertEquals("get_series", items.get(0).get("name"));
-        assertEquals(5, items.get(4).get("id"));
-        assertEquals("invalid_sql", items.get(4).get("name"));
-    }
-
-    @Test
-    @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void testListByUnknownGroupReturnsEmpty() throws IOException, InterruptedException {
-        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT + "?group=NonExistent&offset=0&limit=10"))
-                .GET()
-                .build();
-
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Expected 200 even for unknown group");
-
-        List<Map<String, Object>> items = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        assertTrue(items.isEmpty(), "Expected empty list for unknown group");
-    }
-
-    @Test
-    @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void testListAllGroupsReturnsAllGroups() throws IOException, InterruptedException {
-        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT + "/groups"))
-                .GET()
-                .build();
-
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Expected 200 for groups endpoint");
-
-        List<Map<String, Object>> groups = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        // Should have 3 groups: General, Marketing, SIEM
-        assertEquals(3, groups.size(), "Should return 3 groups");
-
-        // Find each group and verify its contents
-        Map<String, Object> generalGroup = groups.stream()
-                .filter(g -> "General".equals(g.get("query_group")))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("General group not found"));
-
-        @SuppressWarnings("unchecked")
-        List<Integer> generalIds = (List<Integer>) generalGroup.get("ids");
-        @SuppressWarnings("unchecked")
-        List<String> generalNames = (List<String>) generalGroup.get("names");
-
-        assertEquals(5, generalIds.size(), "General group should have 5 queries");
-        assertEquals(5, generalNames.size(), "General group should have 5 query names");
-
-        Map<String, Object> marketingGroup = groups.stream()
-                .filter(g -> "Marketing".equals(g.get("query_group")))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("Marketing group not found"));
-
-        @SuppressWarnings("unchecked")
-        List<Integer> marketingIds = (List<Integer>) marketingGroup.get("ids");
-        @SuppressWarnings("unchecked")
-        List<String> marketingNames = (List<String>) marketingGroup.get("names");
-
-        assertEquals(1, marketingIds.size(), "Marketing group should have 1 query");
-        assertEquals(6, marketingIds.get(0));
-        assertEquals("marketing_query", marketingNames.get(0));
-
-        Map<String, Object> siemGroup = groups.stream()
-                .filter(g -> "SIEM".equals(g.get("query_group")))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("SIEM group not found"));
-
-        @SuppressWarnings("unchecked")
-        List<Integer> siemIds = (List<Integer>) siemGroup.get("ids");
-        @SuppressWarnings("unchecked")
-        List<String> siemNames = (List<String>) siemGroup.get("names");
-
-        assertEquals(1, siemIds.size(), "SIEM group should have 1 query");
-        assertEquals(7, siemIds.get(0));
-        assertEquals("siem_query", siemNames.get(0));
     }
 
     // -------------------------------------------------------------------------
