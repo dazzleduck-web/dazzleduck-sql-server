@@ -57,6 +57,7 @@ public class NamedQueryService implements HttpService, ControllerService {
         var callContext = ControllerService.createContext(request);
         response.headers().set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_JSON);
         var future = adaptor.listItemsDirect(offset, limit, callContext, () -> response.outputStream());
+
         await(future, response, (cause, res) -> {
             logger.error("Error listing named queries", cause);
             ControllerService.sendFlightError(res, cause);

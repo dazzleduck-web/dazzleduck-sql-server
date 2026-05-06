@@ -53,25 +53,31 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         ConnectionPool.execute(
                 "CREATE TABLE IF NOT EXISTS " + NAMED_QUERIES_TABLE +
                 " (id BIGINT PRIMARY KEY, name VARCHAR UNIQUE, template VARCHAR, validators VARCHAR[]," +
-                "  description VARCHAR, parameter_descriptions MAP(VARCHAR, VARCHAR), preferred_display VARCHAR)");
+                "  description VARCHAR, parameter_descriptions MAP(VARCHAR, VARCHAR), preferred_display VARCHAR, query_group VARCHAR DEFAULT 'general')");
         ConnectionPool.executeBatch(new String[]{
                 "DELETE FROM " + NAMED_QUERIES_TABLE,
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(1, 'get_series', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
-                " NULL, 'Returns the first N integers', MAP {'limit': 'upper bound (exclusive)'}, NULL)",
+                " NULL, 'Returns the first N integers', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(2, 'filter_series', 'SELECT * FROM generate_series(10) t(v) WHERE v > {{ min }}'," +
-                " NULL, 'Filters integers above a threshold', MAP {'min': 'minimum value (exclusive)'}, NULL)",
+                " NULL, 'Filters integers above a threshold', MAP {'min': 'minimum value (exclusive)'}, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(3, 'validated_query', 'SELECT * FROM generate_series({{ limit }}) t(v)'," +
-                " ['" + RejectAllValidatorNamedQuery.class.getName() + "'], 'Always rejected by validator', NULL, NULL)",
+                " ['" + RejectAllValidatorNamedQuery.class.getName() + "'], 'Always rejected by validator', NULL, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(4, 'multi_validator_query', 'SELECT * FROM generate_series({{ limit }}) t(v)'," +
                 " ['" + RejectAllValidatorNamedQuery.class.getName() + "', '" + AnotherRejectValidatorNamedQuery.class.getName() + "']," +
-                " 'Rejected by two validators', NULL, NULL)",
+                " 'Rejected by two validators', NULL, NULL, 'general')",
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
                 "(5, 'invalid_sql', 'SELECT * FROM non_existent_table'," +
-                " NULL, 'Query with invalid SQL', NULL, NULL)"
+                " NULL, 'Query with invalid SQL', NULL, NULL, 'general')",
+                "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
+                "(6, 'marketing_query', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
+                " NULL, 'Marketing analytics query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'marketing')",
+                "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
+                "(7, 'siem_query', 'SELECT * FROM generate_series({{ limit }}) t(v) ORDER BY v'," +
+                " NULL, 'siem alert query', MAP {'limit': 'upper bound (exclusive)'}, NULL, 'siem')"
         });
     }
 
@@ -283,7 +289,7 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals(200, response.statusCode(), "Expected 200 for list endpoint");
 
         List<Map<String, Object>> items = objectMapper.readValue(response.body(), new TypeReference<>() {});
-        assertEquals(5, items.size(), "All 5 queries fit within limit=10");
+        assertEquals(7, items.size(), "All 7 queries fit within limit=10");
 
         // Sorted by id
         assertEquals(1, items.get(0).get("id"));
@@ -294,6 +300,10 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals("validated_query",       items.get(2).get("name"));
         assertEquals(4, items.get(3).get("id"));
         assertEquals("multi_validator_query", items.get(3).get("name"));
+
+        // Verify new fields are present in list responses
+        assertTrue(items.get(0).containsKey("preferred_display"), "List items must include preferred_display");
+        assertTrue(items.get(0).containsKey("query_group"), "List items must include query_group");
     }
 
     @Test
@@ -346,6 +356,10 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals("Returns the first N integers", info.get("description"));
         assertTrue(info.containsKey("parameterDescriptions"), "Full object must include parameterDescriptions");
         assertTrue(info.containsKey("validatorDescriptions"), "Full object must include validatorDescriptions");
+        assertTrue(info.containsKey("template"), "Full object must include template");
+        assertTrue(info.containsKey("preferred_display"), "Full object must include preferred_display");
+        assertTrue(info.containsKey("query_group"), "Full object must include query_group");
+        assertEquals("general", info.get("query_group"), "Default query_group should be 'general'");
     }
 
     @Test

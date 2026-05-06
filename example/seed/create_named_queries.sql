@@ -5,6 +5,8 @@
 -- The SQL templates inside each named query reference tables via their
 -- attached database prefixes (siem.* and marketing.*), so the server
 -- must have both databases attached before executing these queries.
+-- query_group column for organizing queries by category
+-- ============================================================
 
 CREATE TABLE IF NOT EXISTS named_queries (
     id                     BIGINT PRIMARY KEY,
@@ -13,7 +15,8 @@ CREATE TABLE IF NOT EXISTS named_queries (
     validators             VARCHAR[],
     description            VARCHAR,
     parameter_descriptions MAP(VARCHAR, VARCHAR),
-    preferred_display      VARCHAR
+    preferred_display      VARCHAR,
+    query_group             VARCHAR DEFAULT 'general'
 );
 
 DELETE FROM named_queries WHERE name IN (
@@ -62,8 +65,8 @@ LIMIT {{ limit | default(''20'') }}',
         'channel': 'Optional: filter by channel (email | social | search | display | referral). Leave blank for all.',
         'limit':   'Maximum number of campaigns to return (default 20)'
     },
-    NULL
-);
+        'table',
+        'marketing');
 
 -- 2. Conversion funnel
 INSERT INTO named_queries VALUES (
@@ -94,8 +97,8 @@ LIMIT {{ limit | default(''20'') }}',
     MAP {
         'limit': 'Maximum number of campaigns to return (default 20)'
     },
-    NULL
-);
+        'line',
+        'marketing');
 
 -- 3. Leads by campaign
 INSERT INTO named_queries VALUES (
@@ -119,8 +122,8 @@ ORDER BY l.created_at DESC',
     MAP {
         'campaign_name': 'Exact campaign name to look up'
     },
-    NULL
-);
+        'pie',
+        'marketing');
 
 -- 4. Channel ROI
 INSERT INTO named_queries VALUES (
@@ -148,8 +151,8 @@ ORDER BY roi_pct DESC',
     MAP {
         'status': 'Optional: filter by campaign status (active | paused | completed). Leave blank for all.'
     },
-    NULL
-);
+        'table',
+        'marketing');
 
 -- 5. Recent conversions
 INSERT INTO named_queries VALUES (
@@ -178,8 +181,8 @@ LIMIT {{ limit | default(''50'') }}',
         'type':  'Optional: filter by conversion type (signup | purchase | trial). Leave blank for all.',
         'limit': 'Maximum number of rows to return (default 50)'
     },
-    NULL
-);
+        'bar',
+        'marketing');
 
 -- ============================================================
 -- SIEM named queries
@@ -215,8 +218,8 @@ ORDER BY
     MAP {
         'status': 'Optional: filter by alert status (open | investigating | closed | false_positive). Leave blank for all.'
     },
-    NULL
-);
+        'table',
+        'siem');
 
 -- 7. Top attacked hosts
 INSERT INTO named_queries VALUES (
@@ -246,8 +249,8 @@ LIMIT {{ limit | default(''20'') }}',
         'environment': 'Optional: filter by environment (prod | dev | staging). Leave blank for all.',
         'limit':       'Maximum number of hosts to return (default 20)'
     },
-    NULL
-);
+        'bar',
+        'siem');
 
 -- 8. User activity
 INSERT INTO named_queries VALUES (
@@ -280,8 +283,8 @@ LIMIT {{ limit | default(''100'') }}',
         'event_type': 'Optional: filter by event type (login | logout | file_access | network_connection | privilege_escalation | process_spawn | dns_query). Leave blank for all.',
         'limit':      'Maximum number of events to return (default 100)'
     },
-    NULL
-);
+        'line',
+        'siem');
 
 -- 9. MITRE heatmap
 INSERT INTO named_queries VALUES (
@@ -304,8 +307,8 @@ ORDER BY alert_count DESC',
     MAP {
         'min_count': 'Minimum alert count to include a tactic/technique combination (default 1)'
     },
-    NULL
-);
+        'table',
+        'siem');
 
 -- 10. Recent critical events
 INSERT INTO named_queries VALUES (
@@ -342,7 +345,7 @@ LIMIT {{ limit | default(''50'') }}',
         'environment': 'Optional: restrict to a specific environment (prod | dev | staging). Leave blank for all.',
         'limit':       'Maximum number of events to return (default 50)'
     },
-    NULL
-);
+        'pie',
+        'siem');
 
 SELECT count(*) AS named_queries_inserted FROM named_queries;

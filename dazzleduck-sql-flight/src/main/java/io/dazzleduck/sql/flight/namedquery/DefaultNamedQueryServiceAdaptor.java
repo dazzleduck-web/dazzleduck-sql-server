@@ -24,6 +24,7 @@ public class DefaultNamedQueryServiceAdaptor implements NamedQueryServiceAdaptor
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultNamedQueryServiceAdaptor.class);
     private static final int MAX_VALIDATOR_CACHE_SIZE = 500;
+    private static final String LOAD_FROM_DB_QUERY = "SELECT id, name, template, validators, description, parameter_descriptions, preferred_display, query_group FROM %s WHERE name = '%s'";
 
     private final String name;
     private final HttpFlightAdaptor httpFlightAdaptor;
@@ -51,9 +52,7 @@ public class DefaultNamedQueryServiceAdaptor implements NamedQueryServiceAdaptor
 
     private NamedQueryDefinition loadFromDb(String name) throws SQLException, NamedQueryServiceAdaptor.TemplateNotFoundException {
         String safeName = name.replace("'", "''");
-        String sql = ("SELECT id, name, template, validators, description, parameter_descriptions, preferred_display" +
-                      " FROM %s WHERE name = '%s'")
-            .formatted(this.name, safeName);
+        String sql = LOAD_FROM_DB_QUERY.formatted(this.name, safeName);
         try (DuckDBConnection connection = ConnectionPool.getConnection()) {
             var iter = ConnectionPool.collectAll(connection, sql, NamedQueryDefinition.class).iterator();
             if (!iter.hasNext()) {

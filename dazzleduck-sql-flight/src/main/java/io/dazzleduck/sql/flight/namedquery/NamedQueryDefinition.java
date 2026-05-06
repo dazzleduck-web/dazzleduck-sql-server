@@ -14,7 +14,8 @@ import java.util.Map;
  *       validators             VARCHAR[],
  *       description            VARCHAR,
  *       parameter_descriptions MAP(VARCHAR, VARCHAR),
- *       preferred_display      VARCHAR
+ *       preferred_display      VARCHAR,
+ *       query_group             VARCHAR DEFAULT 'general'
  *   );
  * }</pre>
  *
@@ -28,5 +29,6 @@ public record NamedQueryDefinition(
         String[] validators,
         String description,
         Map<String, String> parameterDescriptions,
-        String preferredDisplay) {
+        String preferredDisplay,
+        String queryGroup) {
 }

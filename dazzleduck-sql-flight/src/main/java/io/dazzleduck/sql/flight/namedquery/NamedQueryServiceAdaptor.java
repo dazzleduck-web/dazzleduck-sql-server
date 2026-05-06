@@ -21,6 +21,9 @@ public interface NamedQueryServiceAdaptor {
     
     ObjectMapper MAPPER = new ObjectMapper();
 
+    String LIST_ITEMS_QUERY = "SELECT id, name, description, parameter_descriptions AS parameterDescriptions, validators AS validatorDescriptions, preferred_display, query_group FROM %s WHERE id > %d ORDER BY id LIMIT %d";
+    String GET_NAMED_QUERY = "SELECT id, name, template, description, parameter_descriptions AS parameterDescriptions, validators AS validatorDescriptions, preferred_display, query_group FROM %s WHERE name = '%s'";
+
     String getTemplateTable(FlightProducer.CallContext context);
 
     HttpFlightAdaptor getHttpFlightAdaptor();
@@ -43,22 +46,14 @@ public interface NamedQueryServiceAdaptor {
     default CompletableFuture<Void> listItemsDirect(long offset, int limit,
                                                    FlightProducer.CallContext context,
                                                    Supplier<OutputStream> outputStreamSupplier) {
-        String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
-                      " validators AS validatorDescriptions FROM %s " +
-                      "WHERE id > %d ORDER BY id LIMIT %d")
-                .formatted(getTemplateTable(context), offset, limit);
-        return streamJson(sql, context, outputStreamSupplier, true);
+        return streamJson(LIST_ITEMS_QUERY.formatted(getTemplateTable(context), offset, limit), context, outputStreamSupplier, true);
     }
 
     default CompletableFuture<Void> getNamedQueryDirect(String name,
                                                        FlightProducer.CallContext context,
                                                        Supplier<OutputStream> outputStreamSupplier) {
         String safeName = name.replace("'", "''");
-        String sql = ("SELECT id, name, description, parameter_descriptions AS parameterDescriptions," +
-                      " validators AS validatorDescriptions FROM %s " +
-                      "WHERE name = '%s'")
-                .formatted(getTemplateTable(context), safeName);
-        return streamJson(sql, context, outputStreamSupplier, false)
+        return streamJson(GET_NAMED_QUERY.formatted(getTemplateTable(context), safeName), context, outputStreamSupplier, false)
             .exceptionallyCompose(ex -> {
                 Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                 if (cause instanceof NoSuchElementException) {
