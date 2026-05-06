@@ -53,7 +53,7 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         ConnectionPool.execute(
                 "CREATE TABLE IF NOT EXISTS " + NAMED_QUERIES_TABLE +
                 " (id BIGINT PRIMARY KEY, name VARCHAR UNIQUE, template VARCHAR, validators VARCHAR[]," +
-                "  description VARCHAR, parameter_descriptions MAP(VARCHAR, VARCHAR), preferred_display VARCHAR, query_group VARCHAR DEFAULT 'General')");
+                "  description VARCHAR, parameter_descriptions MAP(VARCHAR, VARCHAR), preferred_display VARCHAR, query_group VARCHAR DEFAULT 'general')");
         ConnectionPool.executeBatch(new String[]{
                 "DELETE FROM " + NAMED_QUERIES_TABLE,
                 "INSERT INTO " + NAMED_QUERIES_TABLE + " VALUES " +
