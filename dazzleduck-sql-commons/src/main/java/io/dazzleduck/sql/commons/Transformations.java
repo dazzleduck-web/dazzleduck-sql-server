@@ -705,6 +705,43 @@ public class Transformations {
         } else if (NODE_TYPE_SET_OPERATION_NODE.equals(type)) {
             collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, visibleCteNames);
             collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, visibleCteNames);
+            collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, visibleCteNames);
+        } else if (NODE_TYPE_RECURSIVE_CTE_NODE.equals(type)) {
+            // WITH RECURSIVE body: recurse into both arms. Keep the CTE's own name visible so the
+            // recursive self-reference is treated as a CTE reference, not a hidden base table.
+            Set<String> localCteNames = visibleCteNames;
+            JsonNode cteName = statement.get(FIELD_CTE_NAME);
+            if (cteName != null) {
+                localCteNames = new HashSet<>(visibleCteNames);
+                localCteNames.add(cteName.asText());
+            }
+            collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, localCteNames);
+            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, localCteNames);
+            collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, localCteNames);
+        } else {
+            // Fail closed: an unrecognized query node type must abort authorization rather than
+            // silently hide the tables it contains (which would let them bypass the access check).
+            throw new IllegalStateException(
+                    "collectAllTableReferences: unsupported query node type '" + type + "'; refusing to "
+                            + "authorize a query whose tables cannot all be enumerated");
+        }
+    }
+
+    /** Walks ORDER BY / LIMIT / OFFSET modifiers for table references inside their subqueries. */
+    private static void collectAllTableRefsFromModifiers(JsonNode modifiers, String catalogName,
+                                                         String schemaName,
+                                                         List<CatalogSchemaTable> collector,
+                                                         Set<String> cteNames) {
+        if (modifiers == null || !modifiers.isArray()) return;
+        for (JsonNode modifier : modifiers) {
+            JsonNode orders = modifier.get(FIELD_ORDERS);
+            if (orders != null && orders.isArray()) {
+                for (JsonNode order : orders) {
+                    collectAllTableRefsFromExpression(order.get(FIELD_EXPRESSION), catalogName, schemaName, collector, cteNames);
+                }
+            }
+            collectAllTableRefsFromExpression(modifier.get(FIELD_LIMIT), catalogName, schemaName, collector, cteNames);
+            collectAllTableRefsFromExpression(modifier.get(FIELD_OFFSET), catalogName, schemaName, collector, cteNames);
         }
     }
 
@@ -741,10 +778,22 @@ public class Transformations {
                 collectAllTableRefsFromStatement(
                         fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE), catalogName, schemaName, collector, cteNames);
             }
-            case NODE_TYPE_SET_OPERATION_NODE -> {
-                collectAllTableRefsFromFromNode(fromNode.get(FIELD_LEFT), catalogName, schemaName, collector, cteNames);
-                collectAllTableRefsFromFromNode(fromNode.get(FIELD_RIGHT), catalogName, schemaName, collector, cteNames);
+            case NODE_TYPE_PIVOT -> {
+                // PIVOT / UNPIVOT: the scanned relation is under `source`; recurse into it so the
+                // pivoted table is seen by the access check. Aggregate expressions may hold subqueries.
+                collectAllTableRefsFromFromNode(fromNode.get(FIELD_SOURCE), catalogName, schemaName, collector, cteNames);
+                collectAllTableRefsFromExpression(fromNode.get(FIELD_AGGREGATES), catalogName, schemaName, collector, cteNames);
             }
+            case NODE_TYPE_EXPRESSION_LIST -> {
+                // VALUES list: each value expression may embed a subquery over a base table.
+                collectAllTableRefsFromExpression(fromNode.get(FIELD_VALUES), catalogName, schemaName, collector, cteNames);
+            }
+            case NODE_TYPE_EMPTY -> {
+                // FROM-less SELECT (e.g. SELECT 1): no relation to enumerate.
+            }
+            default -> throw new IllegalStateException(
+                    "collectAllTableReferences: unsupported FROM node type '" + type + "'; refusing to "
+                            + "authorize a query whose tables cannot all be enumerated");
         }
     }
 
@@ -757,7 +806,8 @@ public class Transformations {
         collectAllTableRefsFromExpression(selectNode.get("qualify"), catalogName, schemaName, collector, cteNames);
         collectAllTableRefsFromExpression(selectNode.get("select_list"), catalogName, schemaName, collector, cteNames);
         collectAllTableRefsFromExpression(selectNode.get("group_expressions"), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(selectNode.get("order_bys"), catalogName, schemaName, collector, cteNames);
+        // ORDER BY / LIMIT / OFFSET live under modifiers[], not a top-level "order_bys" field.
+        collectAllTableRefsFromModifiers(selectNode.get(FIELD_MODIFIERS), catalogName, schemaName, collector, cteNames);
     }
 
     private static void collectAllTableRefsFromExpression(JsonNode expr, String catalogName,
@@ -1268,28 +1318,14 @@ public class Transformations {
         var result = query.deepCopy();
         var statementNode = (ObjectNode) getFirstStatementNode(result);
 
-        Set<String> userCteNames = collectUserCteNames(statementNode);
         // Ordered map: cteKey → original BASE_TABLE node (schema/catalog preserved for CTE body)
         Map<String, ObjectNode> tablesToWrap = new LinkedHashMap<>();
 
-        // Inject into CTE bodies first so user CTEs reference filtered tables.
-        // Each CTE body is walked with its own name removed from the visible-CTE set:
-        // in a non-recursive CTE, the CTE cannot reference itself, so a same-named
-        // reference inside the body is a base-table reference and must be filtered.
-        JsonNode cteMapNode = statementNode.get("cte_map");
-        if (cteMapNode != null) {
-            JsonNode mapArray = cteMapNode.get("map");
-            if (mapArray != null && mapArray.isArray()) {
-                for (JsonNode entry : mapArray) {
-                    String cteName = entry.get("key").asText();
-                    Set<String> namesVisibleInBody = new HashSet<>(userCteNames);
-                    namesVisibleInBody.remove(cteName);
-                    ObjectNode cteBody = (ObjectNode) entry.get("value").get("query").get("node");
-                    renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, tablesToWrap);
-                }
-            }
-        }
-        renameBaseTablesInStatementNode(statementNode, userCteNames, tablesToWrap);
+        // Walk the whole statement — its FROM clause, expression subqueries, and any WITH clause
+        // (top-level or nested) — collecting every real base table and rewriting each reference to
+        // its filter-CTE name. CTE bodies are handled inside the dispatcher so nesting at any depth
+        // is filtered uniformly.
+        renameBaseTablesInStatementNode(statementNode, new HashSet<>(), tablesToWrap);
 
         if (!tablesToWrap.isEmpty()) {
             ArrayNode newMap = JsonNodeFactory.instance.arrayNode();
@@ -1297,40 +1333,107 @@ public class Transformations {
                 String qualifiedLookupKey = buildQualifiedLookupKey(e.getValue());
                 newMap.add(buildFilterCteEntry(e.getKey(), e.getValue(), filterForTable.apply(qualifiedLookupKey)));
             }
-            JsonNode existingMap = statementNode.get("cte_map").get("map");
+            JsonNode existingMap = statementNode.get(FIELD_CTE_MAP).get(FIELD_MAP);
             if (existingMap != null && existingMap.isArray()) {
                 for (JsonNode existing : existingMap) {
                     newMap.add(existing);
                 }
             }
-            ((ObjectNode) statementNode.get("cte_map")).set("map", newMap);
+            ((ObjectNode) statementNode.get(FIELD_CTE_MAP)).set(FIELD_MAP, newMap);
         }
 
         return result;
     }
 
-    private static Set<String> collectUserCteNames(JsonNode statementNode) {
-        Set<String> names = new HashSet<>();
-        JsonNode cteMap = statementNode.get("cte_map");
-        if (cteMap == null) return names;
-        JsonNode map = cteMap.get("map");
-        if (map == null || !map.isArray()) return names;
-        for (JsonNode entry : map) {
-            JsonNode key = entry.get("key");
-            if (key != null) names.add(key.asText());
+    /**
+     * Processes a query node's own WITH clause: registers every CTE name it declares (so references
+     * to them are treated as CTE references, not base tables) and injects the filter into each CTE
+     * body. Returns {@code visibleCteNames} augmented with the names declared here.
+     *
+     * <p>Each CTE body is walked with its OWN name removed from the visible set: a non-recursive CTE
+     * cannot reference itself, so a same-named reference inside the body is the real base table and
+     * MUST be filtered. A recursive CTE body ({@code RECURSIVE_CTE_NODE}) re-adds its own name for the
+     * self-reference in {@link #renameBaseTablesInStatementNode}.
+     */
+    private static Set<String> walkNestedCtes(ObjectNode node, Set<String> visibleCteNames,
+                                              Map<String, ObjectNode> tablesToWrap) {
+        JsonNode cteMapNode = node.get(FIELD_CTE_MAP);
+        if (cteMapNode == null) return visibleCteNames;
+        JsonNode mapArray = cteMapNode.get(FIELD_MAP);
+        if (mapArray == null || !mapArray.isArray() || mapArray.isEmpty()) return visibleCteNames;
+
+        Set<String> withDeclared = new HashSet<>(visibleCteNames);
+        for (JsonNode entry : mapArray) {
+            withDeclared.add(entry.get(FIELD_KEY).asText());
         }
-        return names;
+        for (JsonNode entry : mapArray) {
+            String cteName = entry.get(FIELD_KEY).asText();
+            Set<String> namesVisibleInBody = new HashSet<>(withDeclared);
+            namesVisibleInBody.remove(cteName);
+            ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);
+            renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, tablesToWrap);
+        }
+        return withDeclared;
     }
 
-    /** Dispatches to the correct handler based on whether the node is SELECT or UNION/INTERSECT/EXCEPT. */
-    private static void renameBaseTablesInStatementNode(ObjectNode statementNode, Set<String> userCteNames,
+    /**
+     * Dispatches a query node (a statement body or CTE body) to the correct handler by type.
+     *
+     * <p>Fails closed: an unrecognized node type throws rather than silently passing its base tables
+     * through unfiltered (which would be an RLS bypass). This mechanism guards row-level security, so
+     * any shape it does not understand must abort the query, not leak.
+     */
+    private static void renameBaseTablesInStatementNode(ObjectNode statementNode, Set<String> visibleCteNames,
                                                          Map<String, ObjectNode> tablesToWrap) {
         String type = statementNode.get(FIELD_TYPE).asText();
-        if (NODE_TYPE_SELECT_NODE.equals(type)) {
-            renameBaseTablesInSelect(statementNode, userCteNames, tablesToWrap);
-        } else if (NODE_TYPE_SET_OPERATION_NODE.equals(type)) {
-            renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_LEFT), userCteNames, tablesToWrap);
-            renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT), userCteNames, tablesToWrap);
+        switch (type) {
+            case NODE_TYPE_SELECT_NODE -> {
+                Set<String> visible = walkNestedCtes(statementNode, visibleCteNames, tablesToWrap);
+                renameBaseTablesInSelect(statementNode, visible, tablesToWrap);
+            }
+            case NODE_TYPE_SET_OPERATION_NODE -> {
+                Set<String> visible = walkNestedCtes(statementNode, visibleCteNames, tablesToWrap);
+                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_LEFT), visible, tablesToWrap);
+                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT), visible, tablesToWrap);
+                walkModifiersForSubqueries(statementNode.get(FIELD_MODIFIERS), visible, tablesToWrap);
+            }
+            case NODE_TYPE_RECURSIVE_CTE_NODE -> {
+                Set<String> visible = walkNestedCtes(statementNode, visibleCteNames, tablesToWrap);
+                // The recursive self-reference (FROM r inside the CTE body) is a CTE reference, not a
+                // base table; keep the CTE's own name visible so it is not wrapped as a phantom table.
+                JsonNode cteName = statementNode.get(FIELD_CTE_NAME);
+                if (cteName != null) {
+                    visible = new HashSet<>(visible);
+                    visible.add(cteName.asText());
+                }
+                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_LEFT), visible, tablesToWrap);
+                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT), visible, tablesToWrap);
+                walkModifiersForSubqueries(statementNode.get(FIELD_MODIFIERS), visible, tablesToWrap);
+            }
+            default -> throw new IllegalStateException(
+                    "injectFilterCtes: unsupported query node type '" + type + "'; refusing to run to "
+                            + "avoid producing an unfiltered (RLS-bypassing) query");
+        }
+    }
+
+    /**
+     * Walks the result modifiers of a SELECT or set-operation node (ORDER BY, LIMIT, OFFSET) for
+     * subqueries, so a base table referenced only inside e.g. {@code ORDER BY (SELECT ... FROM t)}
+     * is still filtered. DuckDB serializes these under {@code modifiers[]} (ORDER BY expressions live
+     * in {@code orders[].expression}), NOT a top-level {@code order_bys} field.
+     */
+    private static void walkModifiersForSubqueries(JsonNode modifiers, Set<String> visibleCteNames,
+                                                    Map<String, ObjectNode> tablesToWrap) {
+        if (modifiers == null || !modifiers.isArray()) return;
+        for (JsonNode modifier : modifiers) {
+            JsonNode orders = modifier.get(FIELD_ORDERS);
+            if (orders != null && orders.isArray()) {
+                for (JsonNode order : orders) {
+                    walkExpressionsForSubqueries(order.get(FIELD_EXPRESSION), visibleCteNames, tablesToWrap);
+                }
+            }
+            walkExpressionsForSubqueries(modifier.get(FIELD_LIMIT), visibleCteNames, tablesToWrap);
+            walkExpressionsForSubqueries(modifier.get(FIELD_OFFSET), visibleCteNames, tablesToWrap);
         }
     }
 
@@ -1355,7 +1458,8 @@ public class Transformations {
         walkExpressionsForSubqueries(selectNode.get("qualify"), userCteNames, tablesToWrap);
         walkExpressionsForSubqueries(selectNode.get("select_list"), userCteNames, tablesToWrap);
         walkExpressionsForSubqueries(selectNode.get("group_expressions"), userCteNames, tablesToWrap);
-        walkExpressionsForSubqueries(selectNode.get("order_bys"), userCteNames, tablesToWrap);
+        // ORDER BY / LIMIT / OFFSET live under modifiers[], not a top-level "order_bys" field.
+        walkModifiersForSubqueries(selectNode.get(FIELD_MODIFIERS), userCteNames, tablesToWrap);
     }
 
     /**
@@ -1434,17 +1538,27 @@ public class Transformations {
                 walkExpressionsForSubqueries(fromNode.get("condition"), userCteNames, tablesToWrap);
             }
             case NODE_TYPE_SUBQUERY -> {
-                // The derived-table body may be a SELECT or a set operation (UNION/INTERSECT/EXCEPT);
-                // dispatch on its type so base tables inside a UNION are filtered too. Calling
-                // renameBaseTablesInSelect directly would silently skip a set-operation body, letting
-                // its base tables pass through UNFILTERED (an RLS bypass).
+                // The derived-table body may be a SELECT, a set operation, or a recursive CTE;
+                // dispatch on its type so nested base tables are filtered too.
                 ObjectNode inner = (ObjectNode) fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE);
                 renameBaseTablesInStatementNode(inner, userCteNames, tablesToWrap);
             }
-            case NODE_TYPE_SET_OPERATION_NODE -> {
-                renameBaseTablesInFromNode(fromNode.get(FIELD_LEFT), userCteNames, tablesToWrap);
-                renameBaseTablesInFromNode(fromNode.get(FIELD_RIGHT), userCteNames, tablesToWrap);
+            case NODE_TYPE_PIVOT -> {
+                // PIVOT / UNPIVOT: the scanned relation is under `source`; recurse into it so the
+                // pivoted base table is filtered. Aggregate expressions may hold subqueries.
+                renameBaseTablesInFromNode(fromNode.get(FIELD_SOURCE), userCteNames, tablesToWrap);
+                walkExpressionsForSubqueries(fromNode.get(FIELD_AGGREGATES), userCteNames, tablesToWrap);
             }
+            case NODE_TYPE_EXPRESSION_LIST -> {
+                // VALUES list: each value expression may embed a subquery over a base table.
+                walkExpressionsForSubqueries(fromNode.get(FIELD_VALUES), userCteNames, tablesToWrap);
+            }
+            case NODE_TYPE_EMPTY -> {
+                // FROM-less SELECT (e.g. SELECT 1): no relation to filter.
+            }
+            default -> throw new IllegalStateException(
+                    "injectFilterCtes: unsupported FROM node type '" + type + "'; refusing to run to "
+                            + "avoid producing an unfiltered (RLS-bypassing) query");
         }
     }
 

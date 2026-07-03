@@ -37,7 +37,11 @@ public class ExpressionConstants {
     public static final String NODE_TYPE_SUBQUERY = "SUBQUERY";
     public static final String NODE_TYPE_SELECT_NODE = "SELECT_NODE";
     public static final String NODE_TYPE_SET_OPERATION_NODE = "SET_OPERATION_NODE";
+    public static final String NODE_TYPE_RECURSIVE_CTE_NODE = "RECURSIVE_CTE_NODE";
     public static final String NODE_TYPE_JOIN = "JOIN";
+    public static final String NODE_TYPE_PIVOT = "PIVOT";
+    public static final String NODE_TYPE_EXPRESSION_LIST = "EXPRESSION_LIST";
+    public static final String NODE_TYPE_EMPTY = "EMPTY";
 
     // Field name constants for JSON AST nodes
     public static final String FIELD_CLASS = "class";
@@ -78,6 +82,15 @@ public class ExpressionConstants {
     public static final String FIELD_MODIFIERS = "modifiers";
     public static final String FIELD_LIMIT = "limit";
     public static final String FIELD_OFFSET = "offset";
+    public static final String FIELD_EXPRESSION = "expression";
+    public static final String FIELD_SOURCE = "source";
+    public static final String FIELD_VALUES = "values";
+    public static final String FIELD_AGGREGATES = "aggregates";
+    public static final String FIELD_CTE_MAP = "cte_map";
+    public static final String FIELD_MAP = "map";
+    public static final String FIELD_KEY = "key";
+    public static final String FIELD_QUERY = "query";
+    public static final String FIELD_CTE_NAME = "cte_name";
 
     // Type ID constants for data types
     public static final String TYPE_VARCHAR = "VARCHAR";

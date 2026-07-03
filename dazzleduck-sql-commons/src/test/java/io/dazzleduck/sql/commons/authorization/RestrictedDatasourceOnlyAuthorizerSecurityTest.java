@@ -148,4 +148,46 @@ public class RestrictedDatasourceOnlyAuthorizerSecurityTest {
         assertThrows(UnauthorizedException.class, () ->
                 authorizer.authorize("user", DB, SCHEMA, tree, claims("orders", "tenant_id='abc'")));
     }
+
+    // ── Gap 2: node-type coverage — tables hidden by exotic shapes must still be caught ──
+
+    @Test
+    void recursiveCte_unauthorizedTable_rejected() throws SQLException, JsonProcessingException {
+        // Regression: the enumerator ignored RECURSIVE_CTE_NODE, so 'payments' in the anchor was
+        // invisible to the access check — the query was wrongly authorized.
+        String sql = "WITH RECURSIVE r(x) AS ("
+                + "SELECT order_id FROM payments UNION ALL SELECT x FROM r WHERE false) "
+                + "SELECT x FROM r";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        assertThrows(UnauthorizedException.class, () ->
+                authorizer.authorize("user", DB, SCHEMA, tree, claims("orders", "tenant_id='abc'")));
+    }
+
+    @Test
+    void unpivot_unauthorizedTable_rejected() throws SQLException, JsonProcessingException {
+        // Regression: a PIVOT/UNPIVOT FROM node was not enumerated, hiding its `source` table.
+        String sql = "SELECT tenant_id FROM payments UNPIVOT (val FOR col IN (order_id, paid))";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        assertThrows(UnauthorizedException.class, () ->
+                authorizer.authorize("user", DB, SCHEMA, tree, claims("orders", "tenant_id='abc'")));
+    }
+
+    @Test
+    void valuesListScalarSubquery_unauthorizedTable_rejected() throws SQLException, JsonProcessingException {
+        // Regression: an EXPRESSION_LIST (VALUES) FROM node's value expressions were not walked.
+        String sql = "SELECT x FROM (VALUES ((SELECT count(*) FROM sensitive))) v(x)";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        assertThrows(UnauthorizedException.class, () ->
+                authorizer.authorize("user", DB, SCHEMA, tree, claims("orders", "tenant_id='abc'")));
+    }
+
+    @Test
+    void orderBySubquery_unauthorizedTable_rejected() throws SQLException, JsonProcessingException {
+        // Regression: ORDER BY subqueries live under modifiers[], not the "order_bys" field the
+        // enumerator used to read (always null), so 'payments' here was invisible to the check.
+        String sql = "SELECT id FROM orders ORDER BY (SELECT max(paid) FROM payments)";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        assertThrows(UnauthorizedException.class, () ->
+                authorizer.authorize("user", DB, SCHEMA, tree, claims("orders", "tenant_id='abc'")));
+    }
 }
