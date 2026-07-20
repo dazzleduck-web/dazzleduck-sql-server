@@ -888,12 +888,15 @@ public class Transformations {
      * <p>When no optimization applies, the <em>same instance</em> passed as {@code outerSqlAst} is
      * returned, so callers can detect a no-op by reference identity.
      *
-     * @param conn        DuckDB connection (available for re-parse/verification; v1 is pure AST)
+     * <p>Pure AST-in/AST-out — no DuckDB round-trip. When the deferred join-key uniqueness
+     * verification lands (see the spec), it will take a {@link Connection}; that is intentionally
+     * omitted here so the v1 signature carries no unused parameter.
+     *
      * @param outerSqlAst parsed outer query (statement wrapper from {@code parseToTree}) selecting from the view
      * @param viewBodyAst parsed view body (the F/A/B join SELECT); the caller fetched and parsed it
      * @return rewritten outer AST with the view inlined as a pruned subquery, or {@code outerSqlAst} unchanged
      */
-    public static JsonNode pruneUnusedLeftJoins(Connection conn, JsonNode outerSqlAst, JsonNode viewBodyAst) {
+    public static JsonNode pruneUnusedLeftJoins(JsonNode outerSqlAst, JsonNode viewBodyAst) {
         try {
             JsonNode outerNode = getFirstStatementNode(outerSqlAst);
             if (!NODE_TYPE_SELECT_NODE.equals(asText(outerNode, FIELD_TYPE))) return outerSqlAst;

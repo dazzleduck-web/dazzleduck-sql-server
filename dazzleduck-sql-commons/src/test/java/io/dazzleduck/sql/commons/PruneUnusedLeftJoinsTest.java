@@ -105,14 +105,14 @@ public class PruneUnusedLeftJoinsTest {
     private JsonNode prune(String outerSql, String viewBody) throws Exception {
         JsonNode outer = Transformations.parseToTree(conn, outerSql);
         JsonNode body = Transformations.parseToTree(conn, viewBody);
-        return Transformations.pruneUnusedLeftJoins(conn, outer, body);
+        return Transformations.pruneUnusedLeftJoins(outer, body);
     }
 
     /** Assert the method bailed out: the exact input instance comes back. */
     private void assertBailsOut(String outerSql, String viewBody) throws Exception {
         JsonNode outer = Transformations.parseToTree(conn, outerSql);
         JsonNode body = Transformations.parseToTree(conn, viewBody);
-        JsonNode pruned = Transformations.pruneUnusedLeftJoins(conn, outer, body);
+        JsonNode pruned = Transformations.pruneUnusedLeftJoins(outer, body);
         assertSame(outer, pruned, "expected a no-op (same instance returned) for: " + outerSql);
     }
 

@@ -81,7 +81,7 @@ public class PruneUnusedLeftJoinsDuckLakeTest {
     private JsonNode prune(String outerSql) throws Exception {
         JsonNode outer = Transformations.parseToTree(conn, outerSql);
         JsonNode body = Transformations.parseToTree(conn, VIEW_BODY);
-        return Transformations.pruneUnusedLeftJoins(conn, outer, body);
+        return Transformations.pruneUnusedLeftJoins(outer, body);
     }
 
     private int countJoins(JsonNode node) {

@@ -50,22 +50,21 @@ Because only `a_name` is used, the join to `B` is dead and is removed.
  * Prune LEFT JOINs from an inlined view whose columns the outer query never references.
  * Optimization only — returns the outer AST structurally unchanged on any uncertainty.
  *
- * @param conn        DuckDB connection (available for re-parse/verification; v1 is pure AST)
- * @param outerSqlAst parsed outer query (a statement wrapper or SELECT_NODE) selecting from the view
+ * @param outerSqlAst parsed outer query (a statement wrapper) selecting from the view
  * @param viewBodyAst parsed view body (the F/A/B join SELECT) — the caller fetched and parsed it
  * @return rewritten outer AST with the view inlined as a pruned subquery, or outerSqlAst unchanged
  */
-public static JsonNode pruneUnusedLeftJoins(Connection conn, JsonNode outerSqlAst, JsonNode viewBodyAst)
+public static JsonNode pruneUnusedLeftJoins(JsonNode outerSqlAst, JsonNode viewBodyAst)
 ```
 
 - **AST in, AST out** (`JsonNode`). The caller owns `parseToTree` / `parseToSql`;
-  this function never touches SQL strings.
+  this function never touches SQL strings and takes no DuckDB connection.
 - **Which base table is the view?** The caller passes no view name, so v1 relies
   on the precondition that the outer `FROM` contains **exactly one `BASE_TABLE`** —
   that reference is replaced by `viewBodyAst`.
-- `conn` is retained per the agreed signature; v1's pure-AST path does not use it.
-  It is available for a round-trip equivalence check or future key-uniqueness
-  verification.
+- **No `conn` in v1.** The transform is pure AST. The deferred join-key uniqueness
+  verification will need a `Connection`; it is intentionally left off the v1
+  signature so no unused parameter is carried until then.
 - **Contract shift:** because `viewBodyAst` is supplied directly, the function
   cannot confirm the single outer base table is actually a view — it trusts the
   caller that `viewBodyAst` is the body for that reference.
@@ -109,7 +108,7 @@ Scope decisions locked for v1:
 ## Algorithm
 
 ```
-pruneUnusedLeftJoins(conn, outerSqlAst, viewBodyAst):
+pruneUnusedLeftJoins(outerSqlAst, viewBodyAst):
   outer      = getFirstStatementNode(outerSqlAst)
   viewRef    = the single BASE_TABLE in outer FROM            // v1: exactly one
   if none    -> return outerSqlAst unchanged
