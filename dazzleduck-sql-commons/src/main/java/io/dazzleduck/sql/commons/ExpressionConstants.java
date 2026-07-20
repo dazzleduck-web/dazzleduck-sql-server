@@ -92,6 +92,24 @@ public class ExpressionConstants {
     public static final String FIELD_QUERY = "query";
     public static final String FIELD_CTE_NAME = "cte_name";
 
+    // JOIN node fields (used by LEFT JOIN elimination)
+    public static final String FIELD_JOIN_TYPE = "join_type";
+    public static final String FIELD_REF_TYPE = "ref_type";
+    public static final String FIELD_CONDITION = "condition";
+    public static final String FIELD_USING_COLUMNS = "using_columns";
+    public static final String JOIN_TYPE_LEFT = "LEFT";
+    public static final String REF_TYPE_REGULAR = "REGULAR";
+
+    // STAR select-list entry
+    public static final String STAR_CLASS = "STAR";
+    public static final String FIELD_RELATION_NAME = "relation_name";
+    public static final String FIELD_SELECT_LIST = "select_list";
+    public static final String FIELD_NAMED_PARAM_MAP = "named_param_map";
+    public static final String FIELD_COLUMN_NAME_ALIAS = "column_name_alias";
+    public static final String FIELD_SAMPLE = "sample";
+    public static final String FIELD_GROUP_EXPRESSIONS = "group_expressions";
+    public static final String FIELD_GROUP_SETS = "group_sets";
+
     // Type ID constants for data types
     public static final String TYPE_VARCHAR = "VARCHAR";
     public static final String TYPE_INTEGER = "INTEGER";

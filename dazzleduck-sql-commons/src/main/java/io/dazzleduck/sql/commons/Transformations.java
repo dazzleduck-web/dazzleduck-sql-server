@@ -867,6 +867,298 @@ public class Transformations {
 
     public static Function<JsonNode, JsonNode> FIRST_STATEMENT_NODE = Transformations::getFirstStatementNode;
 
+    /**
+     * Prune LEFT JOINs from an inlined view whose columns the outer query never references.
+     * Optimization only — returns the outer AST structurally unchanged on any uncertainty.
+     *
+     * <p>See {@code LEFT_JOIN_PRUNING_SPEC.md} for the full design, soundness preconditions,
+     * and the (trusted, unverified) join-key uniqueness assumption. In short: the outer FROM
+     * must be exactly one base table (the view reference), which is replaced by {@code viewBodyAst}
+     * inlined as a subquery; the view's SELECT list is pruned to the columns the outer query uses,
+     * and any LEFT JOIN whose (null-supplying, right-hand) base table then contributes no referenced
+     * column is dropped, iterated to a fixpoint.
+     *
+     * <p>Bails out to a no-op on: an outer FROM that is not a single base table, any STAR in the
+     * outer query (bare {@code *} or qualified {@code fv.*} — both expand to view columns that
+     * cannot be enumerated here), a USING / non-REGULAR join in the view body, or any structural
+     * surprise while walking the AST. Projection pushdown is additionally skipped when the view
+     * body has DISTINCT / GROUP BY / other modifiers, where dropping a select entry could change
+     * row count or shift positional references; join elimination still applies.
+     *
+     * <p>When no optimization applies, the <em>same instance</em> passed as {@code outerSqlAst} is
+     * returned, so callers can detect a no-op by reference identity.
+     *
+     * @param conn        DuckDB connection (available for re-parse/verification; v1 is pure AST)
+     * @param outerSqlAst parsed outer query (statement wrapper from {@code parseToTree}) selecting from the view
+     * @param viewBodyAst parsed view body (the F/A/B join SELECT); the caller fetched and parsed it
+     * @return rewritten outer AST with the view inlined as a pruned subquery, or {@code outerSqlAst} unchanged
+     */
+    public static JsonNode pruneUnusedLeftJoins(Connection conn, JsonNode outerSqlAst, JsonNode viewBodyAst) {
+        try {
+            JsonNode outerNode = getFirstStatementNode(outerSqlAst);
+            if (!NODE_TYPE_SELECT_NODE.equals(asText(outerNode, FIELD_TYPE))) return outerSqlAst;
+
+            // v1: the outer FROM must be exactly one base table — the view reference.
+            JsonNode viewRef = outerNode.get(FIELD_FROM_TABLE);
+            if (viewRef == null || !NODE_TYPE_BASE_TABLE.equals(asText(viewRef, FIELD_TYPE))) return outerSqlAst;
+
+            // A STAR anywhere in the outer query — bare (*) or table-qualified (fv.*) — expands to
+            // view columns we cannot enumerate here, so every view column must be treated as used.
+            UsedColumns outerUse = new UsedColumns();
+            collectUsage(outerNode, outerUse);
+            if (outerUse.hasStar || outerUse.hasQualifiedStar) return outerSqlAst;
+            Set<String> usedViewCols = outerUse.columnNames;
+
+            JsonNode bodyNode = getFirstStatementNode(viewBodyAst);
+            if (!NODE_TYPE_SELECT_NODE.equals(asText(bodyNode, FIELD_TYPE))) return outerSqlAst;
+            // USING / non-REGULAR joins break our alias-based attribution — bail.
+            if (hasUnsupportedJoin(bodyNode.get(FIELD_FROM_TABLE))) return outerSqlAst;
+
+            ObjectNode body = (ObjectNode) bodyNode.deepCopy();     // never mutate the caller's node
+            boolean changed = projectionPruningIsSafe(body)
+                    && pruneSelectList(body, usedViewCols);         // (a) projection pushdown
+            changed |= eliminateUnusedLeftJoins(body);              // (b) join elimination to fixpoint
+            if (!changed) return outerSqlAst;                       // nothing to optimize — return input as-is
+
+            // (c) inline the pruned body as a subquery in place of the view reference.
+            ObjectNode outerRootCopy = (ObjectNode) outerSqlAst.deepCopy();
+            ObjectNode outerNodeCopy = (ObjectNode) getFirstStatementNode(outerRootCopy);
+            outerNodeCopy.set(FIELD_FROM_TABLE, wrapAsSubquery(body, effectiveId(viewRef), viewRef));
+            return outerRootCopy;
+        } catch (RuntimeException e) {
+            // Optimization must never change semantics: on any unexpected structure, do nothing.
+            return outerSqlAst;
+        }
+    }
+
+    /** Column usage collected from the outer query: referenced name parts and STAR presence. */
+    private static final class UsedColumns {
+        final Set<String> columnNames = new HashSet<>(); // every part of every COLUMN_REF (see collectUsage)
+        boolean hasStar = false;          // a bare (unqualified) STAR
+        boolean hasQualifiedStar = false; // a table-qualified STAR, e.g. fv.*
+    }
+
+    /** Deep-walk the outer query collecting COLUMN_REF name parts and STAR presence. */
+    private static void collectUsage(JsonNode node, UsedColumns out) {
+        if (node == null || node.isNull()) return;
+        if (node.isObject()) {
+            String clazz = asText(node, FIELD_CLASS);
+            if (COLUMN_REF_CLASS.equals(clazz)) {
+                // A multi-part reference may be table.column OR struct_column.field — the parser
+                // cannot distinguish. Record every part as a potentially-used column name so a
+                // struct column projected by the view is never pruned away (conservative: keeps
+                // too much, never too little).
+                for (String part : getReferenceName(node)) out.columnNames.add(part);
+                return; // a COLUMN_REF has no nested COLUMN_REF/STAR children
+            }
+            if (STAR_CLASS.equals(clazz)) {
+                String relation = asText(node, FIELD_RELATION_NAME);
+                if (relation != null && !relation.isEmpty()) out.hasQualifiedStar = true;
+                else out.hasStar = true;
+                return;
+            }
+            for (JsonNode child : node) collectUsage(child, out);
+        } else if (node.isArray()) {
+            for (JsonNode child : node) collectUsage(child, out);
+        }
+    }
+
+    /** Reference counts over a view-body fragment, used to decide join eliminability. */
+    private static final class UsageCounts {
+        final Map<String, Integer> qualifierCounts = new HashMap<>(); // table/alias -> #references
+        int unqualified = 0;  // single-part COLUMN_REFs
+        int bareStars = 0;    // unqualified STARs
+
+        int count(String qualifier) { return qualifierCounts.getOrDefault(qualifier, 0); }
+    }
+
+    /** Deep-walk a body fragment counting per-qualifier references, unqualified refs, and bare stars. */
+    private static void countUsage(JsonNode node, UsageCounts out) {
+        if (node == null || node.isNull()) return;
+        if (node.isObject()) {
+            String clazz = asText(node, FIELD_CLASS);
+            if (COLUMN_REF_CLASS.equals(clazz)) {
+                String[] parts = getReferenceName(node);
+                if (parts.length >= 2) out.qualifierCounts.merge(parts[0], 1, Integer::sum);
+                else out.unqualified++;
+                return;
+            }
+            if (STAR_CLASS.equals(clazz)) {
+                String relation = asText(node, FIELD_RELATION_NAME);
+                if (relation != null && !relation.isEmpty()) out.qualifierCounts.merge(relation, 1, Integer::sum);
+                else out.bareStars++;
+                return;
+            }
+            for (JsonNode child : node) countUsage(child, out);
+        } else if (node.isArray()) {
+            for (JsonNode child : node) countUsage(child, out);
+        }
+    }
+
+    /**
+     * Projection pushdown is only safe when dropping a select-list entry cannot change row count
+     * or shift positional references: under DISTINCT the select list <em>is</em> the dedup key,
+     * and GROUP BY / ORDER BY may reference entries by position ({@code GROUP BY 1}). Join
+     * elimination remains applicable either way.
+     */
+    private static boolean projectionPruningIsSafe(JsonNode body) {
+        JsonNode modifiers = body.get(FIELD_MODIFIERS);
+        if (modifiers != null && modifiers.isArray() && !modifiers.isEmpty()) return false;
+        JsonNode groups = body.get(FIELD_GROUP_EXPRESSIONS);
+        if (groups != null && groups.isArray() && !groups.isEmpty()) return false;
+        JsonNode groupSets = body.get(FIELD_GROUP_SETS);
+        return groupSets == null || !groupSets.isArray() || groupSets.isEmpty();
+    }
+
+    /**
+     * (a) Keep every STAR and non-column expression; keep a COLUMN_REF only if its output name is used.
+     * @return true if any entry was dropped
+     */
+    private static boolean pruneSelectList(ObjectNode body, Set<String> usedViewCols) {
+        JsonNode selectList = body.get(FIELD_SELECT_LIST);
+        if (!(selectList instanceof ArrayNode list)) return false;
+        ArrayNode kept = objectMapper.createArrayNode();
+        for (JsonNode entry : list) {
+            String clazz = asText(entry, FIELD_CLASS);
+            if (COLUMN_REF_CLASS.equals(clazz)) {
+                if (usedViewCols.contains(selectOutputName(entry))) kept.add(entry);
+                // else: dropped (outer query never references this column)
+            } else {
+                kept.add(entry); // STAR or complex expression — keep conservatively
+            }
+        }
+        if (kept.isEmpty() || kept.size() == list.size()) return false; // nothing droppable (never emit an empty list)
+        body.set(FIELD_SELECT_LIST, kept);
+        return true;
+    }
+
+    /** Output name of a select-list entry: its alias, else the last part of a COLUMN_REF's names. */
+    private static String selectOutputName(JsonNode entry) {
+        String alias = asText(entry, FIELD_ALIAS);
+        if (alias != null && !alias.isEmpty()) return alias;
+        if (COLUMN_REF_CLASS.equals(asText(entry, FIELD_CLASS))) {
+            String[] parts = getReferenceName(entry);
+            if (parts.length >= 1) return parts[parts.length - 1];
+        }
+        return "";
+    }
+
+    /**
+     * (b) Repeatedly drop eliminable LEFT JOINs until the FROM tree stops changing.
+     *
+     * <p>Each round walks the body <em>once</em> to count references per qualifier, then drops every
+     * join whose right-side table is referenced only by its own ON condition — O(rounds · body size)
+     * rather than a full body re-walk per candidate join. Rounds are bounded by the longest
+     * transitive elimination chain. Within a round the counts grow stale as joins are dropped;
+     * stale counts only over-count, so a join is never wrongly freed — the next round's fresh
+     * counts catch the newly-freed ones.
+     *
+     * @return true if any join was eliminated
+     */
+    private static boolean eliminateUnusedLeftJoins(ObjectNode body) {
+        boolean any = false;
+        boolean changed = true;
+        while (changed) {
+            UsageCounts global = new UsageCounts();
+            countUsage(body, global);
+            if (global.bareStars > 0) break; // a bare STAR could expand any table's columns — stop
+            boolean[] roundChanged = {false};
+            body.set(FIELD_FROM_TABLE, pruneFromNode(body.get(FIELD_FROM_TABLE), global, roundChanged));
+            changed = roundChanged[0];
+            any |= changed;
+        }
+        return any;
+    }
+
+    /** Bottom-up: prune the arms first, then drop this JOIN if its right base table is unused. */
+    private static JsonNode pruneFromNode(JsonNode from, UsageCounts global, boolean[] changed) {
+        if (from == null || !NODE_TYPE_JOIN.equals(asText(from, FIELD_TYPE))) return from;
+        ObjectNode join = (ObjectNode) from;
+        join.set(FIELD_LEFT, pruneFromNode(join.get(FIELD_LEFT), global, changed));
+        join.set(FIELD_RIGHT, pruneFromNode(join.get(FIELD_RIGHT), global, changed));
+        if (isEliminable(join, global)) {
+            changed[0] = true;
+            return join.get(FIELD_LEFT); // drop the right arm and its ON condition
+        }
+        return join;
+    }
+
+    /** A LEFT JOIN to a base table with an equi-condition whose columns are referenced nowhere else. */
+    private static boolean isEliminable(ObjectNode join, UsageCounts global) {
+        if (!JOIN_TYPE_LEFT.equals(asText(join, FIELD_JOIN_TYPE))) return false;
+        if (!REF_TYPE_REGULAR.equals(asText(join, FIELD_REF_TYPE))) return false;
+        JsonNode using = join.get(FIELD_USING_COLUMNS);
+        if (using != null && using.isArray() && !using.isEmpty()) return false;
+        JsonNode right = join.get(FIELD_RIGHT);
+        if (right == null || !NODE_TYPE_BASE_TABLE.equals(asText(right, FIELD_TYPE))) return false;
+        JsonNode condition = join.get(FIELD_CONDITION);
+        if (!isEquiJoinCondition(condition)) return false;
+
+        // The right table is unused iff every reference to it — and every unqualified reference,
+        // which could belong to it — comes from this join's own ON condition.
+        UsageCounts own = new UsageCounts();
+        countUsage(condition, own);
+        if (global.unqualified > own.unqualified) return false;
+        String rightId = effectiveId(right);
+        return global.count(rightId) <= own.count(rightId);
+    }
+
+    private static boolean isEquiJoinCondition(JsonNode condition) {
+        if (condition == null || condition.isNull()) return false;
+        String clazz = asText(condition, FIELD_CLASS);
+        if (COMPARISON_CLASS.equals(clazz)) {
+            return COMPARE_TYPE_EQUAL.equals(asText(condition, FIELD_TYPE));
+        }
+        if (CONJUNCTION_CLASS.equals(clazz) && CONJUNCTION_TYPE_AND.equals(asText(condition, FIELD_TYPE))) {
+            JsonNode children = condition.get(FIELD_CHILDREN);
+            if (children == null || !children.isArray() || children.isEmpty()) return false;
+            for (JsonNode child : children) {
+                if (!isEquiJoinCondition(child)) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** True if any JOIN in this FROM tree uses USING(...) or a non-REGULAR ref type. */
+    private static boolean hasUnsupportedJoin(JsonNode from) {
+        if (from == null || !NODE_TYPE_JOIN.equals(asText(from, FIELD_TYPE))) return false;
+        JsonNode using = from.get(FIELD_USING_COLUMNS);
+        if (using != null && using.isArray() && !using.isEmpty()) return true;
+        if (!REF_TYPE_REGULAR.equals(asText(from, FIELD_REF_TYPE))) return true;
+        return hasUnsupportedJoin(from.get(FIELD_LEFT)) || hasUnsupportedJoin(from.get(FIELD_RIGHT));
+    }
+
+    /** The name a FROM node is referenced by: its alias if present, else its table name. */
+    private static String effectiveId(JsonNode fromNode) {
+        String alias = asText(fromNode, FIELD_ALIAS);
+        if (alias != null && !alias.isEmpty()) return alias;
+        return asText(fromNode, FIELD_TABLE_NAME);
+    }
+
+    /** Build a SUBQUERY FROM node wrapping {@code body}, aliased as {@code alias}. */
+    private static ObjectNode wrapAsSubquery(ObjectNode body, String alias, JsonNode origRef) {
+        ObjectNode sub = objectMapper.createObjectNode();
+        sub.put(FIELD_TYPE, NODE_TYPE_SUBQUERY);
+        sub.put(FIELD_ALIAS, alias == null ? "" : alias);
+        sub.putNull(FIELD_SAMPLE);
+        JsonNode loc = origRef.get(FIELD_QUERY_LOCATION);
+        if (loc != null && loc.isNumber()) sub.set(FIELD_QUERY_LOCATION, loc);
+        else sub.put(FIELD_QUERY_LOCATION, 0);
+        ObjectNode wrapper = objectMapper.createObjectNode();
+        wrapper.set(FIELD_NODE, body);
+        wrapper.set(FIELD_NAMED_PARAM_MAP, objectMapper.createArrayNode());
+        sub.set(FIELD_SUBQUERY, wrapper);
+        sub.set(FIELD_COLUMN_NAME_ALIAS, objectMapper.createArrayNode());
+        return sub;
+    }
+
+    private static String asText(JsonNode node, String field) {
+        if (node == null) return null;
+        JsonNode v = node.get(field);
+        return (v == null || v.isNull()) ? null : v.asText();
+    }
+
     public static JsonNode getTableFunction(JsonNode tree)       { return getTableFunctionNode(tree, false); }
     public static JsonNode getTableFunctionParent(JsonNode tree) { return getTableFunctionNode(tree, true); }
 
