@@ -976,31 +976,42 @@ public class Transformations {
      *       reference inside the CTE body; the CTE's own SELECT list is untouched.</li>
      * </ul>
      *
-     * <p>Bails when the view name is bound by a CTE anywhere in the outer WITH clause (a local CTE
-     * shadows the catalog view), when the view is referenced by more than one CTE body (single
-     * reference only in this increment), or on any structural surprise.
+     * <p>{@code viewName} may be qualified ({@code s2.fv}, {@code cat.s2.fv}); qualification must
+     * match the reference at the same level. An unqualified name matches only unqualified
+     * references (a qualified reference may be a different, same-named view); a qualified name
+     * matches only identically-qualified references (an unqualified reference resolves via the
+     * search path, invisible at the AST level).
+     *
+     * <p>Bails when an unqualified view name is bound by a CTE anywhere in the outer WITH clause
+     * (a local CTE shadows the catalog view — a qualified reference can never resolve to a CTE, so
+     * qualified names skip this bail), when the view is referenced by more than one CTE body
+     * (single reference only in this increment), or on any structural surprise.
      *
      * @param outerSqlAst parsed outer query (statement wrapper from {@code parseToTree})
-     * @param viewName    name of the catalog view to locate in {@code outerSqlAst}
+     * @param viewName    name of the catalog view to locate in {@code outerSqlAst}; may be
+     *                    schema/catalog-qualified
      * @param viewBodyAst parsed view body (the F/A/B join SELECT)
      * @return rewritten outer AST with the view inlined as a pruned subquery, or {@code outerSqlAst} unchanged
      */
     public static JsonNode pruneUnusedLeftJoins(JsonNode outerSqlAst, String viewName, JsonNode viewBodyAst) {
         try {
             if (viewName == null || viewName.isEmpty()) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
+            QualifiedName view = QualifiedName.parse(viewName);
             JsonNode outerNode = getFirstStatementNode(outerSqlAst);
             if (!NODE_TYPE_SELECT_NODE.equals(asText(outerNode, FIELD_TYPE))) return outerSqlAst;
 
-            // The view name is rebound by a CTE in this query's WITH clause → any reference to it
-            // resolves to that CTE, not the view. Too risky to inline anywhere here.
-            if (declaresCte(outerNode, viewName)) return outerSqlAst;
+            // An unqualified view name rebound by a CTE in this query's WITH clause → any
+            // unqualified reference to it resolves to that CTE, not the view. Too risky to inline
+            // anywhere here. (A qualified reference like s2.fv can never resolve to a CTE, so
+            // qualified view names skip this bail.)
+            if (!view.isQualified() && declaresCte(outerNode, view.table)) return outerSqlAst;
 
             // Top-level FROM is the view: the v1 path already handles this exactly.
             JsonNode topFrom = outerNode.get(FIELD_FROM_TABLE);
-            if (isViewRef(topFrom, viewName)) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
+            if (isViewRef(topFrom, view)) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
 
             // Otherwise, look for the view in the FROM of exactly one CTE body.
-            int cteIndex = findSoleCteReferencingView(outerNode, viewName);
+            int cteIndex = findSoleCteReferencingView(outerNode, view);
             if (cteIndex < 0) return outerSqlAst;
 
             ObjectNode rootCopy = (ObjectNode) outerSqlAst.deepCopy();
@@ -1021,26 +1032,61 @@ public class Transformations {
     }
 
     /**
-     * True if {@code fromRef} is a single BASE_TABLE whose name is {@code viewName}.
-     * {@code viewName} is unqualified in this increment, so a schema- or catalog-qualified
-     * reference ({@code s2.fv}) never matches — it may be a different, same-named view, and
-     * inlining {@code viewBodyAst} in its place would silently swap the view.
+     * A view name split into its optional catalog / optional schema / table parts.
+     * {@code fv} → table only; {@code s2.fv} → schema+table; {@code cat.s2.fv} → all three.
+     * Dotted parts inside quoted identifiers are not supported — a name with more than three
+     * parts is treated as never matching (the transform then degrades to its no-op).
      */
-    private static boolean isViewRef(JsonNode fromRef, String viewName) {
+    private record QualifiedName(String catalog, String schema, String table) {
+        static QualifiedName parse(String name) {
+            String[] parts = name.split("\\.");
+            return switch (parts.length) {
+                case 1 -> new QualifiedName(null, null, parts[0]);
+                case 2 -> new QualifiedName(null, parts[0], parts[1]);
+                case 3 -> new QualifiedName(parts[0], parts[1], parts[2]);
+                default -> new QualifiedName(null, null, null); // unmatchable
+            };
+        }
+
+        boolean isQualified() { return schema != null || catalog != null; }
+    }
+
+    /**
+     * True if {@code fromRef} is a single BASE_TABLE reference to {@code view}, with qualification
+     * matched at the same level:
+     * <ul>
+     *   <li>an <b>unqualified</b> view name matches only an unqualified reference — a qualified
+     *       reference ({@code s2.fv}) may be a different, same-named view;</li>
+     *   <li>a <b>qualified</b> view name matches only a reference qualified identically — an
+     *       unqualified reference resolves via the search path, which is invisible at the AST
+     *       level, so it never matches.</li>
+     * </ul>
+     */
+    private static boolean isViewRef(JsonNode fromRef, QualifiedName view) {
         if (fromRef == null
+                || view.table == null
                 || !NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
-                || !viewName.equals(asText(fromRef, FIELD_TABLE_NAME))) return false;
-        String schema = asText(fromRef, FIELD_SCHEMA_NAME);
-        String catalog = asText(fromRef, FIELD_CATALOG_NAME);
-        return (schema == null || schema.isEmpty()) && (catalog == null || catalog.isEmpty());
+                || !view.table.equals(asText(fromRef, FIELD_TABLE_NAME))) return false;
+        return qualifierMatches(view.schema, asText(fromRef, FIELD_SCHEMA_NAME))
+                && qualifierMatches(view.catalog, asText(fromRef, FIELD_CATALOG_NAME));
+    }
+
+    /** Both absent, or both present and equal. */
+    private static boolean qualifierMatches(String expected, String actual) {
+        boolean expectedEmpty = expected == null || expected.isEmpty();
+        boolean actualEmpty = actual == null || actual.isEmpty();
+        if (expectedEmpty != actualEmpty) return false;
+        return expectedEmpty || expected.equals(actual);
     }
 
     /**
      * Index in the outer WITH map of the sole CTE whose body's FROM is a reference to {@code
-     * viewName} (not shadowed by that CTE body's own nested WITH); {@code -1} if none or more than
-     * one. Sibling/outer shadowing of the name is handled by the caller's {@link #declaresCte} bail.
+     * view} (not shadowed by that CTE body's own nested WITH — applicable to unqualified names
+     * only, since a qualified reference can never resolve to a CTE); {@code -1} if none or more
+     * than one. Sibling/outer shadowing of an unqualified name is handled by the caller's
+     * {@link #declaresCte} bail.
      */
-    private static int findSoleCteReferencingView(JsonNode outerNode, String viewName) {
+    private static int findSoleCteReferencingView(JsonNode outerNode, QualifiedName view) {
         JsonNode cteMap = outerNode.get(FIELD_CTE_MAP);
         if (cteMap == null) return -1;
         JsonNode map = cteMap.get(FIELD_MAP);
@@ -1050,7 +1096,8 @@ public class Transformations {
             JsonNode body = map.get(i).path("value").path("query").path("node");
             if (!NODE_TYPE_SELECT_NODE.equals(asText(body, FIELD_TYPE))) continue;
             JsonNode from = body.get(FIELD_FROM_TABLE);
-            if (isViewRef(from, viewName) && !referencesOuterCte(body, from)) {
+            if (isViewRef(from, view)
+                    && (view.isQualified() || !referencesOuterCte(body, from))) {
                 if (found >= 0) return -1;   // more than one reference — single-reference only
                 found = i;
             }

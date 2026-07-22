@@ -525,4 +525,71 @@ public class PruneUnusedLeftJoinsTest {
         assertEquals(1, countJoins(pruned), "b join eliminated; a kept");
         assertEquivalentToView(pruned, outer);
     }
+
+    // ---- qualified viewName matching ----
+
+    @Test
+    void qualifiedViewName_matchesQualifiedRefInCteBody() throws Exception {
+        // viewName "s3.fv" must match FROM s3.fv inside the CTE body and prune there.
+        conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS s3");
+        conn.createStatement().execute("CREATE OR REPLACE VIEW s3.fv AS " + VIEW_BODY);
+        try {
+            String outer = "WITH a AS (SELECT a_name FROM s3.fv) SELECT * FROM a";
+            JsonNode pruned = prune(outer, "s3.fv", VIEW_BODY);
+
+            assertEquals(1, countJoins(pruned), "b join eliminated inside the CTE body; a kept");
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertFalse(sql.contains("b_name"), "b_name projection should be gone");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS s3.fv");
+            conn.createStatement().execute("DROP SCHEMA IF EXISTS s3");
+        }
+    }
+
+    @Test
+    void qualifiedViewName_matchesQualifiedRefAtTopLevel() throws Exception {
+        // Top-level FROM s3.fv with viewName "s3.fv" delegates to the v1 path.
+        conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS s3");
+        conn.createStatement().execute("CREATE OR REPLACE VIEW s3.fv AS " + VIEW_BODY);
+        try {
+            String outer = "SELECT f_col, a_name FROM s3.fv WHERE f_col > 10";
+            JsonNode pruned = prune(outer, "s3.fv", VIEW_BODY);
+
+            assertEquals(1, countJoins(pruned), "b eliminated, a kept");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS s3.fv");
+            conn.createStatement().execute("DROP SCHEMA IF EXISTS s3");
+        }
+    }
+
+    @Test
+    void qualifiedViewName_doesNotMatchUnqualifiedRef() throws Exception {
+        // An unqualified FROM fv resolves via the search path — invisible at the AST level — so a
+        // qualified viewName must not match it. No-op.
+        assertBailsOut("WITH a AS (SELECT a_name FROM fv) SELECT * FROM a", "s3.fv", VIEW_BODY);
+        assertBailsOut("SELECT f_col, a_name FROM fv", "s3.fv", VIEW_BODY);
+    }
+
+    @Test
+    void qualifiedRef_notShadowedByCteOfSameBareName_stillPruned() throws Exception {
+        // A CTE named `fv` shadows only unqualified references; s3.fv always resolves to the
+        // catalog. With a qualified viewName the shadow bail must not block pruning.
+        conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS s3");
+        conn.createStatement().execute("CREATE OR REPLACE VIEW s3.fv AS " + VIEW_BODY);
+        try {
+            String outer =
+                    "WITH fv AS (SELECT 'cte' AS tag), a AS (SELECT a_name FROM s3.fv) " +
+                    "SELECT a.a_name, fv.tag FROM a, fv";
+            JsonNode pruned = prune(outer, "s3.fv", VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertFalse(sql.contains("b_name"), "b join must be pruned despite the fv-named CTE");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS s3.fv");
+            conn.createStatement().execute("DROP SCHEMA IF EXISTS s3");
+        }
+    }
 }

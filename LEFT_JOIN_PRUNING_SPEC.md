@@ -182,11 +182,17 @@ else is the same-instance no-op:
   optimization. The pruned view body is inlined in place of the reference inside the CTE
   body; the CTE's own `SELECT` list is untouched.
 
-Additional bail-outs for this variant: the view name is rebound by a CTE anywhere in the
-outer `WITH` (sibling/outer shadow); a bare/qualified STAR **within the CTE body** over
-the view; the view referenced by **more than one** CTE body (single reference only in
-this increment); a **schema- or catalog-qualified** reference (`s2.fv`) — `viewName` is
-unqualified, and a qualified reference may be a *different*, same-named view.
+`viewName` may be **qualified** (`s2.fv`, `cat.s2.fv`); qualification must match the
+reference at the same level. An unqualified name matches only unqualified references —
+a qualified reference (`s2.fv`) may be a *different*, same-named view. A qualified name
+matches only identically-qualified references — an unqualified reference resolves via
+the search path, which is invisible at the AST level. Qualified references can never
+resolve to a CTE, so qualified names skip the CTE-shadow bail below.
+
+Additional bail-outs for this variant: an **unqualified** view name rebound by a CTE
+anywhere in the outer `WITH` (sibling/outer shadow); a bare/qualified STAR **within the
+CTE body** over the view; the view referenced by **more than one** CTE body (single
+reference only in this increment).
 
 Additional conservative rules:
 
