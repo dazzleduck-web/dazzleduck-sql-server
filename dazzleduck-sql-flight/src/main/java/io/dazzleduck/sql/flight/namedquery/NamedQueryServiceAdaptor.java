@@ -92,6 +92,17 @@ public interface NamedQueryServiceAdaptor {
                 outputStreamSupplier);
     }
 
+    /** Streams named query results as JSON Lines (NDJSON) — one JSON object per row, per line. */
+    default CompletableFuture<Void> streamJsonlNamedQuery(String name, Map<String, String> parameters,
+                                                          FlightProducer.CallContext context,
+                                                          Supplier<OutputStream> outputStreamSupplier) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        JsonOutputStreamListener listener = new JsonOutputStreamListener(
+                outputStreamSupplier, future, JsonOutputStreamListener.Format.JSONL);
+        getStreamNamedQuery(name, parameters, context, listener);
+        return future;
+    }
+
     /** Signals that a named query template could not be found in the DB. */
     class TemplateNotFoundException extends Exception {
         public TemplateNotFoundException(String message) {

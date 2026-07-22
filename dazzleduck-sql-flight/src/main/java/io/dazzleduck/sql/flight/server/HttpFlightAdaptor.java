@@ -146,6 +146,25 @@ public interface HttpFlightAdaptor {
     }
 
     /**
+     * Gets the stream for a statement query ticket, writing directly to an OutputStream as
+     * JSON Lines (NDJSON) — one JSON object per row, per line.
+     *
+     * @param ticket the statement query ticket
+     * @param context the call context
+     * @param outputStreamSupplier supplier that provides the output stream when data is ready to write
+     * @return a CompletableFuture that completes when streaming is done, or exceptionally on error
+     */
+    default CompletableFuture<Void> streamJsonl(FlightSql.TicketStatementQuery ticket,
+                                                FlightProducer.CallContext context,
+                                                Supplier<OutputStream> outputStreamSupplier) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        JsonOutputStreamListener listener = new JsonOutputStreamListener(
+                outputStreamSupplier, future, JsonOutputStreamListener.Format.JSONL);
+        getStreamStatement(ticket, context, listener);
+        return future;
+    }
+
+    /**
      * Gets the stream for a statement query ticket, writing directly to an OutputStream,
      * with configurable compression.
      *

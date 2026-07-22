@@ -174,6 +174,33 @@ public class NamedQueryServiceTest extends HttpServerTestBase {
         assertEquals(4, lines.length - 1, "generate_series(3) produces 4 rows: 0..3 inclusive");
     }
 
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void testHappyPath_jsonlResponseBodyAndContentType() throws IOException, InterruptedException {
+        var namedQuery = NamedQueryRequest.execute("get_series", Map.of("limit", "3"));
+        var body = objectMapper.writeValueAsBytes(namedQuery);
+
+        var request = authenticatedRequestBuilder(URI.create(baseUrl + ENDPOINT))
+                .header("Accept", ContentTypes.APPLICATION_JSONL)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .build();
+
+        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type")
+                        .orElse("").contains(ContentTypes.APPLICATION_JSONL),
+                "JSONL path must set Content-Type: application/jsonl");
+
+        // Body must be newline-delimited JSON objects, not a JSON array.
+        assertFalse(response.body().strip().startsWith("["), "JSONL must not be a JSON array");
+        String[] lines = response.body().strip().split("\n");
+        assertEquals(4, lines.length, "generate_series(3) produces 4 rows: 0..3 inclusive");
+        var first = objectMapper.readTree(lines[0]);
+        assertTrue(first.isObject(), "Each line must be a JSON object: " + lines[0]);
+        assertEquals(0, first.get("v").asInt(), "First data row should be 0 (generate_series is 0-based)");
+        assertEquals(3, objectMapper.readTree(lines[3]).get("v").asInt());
+    }
+
     // -------------------------------------------------------------------------
     // Error cases
     // -------------------------------------------------------------------------

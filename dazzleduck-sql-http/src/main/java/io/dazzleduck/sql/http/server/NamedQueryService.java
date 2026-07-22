@@ -100,7 +100,10 @@ public class NamedQueryService implements HttpService, ControllerService {
 
         var callContext = ControllerService.createContext(request);
         var acceptHeader = request.headers().value(HeaderNames.ACCEPT);
-        boolean wantsTsv = acceptHeader.isPresent() && acceptHeader.get().contains(ContentTypes.TEXT_TSV);
+        String accept = acceptHeader.orElse("");
+        boolean wantsTsv = accept.contains(ContentTypes.TEXT_TSV);
+        boolean wantsJsonl = accept.contains(ContentTypes.APPLICATION_JSONL)
+                || accept.contains(ContentTypes.APPLICATION_X_NDJSON);
 
         CompletableFuture<Void> future;
         if (wantsTsv) {
@@ -108,6 +111,10 @@ public class NamedQueryService implements HttpService, ControllerService {
             future = new CompletableFuture<>();
             var listener = new TsvOutputStreamListener(() -> response.outputStream(), future);
             adaptor.getStreamNamedQuery(namedQuery.name(), namedQuery.parameters(), callContext, listener);
+        } else if (wantsJsonl) {
+            response.headers().set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_JSONL_UTF8);
+            future = adaptor.streamJsonlNamedQuery(namedQuery.name(), namedQuery.parameters(),
+                    callContext, () -> response.outputStream());
         } else {
             response.headers().set(HeaderNames.CONTENT_TYPE, ContentTypes.APPLICATION_ARROW);
             var compressionCodec = ParameterUtils.getArrowCompression(request);

@@ -50,13 +50,20 @@ public class QueryService extends AbstractQueryBasedService {
             var ticket = createTicket(statementHandle);
 
             var acceptHeader = request.headers().value(HeaderNames.ACCEPT);
-            boolean wantsTsv = acceptHeader.isPresent() && acceptHeader.get().contains(ContentTypes.TEXT_TSV);
+            String accept = acceptHeader.orElse("");
+            boolean wantsTsv = accept.contains(ContentTypes.TEXT_TSV);
+            boolean wantsJsonl = accept.contains(ContentTypes.APPLICATION_JSONL)
+                    || accept.contains(ContentTypes.APPLICATION_X_NDJSON);
 
             CompletableFuture<Void> future;
             if (wantsTsv) {
                 logger.debug("TSV output requested for query: {}", query.query());
                 response.header("Content-Type", ContentTypes.TEXT_TSV_UTF8);
                 future = httpFlightAdaptor.streamTsv(ticket, context, () -> response.outputStream());
+            } else if (wantsJsonl) {
+                logger.debug("JSONL output requested for query: {}", query.query());
+                response.header("Content-Type", ContentTypes.APPLICATION_JSONL_UTF8);
+                future = httpFlightAdaptor.streamJsonl(ticket, context, () -> response.outputStream());
             } else {
                 // Get Arrow compression codec from header (defaults to ZSTD)
                 CompressionUtil.CodecType compressionCodec = ParameterUtils.getArrowCompression(request);

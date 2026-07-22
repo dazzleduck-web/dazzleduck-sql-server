@@ -69,13 +69,14 @@ Key files: `QueryService.java`, `IngestionService.java`, `PlanningService.java`,
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/login` | POST | Authenticate, get JWT token |
-| `/v1/query` | GET/POST | Execute SQL — Arrow IPC (default) or TSV (`Accept: text/tab-separated-values`) |
+| `/v1/query` | GET/POST | Execute SQL — Arrow IPC (default), TSV (`Accept: text/tab-separated-values`), or JSONL/NDJSON (`Accept: application/jsonl` or `application/x-ndjson`) |
 | `/v1/plan` | POST | Generate query execution plan |
 | `/v1/ingest` | POST | Ingest Arrow data to Parquet |
 | `/v1/cancel` | POST | Cancel running query |
 | `/health` | GET | Health check |
 
 TSV format: header row + tab-separated string values. Ideal for LLM agents and scripts.
+JSONL format: one JSON object per row, per line (newline-delimited, no enclosing array). Numbers/booleans/nulls keep their JSON types; temporal values are ISO-8601 strings; lists/structs/maps are real nested JSON. Streamable and append-friendly.
 
 ### dazzleduck-sql-commons
 Core DuckDB abstraction. Key classes:
