@@ -108,6 +108,21 @@ public class PruneUnusedLeftJoinsTest {
         return Transformations.pruneUnusedLeftJoins(outer, body);
     }
 
+    /** Scope-aware (three-arg) prune, locating the view by name. */
+    private JsonNode prune(String outerSql, String viewName, String viewBody) throws Exception {
+        JsonNode outer = Transformations.parseToTree(conn, outerSql);
+        JsonNode body = Transformations.parseToTree(conn, viewBody);
+        return Transformations.pruneUnusedLeftJoins(outer, viewName, body);
+    }
+
+    /** Assert the three-arg (scope-aware) method bailed out: the exact input instance comes back. */
+    private void assertBailsOut(String outerSql, String viewName, String viewBody) throws Exception {
+        JsonNode outer = Transformations.parseToTree(conn, outerSql);
+        JsonNode body = Transformations.parseToTree(conn, viewBody);
+        JsonNode pruned = Transformations.pruneUnusedLeftJoins(outer, viewName, body);
+        assertSame(outer, pruned, "expected a no-op (same instance returned) for: " + outerSql);
+    }
+
     /** Assert the method bailed out: the exact input instance comes back. */
     private void assertBailsOut(String outerSql, String viewBody) throws Exception {
         JsonNode outer = Transformations.parseToTree(conn, outerSql);
@@ -378,5 +393,78 @@ public class PruneUnusedLeftJoinsTest {
                 "WITH fv AS (SELECT 42 AS f_col, 'zz' AS a_name, 'yy' AS b_name) " +
                 "SELECT f_col FROM fv";
         assertBailsOut(outer, VIEW_BODY);
+    }
+
+    // ---- scope-aware (three-arg) prune: view referenced inside a CTE body ----
+
+    @Test
+    void cteWrappingView_prunedWithinCteBody() throws Exception {
+        // The view is referenced inside the CTE `a`, which projects only a_name; the outer
+        // SELECT * is over the CTE (expands to a_name), NOT the view. b is used nowhere in the
+        // view's scope, so its join must be eliminated inside the CTE body.
+        String outer = "WITH a AS (SELECT a_name FROM fv) SELECT * FROM a";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(1, countJoins(pruned), "b join must be eliminated inside the CTE body; a kept");
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertFalse(sql.contains("b_name"), "b_name projection should be gone");
+        assertEquivalentToView(pruned, outer);
+        assertEquals(3, exec(Transformations.parseToSql(conn, pruned)).size(),
+                "all fact rows (incl. the b-unmatched one) must survive");
+    }
+
+    @Test
+    void cteWrappingView_dimColumnUsedInCteBody_joinKept() throws Exception {
+        // b_name IS referenced in the CTE body (WHERE), so the b join must be kept; a_name unused
+        // in the view's scope, so the a join is eliminated.
+        String outer = "WITH a AS (SELECT f_col FROM fv WHERE b_name = 'b100') SELECT * FROM a";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertTrue(sql.contains("b_name"), "b_name is used in the CTE body, so the b join must be kept");
+        assertFalse(sql.contains("a_name"), "a_name is unused, so the a join must be dropped");
+        assertEquals(1, countJoins(pruned));
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void threeArg_topLevelViewFrom_delegatesToV1() throws Exception {
+        // When the outer FROM is the view itself, the scope-aware entry point matches the v1 path.
+        String outer = "SELECT f_col, a_name FROM fv WHERE f_col > 10";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(1, countJoins(pruned), "b eliminated, a kept");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void cteWrappingView_bothDimsUsedInCteBody_returnedUnchanged() throws Exception {
+        // Both dimension columns flow through the CTE body → nothing to prune or eliminate → no-op.
+        assertBailsOut("WITH a AS (SELECT a_name, b_name FROM fv) SELECT * FROM a", "fv", VIEW_BODY);
+    }
+
+    @Test
+    void starOverViewInsideCteBody_returnedUnchanged() throws Exception {
+        // The CTE body does SELECT * over the view — its columns cannot be enumerated, so the STAR
+        // bail applies within the view's scope even though the reference is nested.
+        assertBailsOut("WITH a AS (SELECT * FROM fv) SELECT a_name FROM a", "fv", VIEW_BODY);
+    }
+
+    @Test
+    void viewNameReboundBySiblingCte_returnedUnchanged() throws Exception {
+        // `fv` is declared as a CTE in the same WITH, so the reference inside CTE `a` resolves to
+        // that CTE, not the catalog view. Must bail.
+        String outer =
+                "WITH fv AS (SELECT 1 AS a_name), a AS (SELECT a_name FROM fv) SELECT * FROM a";
+        assertBailsOut(outer, "fv", VIEW_BODY);
+    }
+
+    @Test
+    void viewReferencedByTwoCteBodies_returnedUnchanged() throws Exception {
+        // More than one CTE references the view — single-reference only in this increment → no-op.
+        String outer =
+                "WITH a AS (SELECT a_name FROM fv), b AS (SELECT f_col FROM fv) " +
+                "SELECT * FROM a, b";
+        assertBailsOut(outer, "fv", VIEW_BODY);
     }
 }

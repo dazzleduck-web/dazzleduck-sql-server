@@ -941,7 +941,11 @@ public class Transformations {
 
     /** True if {@code fromRef}'s table name matches a CTE declared in {@code selectNode}'s WITH clause. */
     private static boolean referencesOuterCte(JsonNode selectNode, JsonNode fromRef) {
-        String name = asText(fromRef, FIELD_TABLE_NAME);
+        return declaresCte(selectNode, asText(fromRef, FIELD_TABLE_NAME));
+    }
+
+    /** True if {@code selectNode}'s WITH clause declares a CTE named {@code name}. */
+    private static boolean declaresCte(JsonNode selectNode, String name) {
         if (name == null || name.isEmpty()) return false;
         JsonNode cteMap = selectNode.get(FIELD_CTE_MAP);
         if (cteMap == null) return false;
@@ -952,6 +956,118 @@ public class Transformations {
             if (key != null && name.equals(key.asText())) return true;
         }
         return false;
+    }
+
+    /**
+     * Scope-aware variant of {@link #pruneUnusedLeftJoins(JsonNode, JsonNode)}: prune the view's
+     * unused LEFT JOINs even when the view is referenced <em>inside a CTE body</em> rather than at
+     * the outer top-level FROM. {@code viewName} names the catalog view whose body is {@code
+     * viewBodyAst}, so a reference to it can be located by name.
+     *
+     * <p>Handles two shapes; anything else degrades to the same-instance no-op:
+     * <ul>
+     *   <li><b>Top-level</b> — the outer FROM is the view: delegates to the v1 two-arg method,
+     *       behaviour unchanged.</li>
+     *   <li><b>CTE-nested</b> — the view is referenced in the FROM of exactly one CTE body
+     *       (e.g. {@code WITH a AS (SELECT a_name FROM fv) SELECT * FROM a}). Pruning is scoped to
+     *       that CTE body: column usage and the STAR bail are evaluated there, so an outer
+     *       {@code SELECT *} over the CTE — which expands to CTE columns, not view columns — does
+     *       not block the optimization. The view body is inlined as a subquery in place of the
+     *       reference inside the CTE body; the CTE's own SELECT list is untouched.</li>
+     * </ul>
+     *
+     * <p>Bails when the view name is bound by a CTE anywhere in the outer WITH clause (a local CTE
+     * shadows the catalog view), when the view is referenced by more than one CTE body (single
+     * reference only in this increment), or on any structural surprise.
+     *
+     * @param outerSqlAst parsed outer query (statement wrapper from {@code parseToTree})
+     * @param viewName    name of the catalog view to locate in {@code outerSqlAst}
+     * @param viewBodyAst parsed view body (the F/A/B join SELECT)
+     * @return rewritten outer AST with the view inlined as a pruned subquery, or {@code outerSqlAst} unchanged
+     */
+    public static JsonNode pruneUnusedLeftJoins(JsonNode outerSqlAst, String viewName, JsonNode viewBodyAst) {
+        try {
+            if (viewName == null || viewName.isEmpty()) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
+            JsonNode outerNode = getFirstStatementNode(outerSqlAst);
+            if (!NODE_TYPE_SELECT_NODE.equals(asText(outerNode, FIELD_TYPE))) return outerSqlAst;
+
+            // The view name is rebound by a CTE in this query's WITH clause → any reference to it
+            // resolves to that CTE, not the view. Too risky to inline anywhere here.
+            if (declaresCte(outerNode, viewName)) return outerSqlAst;
+
+            // Top-level FROM is the view: the v1 path already handles this exactly.
+            JsonNode topFrom = outerNode.get(FIELD_FROM_TABLE);
+            if (isViewRef(topFrom, viewName)) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
+
+            // Otherwise, look for the view in the FROM of exactly one CTE body.
+            int cteIndex = findSoleCteReferencingView(outerNode, viewName);
+            if (cteIndex < 0) return outerSqlAst;
+
+            ObjectNode rootCopy = (ObjectNode) outerSqlAst.deepCopy();
+            ObjectNode outerCopy = (ObjectNode) getFirstStatementNode(rootCopy);
+            ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
+                    .get(cteIndex).get("value").get("query").get("node");
+            JsonNode viewRef = cteBody.get(FIELD_FROM_TABLE);
+
+            // Usage and STAR bail are scoped to the CTE body — the only place the view is visible.
+            UsedColumns use = new UsedColumns();
+            collectUsage(cteBody, use);
+            if (use.hasStar || use.hasQualifiedStar) return outerSqlAst;
+
+            return pruneViewBodyInto(cteBody, viewRef, viewBodyAst, use.columnNames) ? rootCopy : outerSqlAst;
+        } catch (RuntimeException e) {
+            return outerSqlAst;
+        }
+    }
+
+    /** True if {@code fromRef} is a single BASE_TABLE whose name is {@code viewName}. */
+    private static boolean isViewRef(JsonNode fromRef, String viewName) {
+        return fromRef != null
+                && NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
+                && viewName.equals(asText(fromRef, FIELD_TABLE_NAME));
+    }
+
+    /**
+     * Index in the outer WITH map of the sole CTE whose body's FROM is a reference to {@code
+     * viewName} (not shadowed by that CTE body's own nested WITH); {@code -1} if none or more than
+     * one. Sibling/outer shadowing of the name is handled by the caller's {@link #declaresCte} bail.
+     */
+    private static int findSoleCteReferencingView(JsonNode outerNode, String viewName) {
+        JsonNode cteMap = outerNode.get(FIELD_CTE_MAP);
+        if (cteMap == null) return -1;
+        JsonNode map = cteMap.get(FIELD_MAP);
+        if (map == null || !map.isArray()) return -1;
+        int found = -1;
+        for (int i = 0; i < map.size(); i++) {
+            JsonNode body = map.get(i).path("value").path("query").path("node");
+            if (!NODE_TYPE_SELECT_NODE.equals(asText(body, FIELD_TYPE))) continue;
+            JsonNode from = body.get(FIELD_FROM_TABLE);
+            if (isViewRef(from, viewName) && !referencesOuterCte(body, from)) {
+                if (found >= 0) return -1;   // more than one reference — single-reference only
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Shared core: prune {@code viewBodyAst} to {@code usedViewCols}, eliminate the now-unused LEFT
+     * JOINs, and inline the result as a subquery in place of {@code scopeNode}'s FROM. Mutates the
+     * (already-copied) {@code scopeNode}. Returns whether anything changed.
+     */
+    private static boolean pruneViewBodyInto(ObjectNode scopeNode, JsonNode viewRef,
+                                             JsonNode viewBodyAst, Set<String> usedViewCols) {
+        JsonNode bodyNode = getFirstStatementNode(viewBodyAst);
+        if (!NODE_TYPE_SELECT_NODE.equals(asText(bodyNode, FIELD_TYPE))) return false;
+        if (hasUnsupportedJoin(bodyNode.get(FIELD_FROM_TABLE))) return false;
+
+        ObjectNode body = (ObjectNode) bodyNode.deepCopy();
+        boolean changed = projectionPruningIsSafe(body) && pruneSelectList(body, usedViewCols);
+        changed |= eliminateUnusedLeftJoins(body);
+        if (!changed) return false;
+
+        scopeNode.set(FIELD_FROM_TABLE, wrapAsSubquery(body, effectiveId(viewRef), viewRef));
+        return true;
     }
 
     /** Column usage collected from the outer query: referenced name parts and STAR presence. */

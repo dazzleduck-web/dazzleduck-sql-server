@@ -166,6 +166,27 @@ no-op by reference identity. Explicit bail-outs:
   reference is the CTE, not the view; inlining the view body there would change
   results.
 
+### Scope-aware variant — view referenced inside a CTE
+
+`pruneUnusedLeftJoins(outerSqlAst, viewName, viewBodyAst)` extends the above to the
+case where the view is referenced inside a **CTE body** rather than at the outer
+top-level `FROM`, e.g. `WITH a AS (SELECT a_name FROM fv) SELECT * FROM a`. Passing
+`viewName` lets a reference be located by name. Two shapes are handled; everything
+else is the same-instance no-op:
+
+- **Top-level** — outer `FROM` is the view: delegates to the two-arg method, behaviour
+  unchanged.
+- **CTE-nested** — the view is in the `FROM` of exactly one CTE body. Column usage and
+  the STAR bail are evaluated **within that CTE body scope**, so an outer `SELECT *`
+  *over the CTE* (which expands to CTE columns, not view columns) does not block the
+  optimization. The pruned view body is inlined in place of the reference inside the CTE
+  body; the CTE's own `SELECT` list is untouched.
+
+Additional bail-outs for this variant: the view name is rebound by a CTE anywhere in the
+outer `WITH` (sibling/outer shadow); a bare/qualified STAR **within the CTE body** over
+the view; the view referenced by **more than one** CTE body (single reference only in
+this increment).
+
 Additional conservative rules:
 
 - **Projection pushdown is skipped** (join elimination still applies) when the
