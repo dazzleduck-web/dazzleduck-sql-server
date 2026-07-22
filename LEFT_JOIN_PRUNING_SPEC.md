@@ -169,18 +169,23 @@ no-op by reference identity. Explicit bail-outs:
 ### Scope-aware variant — view referenced inside a CTE
 
 `pruneUnusedLeftJoins(outerSqlAst, viewName, viewBodyAst)` extends the above to the
-case where the view is referenced inside a **CTE body** rather than at the outer
-top-level `FROM`, e.g. `WITH a AS (SELECT a_name FROM fv) SELECT * FROM a`. Passing
-`viewName` lets a reference be located by name. Two shapes are handled; everything
-else is the same-instance no-op:
+case where the view is referenced inside **CTE bodies** and/or at the outer top-level
+`FROM`, e.g. `WITH a AS (SELECT a_name FROM fv) SELECT * FROM a`. Passing `viewName`
+lets references be located by name. Every eligible reference is pruned
+**independently within its own scope** — inlining is local and semantics-preserving,
+so any subset of references may be optimized:
 
-- **Top-level** — outer `FROM` is the view: delegates to the two-arg method, behaviour
-  unchanged.
-- **CTE-nested** — the view is in the `FROM` of exactly one CTE body. Column usage and
-  the STAR bail are evaluated **within that CTE body scope**, so an outer `SELECT *`
-  *over the CTE* (which expands to CTE columns, not view columns) does not block the
-  optimization. The pruned view body is inlined in place of the reference inside the CTE
-  body; the CTE's own `SELECT` list is untouched.
+- **Top-level** — outer `FROM` is the view. Usage is collected from the outer SELECT
+  scope **excluding CTE bodies** (a CTE cannot reference the outer `FROM`'s columns),
+  so sibling CTE usage does not pollute top-level pruning.
+- **CTE-nested** — the view is in the `FROM` of one or more CTE bodies. Column usage
+  and the STAR check are evaluated **within each CTE body scope**, so an outer
+  `SELECT *` *over the CTE* (which expands to CTE columns, not view columns) does not
+  block the optimization. The pruned view body is inlined in place of the reference
+  inside each CTE body; the CTE's own `SELECT` list is untouched.
+
+A scope whose view columns cannot be enumerated (a bare or qualified STAR **in that
+scope**) is skipped individually; other references are still pruned.
 
 `viewName` may be **qualified** (`s2.fv`, `cat.s2.fv`); qualification must match the
 reference at the same level. An unqualified name matches only unqualified references —
@@ -189,10 +194,8 @@ matches only identically-qualified references — an unqualified reference resol
 the search path, which is invisible at the AST level. Qualified references can never
 resolve to a CTE, so qualified names skip the CTE-shadow bail below.
 
-Additional bail-outs for this variant: an **unqualified** view name rebound by a CTE
-anywhere in the outer `WITH` (sibling/outer shadow); a bare/qualified STAR **within the
-CTE body** over the view; the view referenced by **more than one** CTE body (single
-reference only in this increment).
+Additional bail-out for this variant: an **unqualified** view name rebound by a CTE
+anywhere in the outer `WITH` (sibling/outer shadow) is a full no-op.
 
 Additional conservative rules:
 

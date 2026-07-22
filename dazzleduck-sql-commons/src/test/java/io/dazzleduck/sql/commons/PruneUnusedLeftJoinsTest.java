@@ -147,6 +147,13 @@ public class PruneUnusedLeftJoinsTest {
         return c;
     }
 
+    /** Count non-overlapping occurrences of {@code needle} in {@code haystack}. */
+    private int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length())) count++;
+        return count;
+    }
+
     private List<List<Object>> exec(String sql) throws SQLException {
         Statement s = conn.createStatement();
         ResultSet rs = s.executeQuery(sql);
@@ -461,12 +468,52 @@ public class PruneUnusedLeftJoinsTest {
     }
 
     @Test
-    void viewReferencedByTwoCteBodies_returnedUnchanged() throws Exception {
-        // More than one CTE references the view — single-reference only in this increment → no-op.
+    void viewReferencedByTwoCteBodies_eachPrunedInItsOwnScope() throws Exception {
+        // Both CTEs reference the view; each is pruned against its own usage:
+        // CTE a uses a_name → keeps join a, drops join b. CTE b uses f_col only → drops both.
         String outer =
                 "WITH a AS (SELECT a_name FROM fv), b AS (SELECT f_col FROM fv) " +
                 "SELECT * FROM a, b";
-        assertBailsOut(outer, "fv", VIEW_BODY);
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertEquals(1, countOccurrences(sql, "left join"),
+                "one LEFT JOIN total: a's inline keeps join a; b's inline drops both");
+        assertFalse(sql.contains("b_name"), "b_name is unused in every scope");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void viewReferencedTopLevelAndInCte_bothPrunedIndependently() throws Exception {
+        // Top-level scope uses f_col + b_name (drops join a); CTE scope uses a_name (drops join b).
+        // Each reference is pruned against its own scope's usage.
+        String outer =
+                "WITH c AS (SELECT a_name FROM fv) " +
+                "SELECT f_col, b_name FROM fv WHERE f_col > (SELECT count(*) FROM c)";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(2, countJoins(pruned),
+                "top-level inline keeps join b, CTE inline keeps join a — one join each");
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertTrue(sql.contains("a_name"), "CTE scope needs a_name");
+        assertTrue(sql.contains("b_name"), "top-level scope needs b_name");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void starScopeSkipped_otherReferenceStillPruned() throws Exception {
+        // CTE a does SELECT * over the view (columns not enumerable → skipped, stays a raw view
+        // reference); CTE b is still pruned to zero joins.
+        String outer =
+                "WITH a AS (SELECT * FROM fv), b AS (SELECT f_col FROM fv) " +
+                "SELECT a.a_name, b.f_col FROM a, b";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertEquals(0, countOccurrences(sql, "left join"),
+                "b's inline drops both joins; a's star scope is skipped, not inlined");
+        assertTrue(sql.contains("fv"), "the star CTE must still reference the view by name");
+        assertEquivalentToView(pruned, outer);
     }
 
     // ---- review probes: edge cases ----

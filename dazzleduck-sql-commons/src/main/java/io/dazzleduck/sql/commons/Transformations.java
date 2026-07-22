@@ -971,17 +971,21 @@ public class Transformations {
      * the outer top-level FROM. {@code viewName} names the catalog view whose body is {@code
      * viewBodyAst}, so a reference to it can be located by name.
      *
-     * <p>Handles two shapes; anything else degrades to the same-instance no-op:
+     * <p>Every eligible reference is pruned <b>independently within its own scope</b> — inlining
+     * is local and semantics-preserving, so any subset of references may be optimized:
      * <ul>
-     *   <li><b>Top-level</b> — the outer FROM is the view: delegates to the v1 two-arg method,
-     *       behaviour unchanged.</li>
-     *   <li><b>CTE-nested</b> — the view is referenced in the FROM of exactly one CTE body
-     *       (e.g. {@code WITH a AS (SELECT a_name FROM fv) SELECT * FROM a}). Pruning is scoped to
-     *       that CTE body: column usage and the STAR bail are evaluated there, so an outer
+     *   <li><b>Top-level</b> — the outer FROM is the view. Usage is collected from the outer
+     *       SELECT scope <em>excluding</em> CTE bodies (a CTE cannot reference the outer FROM's
+     *       columns), so sibling CTE usage does not pollute top-level pruning.</li>
+     *   <li><b>CTE-nested</b> — the view is referenced in the FROM of one or more CTE bodies
+     *       (e.g. {@code WITH a AS (SELECT a_name FROM fv) SELECT * FROM a}). Each CTE body is its
+     *       own scope: column usage and the STAR check are evaluated there, so an outer
      *       {@code SELECT *} over the CTE — which expands to CTE columns, not view columns — does
      *       not block the optimization. The view body is inlined as a subquery in place of the
      *       reference inside the CTE body; the CTE's own SELECT list is untouched.</li>
      * </ul>
+     * A scope whose view columns cannot be enumerated (a bare or qualified STAR in that scope) is
+     * skipped individually; other references are still pruned.
      *
      * <p>{@code viewName} may be qualified ({@code s2.fv}, {@code cat.s2.fv}); qualification must
      * match the reference at the same level. An unqualified name matches only unqualified
@@ -989,16 +993,16 @@ public class Transformations {
      * matches only identically-qualified references (an unqualified reference resolves via the
      * search path, invisible at the AST level).
      *
-     * <p>Bails when an unqualified view name is bound by a CTE anywhere in the outer WITH clause
-     * (a local CTE shadows the catalog view — a qualified reference can never resolve to a CTE, so
-     * qualified names skip this bail), when the view is referenced by more than one CTE body
-     * (single reference only in this increment), or on any structural surprise.
+     * <p>Bails entirely when an unqualified view name is bound by a CTE anywhere in the outer WITH
+     * clause (a local CTE shadows the catalog view — a qualified reference can never resolve to a
+     * CTE, so qualified names skip this bail), or on any structural surprise.
      *
      * @param outerSqlAst parsed outer query (statement wrapper from {@code parseToTree})
      * @param viewName    name of the catalog view to locate in {@code outerSqlAst}; may be
      *                    schema/catalog-qualified
      * @param viewBodyAst parsed view body (the F/A/B join SELECT)
-     * @return rewritten outer AST with the view inlined as a pruned subquery, or {@code outerSqlAst} unchanged
+     * @return rewritten outer AST with each eligible view reference inlined as a pruned subquery,
+     *         or {@code outerSqlAst} unchanged
      */
     public static JsonNode pruneUnusedLeftJoins(JsonNode outerSqlAst, String viewName, JsonNode viewBodyAst) {
         try {
@@ -1013,29 +1017,53 @@ public class Transformations {
             // qualified view names skip this bail.)
             if (!view.isQualified() && declaresCte(outerNode, view.table)) return outerSqlAst;
 
-            // Top-level FROM is the view: the v1 path already handles this exactly.
-            JsonNode topFrom = outerNode.get(FIELD_FROM_TABLE);
-            if (isViewRef(topFrom, view)) return pruneUnusedLeftJoins(outerSqlAst, viewBodyAst);
-
-            // Otherwise, look for the view in the FROM of exactly one CTE body.
-            int cteIndex = findSoleCteReferencingView(outerNode, view);
-            if (cteIndex < 0) return outerSqlAst;
+            // Locate every eligible reference: the top-level FROM and/or any CTE bodies.
+            boolean topLevel = isViewRef(outerNode.get(FIELD_FROM_TABLE), view);
+            List<Integer> cteRefs = findCtesReferencingView(outerNode, view);
+            if (!topLevel && cteRefs.isEmpty()) return outerSqlAst;
 
             ObjectNode rootCopy = (ObjectNode) outerSqlAst.deepCopy();
             ObjectNode outerCopy = (ObjectNode) getFirstStatementNode(rootCopy);
-            ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
-                    .get(cteIndex).get("value").get("query").get("node");
-            JsonNode viewRef = cteBody.get(FIELD_FROM_TABLE);
-
-            // Usage and STAR bail are scoped to the CTE body — the only place the view is visible.
-            UsedColumns use = new UsedColumns();
-            collectUsage(cteBody, use);
-            if (use.hasStar || use.hasQualifiedStar) return outerSqlAst;
-
-            return pruneViewBodyInto(cteBody, viewRef, viewBodyAst, use.columnNames) ? rootCopy : outerSqlAst;
+            boolean changed = false;
+            for (int idx : cteRefs) {
+                ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
+                        .get(idx).get("value").get("query").get("node");
+                changed |= pruneScope(cteBody, viewBodyAst, collectScopedUsage(cteBody, false));
+            }
+            if (topLevel) {
+                // The top-level scope excludes CTE bodies: a CTE cannot see the outer FROM's
+                // columns, so its usage is irrelevant to this reference.
+                changed |= pruneScope(outerCopy, viewBodyAst, collectScopedUsage(outerCopy, true));
+            }
+            return changed ? rootCopy : outerSqlAst;
         } catch (RuntimeException e) {
             return outerSqlAst;
         }
+    }
+
+    /** Collect column usage for one SELECT scope, optionally skipping its {@code cte_map} subtree. */
+    private static UsedColumns collectScopedUsage(ObjectNode scopeNode, boolean excludeCteMap) {
+        UsedColumns use = new UsedColumns();
+        if (!excludeCteMap) {
+            collectUsage(scopeNode, use);
+            return use;
+        }
+        var fields = scopeNode.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            if (!FIELD_CTE_MAP.equals(entry.getKey())) collectUsage(entry.getValue(), use);
+        }
+        return use;
+    }
+
+    /**
+     * Prune the view body against one scope's usage and inline it in place of that scope's FROM.
+     * A scope containing a STAR cannot enumerate its view columns and is skipped (returns false);
+     * other references remain eligible.
+     */
+    private static boolean pruneScope(ObjectNode scopeNode, JsonNode viewBodyAst, UsedColumns use) {
+        if (use.hasStar || use.hasQualifiedStar) return false;
+        return pruneViewBodyInto(scopeNode, scopeNode.get(FIELD_FROM_TABLE), viewBodyAst, use.columnNames);
     }
 
     /**
@@ -1087,26 +1115,24 @@ public class Transformations {
     }
 
     /**
-     * Index in the outer WITH map of the sole CTE whose body's FROM is a reference to {@code
-     * view} (not shadowed by that CTE body's own nested WITH — applicable to unqualified names
-     * only, since a qualified reference can never resolve to a CTE); {@code -1} if none or more
-     * than one. Sibling/outer shadowing of an unqualified name is handled by the caller's
-     * {@link #declaresCte} bail.
+     * Indexes in the outer WITH map of every CTE whose body's FROM is a reference to {@code view}
+     * (not shadowed by that CTE body's own nested WITH — applicable to unqualified names only,
+     * since a qualified reference can never resolve to a CTE). Sibling/outer shadowing of an
+     * unqualified name is handled by the caller's {@link #declaresCte} bail.
      */
-    private static int findSoleCteReferencingView(JsonNode outerNode, QualifiedName view) {
+    private static List<Integer> findCtesReferencingView(JsonNode outerNode, QualifiedName view) {
         JsonNode cteMap = outerNode.get(FIELD_CTE_MAP);
-        if (cteMap == null) return -1;
+        if (cteMap == null) return List.of();
         JsonNode map = cteMap.get(FIELD_MAP);
-        if (map == null || !map.isArray()) return -1;
-        int found = -1;
+        if (map == null || !map.isArray()) return List.of();
+        List<Integer> found = new ArrayList<>();
         for (int i = 0; i < map.size(); i++) {
             JsonNode body = map.get(i).path("value").path("query").path("node");
             if (!NODE_TYPE_SELECT_NODE.equals(asText(body, FIELD_TYPE))) continue;
             JsonNode from = body.get(FIELD_FROM_TABLE);
             if (isViewRef(from, view)
                     && (view.isQualified() || !referencesOuterCte(body, from))) {
-                if (found >= 0) return -1;   // more than one reference — single-reference only
-                found = i;
+                found.add(i);
             }
         }
         return found;
