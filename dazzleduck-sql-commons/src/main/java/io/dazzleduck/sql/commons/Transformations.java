@@ -939,8 +939,15 @@ public class Transformations {
         }
     }
 
-    /** True if {@code fromRef}'s table name matches a CTE declared in {@code selectNode}'s WITH clause. */
+    /**
+     * True if {@code fromRef} can resolve to a CTE declared in {@code selectNode}'s WITH clause.
+     * A schema- or catalog-qualified reference ({@code s3.fv}) always resolves to the catalog and
+     * can never hit a CTE, so it returns false regardless of CTE names.
+     */
     private static boolean referencesOuterCte(JsonNode selectNode, JsonNode fromRef) {
+        String schema = asText(fromRef, FIELD_SCHEMA_NAME);
+        String catalog = asText(fromRef, FIELD_CATALOG_NAME);
+        if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) return false;
         return declaresCte(selectNode, asText(fromRef, FIELD_TABLE_NAME));
     }
 

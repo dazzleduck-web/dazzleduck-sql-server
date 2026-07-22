@@ -573,6 +573,31 @@ public class PruneUnusedLeftJoinsTest {
     }
 
     @Test
+    void qualifiedRefAtTopLevel_notShadowedByCteOfSameBareName_stillPruned() throws Exception {
+        // Top-level variant of the shadow case: a CTE named `fv` exists, but the top-level FROM is
+        // the qualified s3.fv, which always resolves to the catalog. The v1 delegation path must
+        // not let the bare-name CTE block pruning.
+        conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS s3");
+        conn.createStatement().execute("CREATE OR REPLACE VIEW s3.fv AS " + VIEW_BODY);
+        try {
+            String outer =
+                    "WITH fv AS (SELECT 1 AS t) " +
+                    "SELECT f_col, a_name FROM s3.fv WHERE f_col > (SELECT t FROM fv)";
+            JsonNode outerAst = Transformations.parseToTree(conn, outer);
+            JsonNode pruned = Transformations.pruneUnusedLeftJoins(
+                    outerAst, "s3.fv", Transformations.parseToTree(conn, VIEW_BODY));
+
+            assertNotSame(outerAst, pruned,
+                    "the bare-name CTE must not block pruning of the qualified s3.fv reference");
+            assertEquals(1, countJoins(pruned), "b eliminated, a kept — view inlined at top level");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS s3.fv");
+            conn.createStatement().execute("DROP SCHEMA IF EXISTS s3");
+        }
+    }
+
+    @Test
     void qualifiedRef_notShadowedByCteOfSameBareName_stillPruned() throws Exception {
         // A CTE named `fv` shadows only unqualified references; s3.fv always resolves to the
         // catalog. With a qualified viewName the shadow bail must not block pruning.
