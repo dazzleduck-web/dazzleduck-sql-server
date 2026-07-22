@@ -185,7 +185,8 @@ else is the same-instance no-op:
 Additional bail-outs for this variant: the view name is rebound by a CTE anywhere in the
 outer `WITH` (sibling/outer shadow); a bare/qualified STAR **within the CTE body** over
 the view; the view referenced by **more than one** CTE body (single reference only in
-this increment).
+this increment); a **schema- or catalog-qualified** reference (`s2.fv`) — `viewName` is
+unqualified, and a qualified reference may be a *different*, same-named view.
 
 Additional conservative rules:
 

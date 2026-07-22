@@ -1020,11 +1020,19 @@ public class Transformations {
         }
     }
 
-    /** True if {@code fromRef} is a single BASE_TABLE whose name is {@code viewName}. */
+    /**
+     * True if {@code fromRef} is a single BASE_TABLE whose name is {@code viewName}.
+     * {@code viewName} is unqualified in this increment, so a schema- or catalog-qualified
+     * reference ({@code s2.fv}) never matches — it may be a different, same-named view, and
+     * inlining {@code viewBodyAst} in its place would silently swap the view.
+     */
     private static boolean isViewRef(JsonNode fromRef, String viewName) {
-        return fromRef != null
-                && NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
-                && viewName.equals(asText(fromRef, FIELD_TABLE_NAME));
+        if (fromRef == null
+                || !NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
+                || !viewName.equals(asText(fromRef, FIELD_TABLE_NAME))) return false;
+        String schema = asText(fromRef, FIELD_SCHEMA_NAME);
+        String catalog = asText(fromRef, FIELD_CATALOG_NAME);
+        return (schema == null || schema.isEmpty()) && (catalog == null || catalog.isEmpty());
     }
 
     /**

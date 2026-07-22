@@ -15,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -466,5 +467,62 @@ public class PruneUnusedLeftJoinsTest {
                 "WITH a AS (SELECT a_name FROM fv), b AS (SELECT f_col FROM fv) " +
                 "SELECT * FROM a, b";
         assertBailsOut(outer, "fv", VIEW_BODY);
+    }
+
+    // ---- review probes: edge cases ----
+
+    @Test
+    void nestedWithInsideCteBodyShadowsView_returnedUnchanged() throws Exception {
+        // The CTE body carries its own WITH that rebinds `fv`; the inner FROM fv resolves to that
+        // nested CTE, not the catalog view. Inlining the view body there would replace 'inner'
+        // with real fact data. Must bail.
+        String outer =
+                "WITH a AS (WITH fv AS (SELECT 'inner' AS a_name) SELECT a_name FROM fv) " +
+                "SELECT * FROM a";
+        assertBailsOut(outer, "fv", VIEW_BODY);
+    }
+
+    @Test
+    void viewInCteAndOuterFromJoin_cteBodyPruned_outerRefUntouched() throws Exception {
+        // The view appears both inside CTE `a` and in the outer FROM join. Only the CTE body is
+        // eligible (outer FROM is not a single base table); the outer fv reference must keep
+        // pointing at the real view and results must be equivalent.
+        String outer =
+                "WITH a AS (SELECT a_name FROM fv) " +
+                "SELECT a.a_name, fv.b_name FROM a, fv";
+        JsonNode outerAst = Transformations.parseToTree(conn, outer);
+        JsonNode pruned = Transformations.pruneUnusedLeftJoins(
+                outerAst, "fv", Transformations.parseToTree(conn, VIEW_BODY));
+
+        assertNotSame(outerAst, pruned, "the CTE body is eligible, so a rewrite must occur");
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertTrue(sql.contains("fv"), "the outer FROM must still reference the view by name");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void schemaQualifiedSameNamedView_returnedUnchanged() throws Exception {
+        // s2.fv is a DIFFERENT view that happens to share the name. viewName "fv" is unqualified,
+        // so a schema-qualified reference must not match — inlining the default-schema body in its
+        // place would silently swap the view. Must bail.
+        conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS s2");
+        conn.createStatement().execute(
+                "CREATE OR REPLACE VIEW s2.fv AS SELECT 'other' AS a_name, 'x' AS b_name, 0 AS f_col");
+        try {
+            assertBailsOut("WITH a AS (SELECT a_name FROM s2.fv) SELECT * FROM a", "fv", VIEW_BODY);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS s2.fv");
+            conn.createStatement().execute("DROP SCHEMA IF EXISTS s2");
+        }
+    }
+
+    @Test
+    void aliasedViewRefInCteBody_pruned() throws Exception {
+        // The view is referenced with an alias inside the CTE body; qualification uses the alias.
+        String outer = "WITH a AS (SELECT x.a_name FROM fv x) SELECT * FROM a";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(1, countJoins(pruned), "b join eliminated; a kept");
+        assertEquivalentToView(pruned, outer);
     }
 }
