@@ -161,6 +161,10 @@ no-op by reference identity. Explicit bail-outs:
 - `USING(...)` join (null `condition`, populated `using_columns`).
 - `right` arm not a base table; non-equi `ON` condition.
 - More than one `BASE_TABLE` in the outer `FROM`.
+- **Outer `FROM` resolves to a WITH-declared CTE** — a local CTE shadows any
+  catalog view of the same name (`WITH fv AS (…) SELECT … FROM fv`), so the
+  reference is the CTE, not the view; inlining the view body there would change
+  results.
 
 Additional conservative rules:
 

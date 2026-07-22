@@ -905,6 +905,11 @@ public class Transformations {
             JsonNode viewRef = outerNode.get(FIELD_FROM_TABLE);
             if (viewRef == null || !NODE_TYPE_BASE_TABLE.equals(asText(viewRef, FIELD_TYPE))) return outerSqlAst;
 
+            // A local CTE shadows any catalog view of the same name, so an outer FROM that resolves
+            // to a WITH-declared CTE is NOT the view — inlining the view body there would change
+            // results. Bail. (SQL scoping guarantees the CTE wins over a same-named view.)
+            if (referencesOuterCte(outerNode, viewRef)) return outerSqlAst;
+
             // A STAR anywhere in the outer query — bare (*) or table-qualified (fv.*) — expands to
             // view columns we cannot enumerate here, so every view column must be treated as used.
             UsedColumns outerUse = new UsedColumns();
@@ -932,6 +937,21 @@ public class Transformations {
             // Optimization must never change semantics: on any unexpected structure, do nothing.
             return outerSqlAst;
         }
+    }
+
+    /** True if {@code fromRef}'s table name matches a CTE declared in {@code selectNode}'s WITH clause. */
+    private static boolean referencesOuterCte(JsonNode selectNode, JsonNode fromRef) {
+        String name = asText(fromRef, FIELD_TABLE_NAME);
+        if (name == null || name.isEmpty()) return false;
+        JsonNode cteMap = selectNode.get(FIELD_CTE_MAP);
+        if (cteMap == null) return false;
+        JsonNode map = cteMap.get(FIELD_MAP);
+        if (map == null || !map.isArray()) return false;
+        for (JsonNode entry : map) {
+            JsonNode key = entry.get("key");
+            if (key != null && name.equals(key.asText())) return true;
+        }
+        return false;
     }
 
     /** Column usage collected from the outer query: referenced name parts and STAR presence. */

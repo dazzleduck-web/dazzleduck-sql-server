@@ -324,4 +324,51 @@ public class PruneUnusedLeftJoinsTest {
         // More than one base table in the outer FROM → cannot identify the view → no-op.
         assertBailsOut("SELECT fv.f_col FROM fv, a WHERE fv.a_id = a.a_id", VIEW_BODY);
     }
+
+    // ---- CTE (WITH) in the outer query ----
+
+    @Test
+    void cteInOuterQuery_viewStillPrunedAndCteUsageCounted() throws Exception {
+        // The outer FROM is the view; an auxiliary CTE is consumed by a scalar subquery in WHERE.
+        // Pruning must still fire (b unused → dropped) and the CTE body must be walked for usage
+        // (collectUsage descends into cte_map), so nothing referenced there is lost.
+        String outer =
+                "WITH threshold AS (SELECT 10 AS m) " +
+                "SELECT f_col, a_name FROM fv WHERE f_col > (SELECT m FROM threshold)";
+        JsonNode pruned = prune(outer);
+
+        assertEquals(1, countJoins(pruned), "b is unused and must be eliminated; a is kept");
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertFalse(sql.contains("b_name"), "b_name projection should be gone");
+        assertTrue(sql.contains("threshold"), "the outer CTE must survive the rewrite");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void dimColumnUsedOnlyInCte_joinKept() throws Exception {
+        // a_name is referenced ONLY inside the CTE body, nowhere in the main SELECT/WHERE.
+        // Because collectUsage walks cte_map, a_name counts as used and the a join must be kept;
+        // b is referenced nowhere and must be dropped. Guards against pruning a join whose only
+        // consumer is a CTE.
+        String outer =
+                "WITH names AS (SELECT a_name FROM fv) " +
+                "SELECT f_col FROM fv WHERE f_col > 10";
+        JsonNode pruned = prune(outer);
+
+        String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+        assertTrue(sql.contains("a_name"), "a_name is used in the CTE, so the a join must be kept");
+        assertFalse(sql.contains("b_name"), "b_name is used nowhere, so the b join must be dropped");
+        assertEquals(1, countJoins(pruned));
+        assertEquivalentToView(pruned, outer);
+    }
+
+    @Test
+    void cteShadowsViewName_returnedUnchanged() throws Exception {
+        // A local CTE named `fv` shadows the catalog view `fv`: the outer FROM resolves to the CTE,
+        // NOT the view. Inlining the view body here would change results, so the method must bail.
+        String outer =
+                "WITH fv AS (SELECT 42 AS f_col, 'zz' AS a_name, 'yy' AS b_name) " +
+                "SELECT f_col FROM fv";
+        assertBailsOut(outer, VIEW_BODY);
+    }
 }
