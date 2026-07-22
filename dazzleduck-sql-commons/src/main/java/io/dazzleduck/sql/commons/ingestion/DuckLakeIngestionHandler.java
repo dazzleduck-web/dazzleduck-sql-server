@@ -2,6 +2,7 @@ package io.dazzleduck.sql.commons.ingestion;
 
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
+import io.dazzleduck.sql.commons.util.HeaderUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -67,7 +69,15 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * {@code refreshedAt} is the clock instant when this state was last confirmed/rebuilt.
      */
     private record QueueState(String targetPath, String transformation, String[] partitionColumns,
-                               long schemaChangeId, Instant refreshedAt) {}
+                               String[] partitionProjections, long schemaChangeId, Instant refreshedAt) {}
+
+    /**
+     * A resolved partition column: {@code token} is the identifier placed in COPY's
+     * {@code PARTITION_BY} clause; {@code projection} is the derived-column expression that must be
+     * added to the COPY relation for the token to resolve, or {@code null} for identity columns
+     * (which already exist in the relation).
+     */
+    private record ResolvedPartition(String token, String projection) {}
 
     private final ConcurrentHashMap<String, QueueState> stateCache = new ConcurrentHashMap<>();
 
@@ -154,6 +164,12 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     public String[] getPartitionBy(String queueId) {
         QueueState s = getOrRefreshState(queueId);
         return s != null ? s.partitionColumns() : new String[0];
+    }
+
+    @Override
+    public String[] getPartitionProjections(String queueId) {
+        QueueState s = getOrRefreshState(queueId);
+        return s != null ? s.partitionProjections() : new String[0];
     }
 
     @Override
@@ -321,7 +337,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             logger.atDebug().log("Schema unchanged (id={}) for {}.{}.{}, skipping full refresh",
                     currentSchemaChangeId, mapping.catalog(), mapping.schema(), mapping.table());
             return new QueueState(existing.targetPath(), existing.transformation(),
-                    existing.partitionColumns(), existing.schemaChangeId(), clock.instant());
+                    existing.partitionColumns(), existing.partitionProjections(),
+                    existing.schemaChangeId(), clock.instant());
         }
         return buildState(mapping, currentSchemaChangeId, clock.instant());
     }
@@ -334,8 +351,11 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     private static QueueState buildState(QueueIdToTableMapping mapping, long schemaChangeId, Instant refreshedAt) {
         String path           = fetchPath(mapping.catalog(), mapping.schema(), mapping.table());
         String transformation = resolveTransformation(mapping);
-        String[] partitions   = fetchPartitionColumns(mapping.catalog(), mapping.schema(), mapping.table());
-        return new QueueState(path, transformation, partitions, schemaChangeId, refreshedAt);
+        List<ResolvedPartition> partitions = fetchPartitions(mapping.catalog(), mapping.schema(), mapping.table());
+        String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
+        String[] projections = partitions.stream().map(ResolvedPartition::projection)
+                .filter(java.util.Objects::nonNull).toArray(String[]::new);
+        return new QueueState(path, transformation, tokens, projections, schemaChangeId, refreshedAt);
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
@@ -366,7 +386,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     public static String[] getPartitionColumns(String catalogName, String schema, String table) {
-        return fetchPartitionColumns(catalogName, schema, table);
+        return fetchPartitions(catalogName, schema, table).stream()
+                .map(ResolvedPartition::token).toArray(String[]::new);
     }
 
     /**
@@ -387,7 +408,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         }
     }
 
-    private static String[] fetchPartitionColumns(String catalogName, String schema, String table) {
+    private static List<ResolvedPartition> fetchPartitions(String catalogName, String schema, String table) {
         String metadataDatabase = "__ducklake_metadata_" + catalogName;
         String query = """
                 SELECT
@@ -409,15 +430,32 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                 ORDER BY pc.partition_key_index ASC
                 """.formatted(metadataDatabase, table);
         try (var connection = ConnectionPool.getConnection()) {
-            Iterable<String> columns = ConnectionPool.collectAll(connection, query,
-                    rs -> rs.getString("column_name"));
-            List<String> columnList = new ArrayList<>();
-            columns.forEach(columnList::add);
-            return columnList.toArray(new String[0]);
+            Iterable<ResolvedPartition> rows = ConnectionPool.collectAll(connection, query,
+                    rs -> resolvePartition(rs.getString("column_name"), rs.getString("transform")));
+            List<ResolvedPartition> partitions = new ArrayList<>();
+            rows.forEach(partitions::add);
+            return partitions;
         } catch (SQLException e) {
             logger.atDebug().setCause(e).log("Failed to get partition columns for table {}.{}.{}", catalogName, schema, table);
-            return new String[0];
+            return List.of();
         }
+    }
+
+    /**
+     * Resolves a {@code ducklake_partition_column} row into a {@link ResolvedPartition}. Identity
+     * columns partition by the column directly. Time transforms ({@code year}/{@code month}/{@code
+     * day}/{@code hour}) map to the DuckDB scalar function of the same name; since COPY's
+     * {@code PARTITION_BY} accepts only column names, the transform is projected as a derived column
+     * aliased to the transform name and partitioned by that alias.
+     */
+    private static ResolvedPartition resolvePartition(String columnName, String transform) {
+        if (transform == null || transform.isBlank() || transform.equalsIgnoreCase("identity")) {
+            return new ResolvedPartition(columnName, null);
+        }
+        String fn = transform.toLowerCase(Locale.ROOT);
+        String projection = "%s(%s) AS %s".formatted(fn,
+                HeaderUtils.quoteIdentifier(columnName), HeaderUtils.quoteIdentifier(fn));
+        return new ResolvedPartition(fn, projection);
     }
 
     // -----------------------------------------------------------------------

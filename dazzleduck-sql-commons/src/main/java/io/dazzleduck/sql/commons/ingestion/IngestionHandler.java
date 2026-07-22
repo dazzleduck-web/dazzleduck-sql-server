@@ -10,6 +10,13 @@ public interface IngestionHandler {
 
     String[] getPartitionBy(String queueId);
 
+    /**
+     * Derived-column projections added to the COPY relation so the identifiers returned by
+     * {@link #getPartitionBy} resolve — each a full expression, e.g. {@code day("timestamp") AS "day"}.
+     * Empty when the table has no non-identity partition transforms.
+     */
+    default String[] getPartitionProjections(String queueId) { return new String[0]; }
+
     default boolean supportPartitionByHeader() { return true; }
 
     // -----------------------------------------------------------------------

@@ -121,7 +121,8 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         // All Arrow files
         var arrowFiles = batches.stream().map(Batch::record).map("'%s'"::formatted).collect(Collectors.joining(","));
         String[] batchPartitionBy = batches.get(0).partitionBy();
-        String[] effectivePartitionBy = (batchPartitionBy != null && batchPartitionBy.length > 0)
+        boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
+        String[] effectivePartitionBy = hasBatchPartitionBy
                 ? batchPartitionBy
                 : postIngestionHandler.getPartitionBy(queueId);
         String partitionByClause = getClause(effectivePartitionBy, ", PARTITION_BY(%s)");
@@ -145,6 +146,17 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         var querySql = (transformation != null && !transformation.isBlank())
                 ? "WITH __this AS (%s) %s".formatted(innerSql, transformation)
                 : innerSql;
+
+        // Add handler-supplied derived-column projections (e.g. day(timestamp) AS day) so the
+        // PARTITION_BY tokens resolve. Not needed for header-supplied partitionBy, which names
+        // columns that already exist in the relation.
+        if (!hasBatchPartitionBy) {
+            String[] partitionProjections = postIngestionHandler.getPartitionProjections(queueId);
+            if (partitionProjections.length > 0) {
+                querySql = "SELECT *, %s FROM (%s)".formatted(
+                        String.join(", ", partitionProjections), querySql);
+            }
+        }
 
         // Build SQL
         // https://duckdb.org/docs/stable/sql/statements/copy
