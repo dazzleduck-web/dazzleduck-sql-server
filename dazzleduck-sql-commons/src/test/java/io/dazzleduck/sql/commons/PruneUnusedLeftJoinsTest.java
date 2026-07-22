@@ -363,6 +363,14 @@ public class PruneUnusedLeftJoinsTest {
     }
 
     @Test
+    void selectStarFromCteWrappingView_returnedUnchanged() throws Exception {
+        // The view is referenced INSIDE a CTE; the outer FROM is that CTE (`a`), not the view.
+        // Two independent guards apply — `a` resolves to a WITH-declared CTE, and the outer
+        // SELECT * is a bare star — so the transform must not fire.
+        assertBailsOut("WITH a AS (SELECT a_name FROM fv) SELECT * FROM a", VIEW_BODY);
+    }
+
+    @Test
     void cteShadowsViewName_returnedUnchanged() throws Exception {
         // A local CTE named `fv` shadows the catalog view `fv`: the outer FROM resolves to the CTE,
         // NOT the view. Inlining the view body here would change results, so the method must bail.
