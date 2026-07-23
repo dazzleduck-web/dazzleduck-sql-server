@@ -249,4 +249,129 @@ class DuckLakeIngestionHandlerTest {
         assertNotNull(partitionColumns, "Expected non-null partition columns array");
         assertEquals(0, partitionColumns.length, "Expected empty array for non-partitioned table");
     }
+
+    // -----------------------------------------------------------------------
+    // Time-transform partition columns (year/month/day/hour) — PR #363
+    //
+    // DuckLake stores a partition column's `transform` as the transform name for time transforms
+    // (year/month/day/hour) and "identity" for plain columns. A time transform cannot be named
+    // directly in COPY's PARTITION_BY (which accepts only column names), so the handler resolves it
+    // into a token (the transform name) plus a derived-column projection that must be added to the
+    // COPY relation for the token to resolve.
+    // -----------------------------------------------------------------------
+
+    private DuckLakeIngestionHandler handlerForPartitionedTable(String table, String partitionBySpec,
+                                                                String columnsDdl) throws SQLException {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    "CREATE TABLE %s.%s.%s (%s)".formatted(CATALOG, SCHEMA, table, columnsDdl),
+                    "ALTER TABLE %s.%s.%s SET PARTITIONED BY (%s)".formatted(CATALOG, SCHEMA, table, partitionBySpec)
+            });
+        }
+        var mapping = new QueueIdToTableMapping(table, CATALOG, SCHEMA, table, Map.of(), null);
+        return new DuckLakeIngestionHandler(Map.of(table, mapping));
+    }
+
+    @Test
+    void shouldReturnTransformNamesAsPartitionTokensForTimeTransforms() throws Exception {
+        String table = "ts_transform_events";
+        var factory = handlerForPartitionedTable(table,
+                "year(ts), month(ts), day(ts), hour(ts)", "id BIGINT, ts TIMESTAMP");
+
+        // PARTITION_BY receives the transform name (lower-cased), not the source column.
+        assertArrayEquals(new String[]{"year", "month", "day", "hour"},
+                factory.getPartitionBy(table),
+                "Time transforms must be partitioned by the transform name, not the source column");
+    }
+
+    @Test
+    void shouldReturnDerivedProjectionsForTimeTransforms() throws Exception {
+        String table = "ts_projection_events";
+        var factory = handlerForPartitionedTable(table,
+                "year(ts), month(ts), day(ts), hour(ts)", "id BIGINT, ts TIMESTAMP");
+
+        // Each transform is projected as `fn("col") AS "fn"` so the PARTITION_BY token resolves.
+        assertArrayEquals(new String[]{
+                        "year(\"ts\") AS \"year\"",
+                        "month(\"ts\") AS \"month\"",
+                        "day(\"ts\") AS \"day\"",
+                        "hour(\"ts\") AS \"hour\""},
+                factory.getPartitionProjections(table),
+                "Expected one derived-column projection per time transform");
+    }
+
+    @Test
+    void shouldReturnNoProjectionsForIdentityPartitionedTable() throws Exception {
+        String table = "identity_partitioned_events";
+        var factory = handlerForPartitionedTable(table,
+                "date, level", "id BIGINT, date DATE, level VARCHAR");
+
+        // Identity columns already exist in the relation — they are partitioned directly and need
+        // no projection.
+        assertArrayEquals(new String[]{"date", "level"}, factory.getPartitionBy(table));
+        assertEquals(0, factory.getPartitionProjections(table).length,
+                "Identity partitions must not emit derived-column projections");
+    }
+
+    @Test
+    void shouldResolveMixedIdentityAndTransformPartitions() throws Exception {
+        String table = "mixed_partitioned_events";
+        var factory = handlerForPartitionedTable(table,
+                "region, day(ts)", "id BIGINT, region VARCHAR, ts TIMESTAMP");
+
+        // Order follows partition_key_index: identity first, then the transform.
+        assertArrayEquals(new String[]{"region", "day"}, factory.getPartitionBy(table));
+        // Only the transform contributes a projection; the identity column does not.
+        assertArrayEquals(new String[]{"day(\"ts\") AS \"day\""},
+                factory.getPartitionProjections(table));
+    }
+
+    @Test
+    void shouldReturnEmptyProjectionsForNonPartitionedTable() throws Exception {
+        String table = "no_partition_projections";
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn,
+                    "CREATE TABLE %s.%s.%s (id BIGINT, value VARCHAR)".formatted(CATALOG, SCHEMA, table));
+        }
+        var mapping = new QueueIdToTableMapping(table, CATALOG, SCHEMA, table, Map.of(), null);
+        var factory = new DuckLakeIngestionHandler(Map.of(table, mapping));
+
+        assertEquals(0, factory.getPartitionProjections(table).length);
+    }
+
+    @Test
+    void shouldReturnEmptyProjectionsForUnknownQueue() {
+        var factory = new DuckLakeIngestionHandler(Map.of(QUEUE_ID, mapping(QUEUE_ID, null)));
+        String[] projections = factory.getPartitionProjections("no-such-queue");
+        assertNotNull(projections, "Unknown queue must yield an empty array, not null");
+        assertEquals(0, projections.length);
+    }
+
+    /**
+     * End-to-end invariant that {@code ParquetIngestionQueue} relies on: adding the handler's
+     * projections to the relation makes every PARTITION_BY token a resolvable column. Builds the
+     * same wrapped relation the queue builds ({@code SELECT *, <projections> FROM (...)}) and asserts
+     * each token resolves to a real column.
+     */
+    @Test
+    void derivedProjectionsMakePartitionTokensResolvable() throws Exception {
+        String table = "resolvable_tokens_events";
+        var factory = handlerForPartitionedTable(table,
+                "year(ts), month(ts), day(ts), hour(ts)", "id BIGINT, ts TIMESTAMP");
+
+        String[] tokens = factory.getPartitionBy(table);
+        String[] projections = factory.getPartitionProjections(table);
+
+        String wrapped = "SELECT *, %s FROM (SELECT * FROM %s.%s.%s)".formatted(
+                String.join(", ", projections), CATALOG, SCHEMA, table);
+
+        // If a token did not resolve to a column in the wrapped relation, selecting it would throw.
+        String tokenList = String.join(", ",
+                java.util.Arrays.stream(tokens).map(t -> "\"" + t + "\"").toArray(String[]::new));
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertDoesNotThrow(() ->
+                    ConnectionPool.execute(conn, "SELECT %s FROM (%s) LIMIT 0".formatted(tokenList, wrapped)),
+                    "Every PARTITION_BY token must resolve as a column in the projected relation");
+        }
+    }
 }
