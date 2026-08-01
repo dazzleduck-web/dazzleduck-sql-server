@@ -1028,7 +1028,14 @@ public class Transformations {
             for (int idx : cteRefs) {
                 ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
                         .get(idx).get("value").get("query").get("node");
-                changed |= pruneScope(cteBody, viewBodyAst, collectScopedUsage(cteBody, false));
+                if (isStarFilterCteBody(cteBody)) {
+                    // Row-filter wrapper `SELECT * FROM <view> WHERE <filter>` (the RLS authorizer's
+                    // output): its own STAR hides the real column usage, which lives in the CTE's
+                    // consumers. Recover it from there rather than bailing on the STAR.
+                    changed |= pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+                } else {
+                    changed |= pruneScope(cteBody, viewBodyAst, collectScopedUsage(cteBody, false));
+                }
             }
             if (topLevel) {
                 // The top-level scope excludes CTE bodies: a CTE cannot see the outer FROM's
@@ -1064,6 +1071,55 @@ public class Transformations {
     private static boolean pruneScope(ObjectNode scopeNode, JsonNode viewBodyAst, UsedColumns use) {
         if (use.hasStar || use.hasQualifiedStar) return false;
         return pruneViewBodyInto(scopeNode, scopeNode.get(FIELD_FROM_TABLE), viewBodyAst, use.columnNames);
+    }
+
+    /**
+     * The signature of a row-filter wrapper CTE body: exactly a single bare {@code SELECT *} over
+     * (already matched as) the view, plus a WHERE clause. This is precisely what the
+     * RESTRICT_READ_ONLY authorizer emits (`SELECT * FROM <view> WHERE <rls-filter>`), and it is the
+     * only STAR-over-view shape {@link #pruneStarFilterCte} handles — a plain {@code SELECT * FROM
+     * view} (no filter) keeps the conservative STAR bail.
+     */
+    private static boolean isStarFilterCteBody(ObjectNode cteBody) {
+        JsonNode where = cteBody.get(FIELD_WHERE_CLAUSE);
+        if (where == null || where.isNull()) return false;
+        JsonNode selectList = cteBody.get(FIELD_SELECT_LIST);
+        if (!(selectList instanceof ArrayNode list) || list.size() != 1) return false;
+        return STAR_CLASS.equals(asText(list.get(0), FIELD_CLASS));
+    }
+
+    /**
+     * Prune a view referenced inside a CTE body whose own SELECT list is a STAR — most importantly
+     * the RESTRICT_READ_ONLY authorizer's row-filter wrapper
+     * {@code ___t AS (SELECT * FROM <view> WHERE <rls-filter>)}. The STAR forwards every column to
+     * the CTE's consumers, so {@link #pruneScope} (which bails on any STAR) cannot drive elimination
+     * here. The columns actually needed are recovered from the union of:
+     * <ul>
+     *   <li>the enclosing scope's references to the CTE — its <b>consumers</b>
+     *       ({@code consumerScope} minus its own CTE bodies), and</li>
+     *   <li>the CTE body's own <b>WHERE</b> — the filter's columns: the wrapper still applies the
+     *       filter over the inlined subquery, so those columns must survive pruning or the wrapper
+     *       fails to bind.</li>
+     * </ul>
+     * The view body is then inlined and its now-unused LEFT JOINs eliminated, leaving the wrapper's
+     * {@code SELECT *} and {@code WHERE} intact over the pruned subquery.
+     *
+     * <p>No-op (returns false) when the consumer scope itself contains a STAR over the CTE — the
+     * view's columns can't be enumerated there, so no narrowing is safe. Consumer usage is read from
+     * {@code consumerScope} excluding its CTE bodies, matching the authorizer's output shape (the
+     * filter-CTE is consumed at the top level). Over-collection from sibling references is harmless
+     * (keeps extra columns → fewer joins dropped, never a wrong result), and the projection-only
+     * change is fail-safe: a missed column yields a bind error, never an unfiltered row.
+     */
+    private static boolean pruneStarFilterCte(ObjectNode consumerScope, ObjectNode cteBody,
+                                              JsonNode viewBodyAst) {
+        UsedColumns consumer = collectScopedUsage(consumerScope, true);
+        if (consumer.hasStar || consumer.hasQualifiedStar) return false;
+        Set<String> usedViewCols = new HashSet<>(consumer.columnNames);
+        UsedColumns filterUse = new UsedColumns();
+        collectUsage(cteBody.get(FIELD_WHERE_CLAUSE), filterUse);
+        usedViewCols.addAll(filterUse.columnNames);
+        return pruneViewBodyInto(cteBody, cteBody.get(FIELD_FROM_TABLE), viewBodyAst, usedViewCols);
     }
 
     /**
