@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.LongSummaryStatistics;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BiFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -160,18 +161,27 @@ public class BulkIngestQueueLoadTest {
      * Runs a load test with the given configuration.
      */
     private LoadTestResult runLoadTest(LoadTestConfig config) throws Exception {
-        var executor = Executors.newScheduledThreadPool(2);
-        var queue = new LoadTestBulkIngestQueue(
-                config.name(),
-                config.minBucketSize(),
-                config.maxBucketSize(),
-                config.maxBatches(),
-                config.maxPendingWrite(),
-                config.maxDelay(),
-                config.writeLatency(),
+        return runLoadTest(config, (c, executor) -> new LoadTestBulkIngestQueue(
+                c.name(),
+                c.minBucketSize(),
+                c.maxBucketSize(),
+                c.maxBatches(),
+                c.maxPendingWrite(),
+                c.maxDelay(),
+                c.writeLatency(),
                 executor,
-                Clock.systemUTC()
-        );
+                Clock.systemUTC()));
+    }
+
+    /**
+     * Runs a load test with the given configuration and a custom queue (e.g. a queue whose
+     * write() models a specific commit-latency profile).
+     */
+    private LoadTestResult runLoadTest(LoadTestConfig config,
+                                       BiFunction<LoadTestConfig, ScheduledExecutorService, LoadTestBulkIngestQueue> queueFactory)
+            throws Exception {
+        var executor = Executors.newScheduledThreadPool(2);
+        var queue = queueFactory.apply(config, executor);
 
         var producerPool = Executors.newFixedThreadPool(config.numProducers());
         var latencies = new ConcurrentLinkedQueue<Long>();
@@ -407,6 +417,101 @@ public class BulkIngestQueueLoadTest {
         // With zero latency, throughput should be high
         assertTrue(result.throughputBatchesPerSec() > 1000,
                 "Expected high throughput with zero latency");
+    }
+
+    /**
+     * Baseline for finding #7 (parallel commit lanes), modelling the DuckLake commit path as two
+     * phases with distinct parallelism characteristics:
+     *
+     * - data phase: DuckDB COPY of the bucket to Parquet. Internally multi-threaded within one
+     *   COPY, and with multiple commit lanes several COPYs could also overlap (in the real system
+     *   this mostly overlaps object-store/network waits, not CPU).
+     * - catalog phase: the DuckLake metadata update. Single-writer by design, so it stays
+     *   serialized globally no matter how many lanes exist.
+     *
+     * Today the queue has one commit thread ("scheduling" is single-threaded), so the two phases
+     * serialize end to end and the throughput ceiling is
+     * maxBucketSize / (dataLatency + catalogLatency). Parallel lanes can only overlap the data
+     * phase, so lane scaling is Amdahl-bounded at (data + catalog) / catalog — with the profile
+     * below at most 4x regardless of lane count. This test measures the single-lane plateau and
+     * prints both bounds; a lane implementation should be evaluated against the same profile by
+     * passing a shared catalogLock to N queues/lanes.
+     */
+    @Test
+    public void testDuckLakeCommitProfileBaseline() throws Exception {
+        var dataLatency = Duration.ofMillis(150);     // COPY to Parquet (object store PUT etc.)
+        var catalogLatency = Duration.ofMillis(50);   // DuckLake catalog transaction
+
+        var config = LoadTestConfig.defaults()
+                .withName("DuckLake Commit Profile (single lane)")
+                .withNumProducers(8)
+                .withBatchesPerProducer(100)
+                .withBatchSize(8 * 1024)              // 8KB batches
+                .withMinBucketSize(64 * 1024)         // flush by size, not by timer
+                .withMaxBucketSize(512 * 1024)        // combining cap per commit
+                .withMaxBatches(64);
+
+        var result = runLoadTest(config, (c, executor) ->
+                new DuckLakeProfileQueue(c, dataLatency, catalogLatency, new Object(), executor));
+        result.print();
+
+        double commitSeconds = (dataLatency.toMillis() + catalogLatency.toMillis()) / 1000.0;
+        double ceilingMBPerSec = (config.maxBucketSize() / (1024.0 * 1024.0)) / commitSeconds;
+        double amdahlBound = (dataLatency.toMillis() + catalogLatency.toMillis())
+                / (double) catalogLatency.toMillis();
+        double writerBusySeconds = result.writeOperations() * commitSeconds;
+        double writerUtilization = writerBusySeconds / (result.totalDuration().toMillis() / 1000.0);
+        System.out.printf("Single-lane ceiling:  %.2f MB/sec (maxBucketSize / commit latency)%n", ceilingMBPerSec);
+        System.out.printf("Writer utilization:   %.0f%%%n", writerUtilization * 100);
+        System.out.printf("Lane-scaling bound:   %.1fx (Amdahl: catalog phase stays serialized)%n", amdahlBound);
+
+        assertEquals(8 * 100, result.totalBatches(), "all batches should complete");
+        // The point of the scenario: under a DuckLake-like commit latency the single commit
+        // thread is the bottleneck (busy nearly the whole run) while throughput plateaus at the
+        // ceiling. Loose bounds keep this stable on slow CI machines.
+        assertTrue(writerUtilization > 0.6,
+                "expected a writer-bound plateau, utilization=" + writerUtilization);
+        assertTrue(result.throughputMBPerSec() <= ceilingMBPerSec * 1.15,
+                "throughput cannot exceed the single-lane ceiling; measured="
+                        + result.throughputMBPerSec() + " MB/s, ceiling=" + ceilingMBPerSec);
+    }
+
+    /**
+     * Two-phase commit queue for the DuckLake profile: a parallelizable data phase followed by a
+     * globally serialized catalog phase. The catalog lock is passed in so a future lane
+     * implementation can share it across N queues and measure realistic lane scaling.
+     */
+    static final class DuckLakeProfileQueue extends LoadTestBulkIngestQueue {
+        private final Duration dataLatency;
+        private final Duration catalogLatency;
+        private final Object catalogLock;
+
+        DuckLakeProfileQueue(LoadTestConfig config, Duration dataLatency, Duration catalogLatency,
+                             Object catalogLock, ScheduledExecutorService executor) {
+            super(config.name(), config.minBucketSize(), config.maxBucketSize(), config.maxBatches(),
+                    config.maxPendingWrite(), config.maxDelay(), Duration.ZERO, executor, Clock.systemUTC());
+            this.dataLatency = dataLatency;
+            this.catalogLatency = catalogLatency;
+            this.catalogLock = catalogLock;
+        }
+
+        @Override
+        public void write(WriteTask<String, MockWriteResult> writeTask) {
+            sleepQuietly(dataLatency);          // COPY: overlappable across lanes
+            synchronized (catalogLock) {        // catalog update: single-writer, always serialized
+                sleepQuietly(catalogLatency);
+            }
+            super.write(writeTask);             // writeLatency is ZERO: just count + complete futures
+        }
+
+        private static void sleepQuietly(Duration d) {
+            try {
+                Thread.sleep(d.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Write interrupted", e);
+            }
+        }
     }
 
     /**
