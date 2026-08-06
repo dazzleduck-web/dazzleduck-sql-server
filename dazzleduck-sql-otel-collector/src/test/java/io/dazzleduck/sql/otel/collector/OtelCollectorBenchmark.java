@@ -72,6 +72,14 @@ public class OtelCollectorBenchmark {
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .:/-_[]()";
     private static final Random RNG = new Random(42);
 
+    @org.junit.jupiter.api.BeforeAll
+    static void loadExtensions() throws Exception {
+        // OtelCollectorServer does not run the startup script (Main does); load read_arrow here.
+        io.dazzleduck.sql.commons.ConnectionPool.executeBatch(new String[]{
+                "INSTALL arrow FROM community", "LOAD arrow"
+        });
+    }
+
     @Test
     void benchmark() throws Exception {
         int port = findFreePort();
@@ -84,6 +92,9 @@ public class OtelCollectorBenchmark {
                 "logs",    logsDir.toString(),
                 "traces",  outputDir.resolve("traces").toString(),
                 "metrics", outputDir.resolve("metrics").toString());
+        for (String path : signalPaths.values()) {
+            Files.createDirectories(Path.of(path));
+        }
         props.setIngestionHandler(new io.dazzleduck.sql.commons.ingestion.IngestionHandler() {
             @Override public io.dazzleduck.sql.commons.ingestion.PostIngestionTask
             createPostIngestionTask(io.dazzleduck.sql.commons.ingestion.IngestionResult r) {
@@ -356,7 +367,11 @@ public class OtelCollectorBenchmark {
         SecretKey key = Validator.fromBase64String(SECRET_KEY_BASE64);
         Calendar exp = Calendar.getInstance();
         exp.add(Calendar.HOUR, 1);
-        return Jwts.builder().subject("admin").expiration(exp.getTime()).signWith(key).compact();
+        return Jwts.builder().subject("admin")
+                // Queue resolution requires this claim since the services were unified behind
+                // OtelServiceBase.resolveQueue; without it every export is INVALID_ARGUMENT.
+                .claim(io.dazzleduck.sql.common.Headers.CLAIM_INGESTION_QUEUE, "logs")
+                .expiration(exp.getTime()).signWith(key).compact();
     }
 
     private static int[] parseIntArray(String property, String defaults) {
