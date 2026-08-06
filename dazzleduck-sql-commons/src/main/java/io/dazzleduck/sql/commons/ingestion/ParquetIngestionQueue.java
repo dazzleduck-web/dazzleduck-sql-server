@@ -32,6 +32,19 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     private final String inputFormat;
 
     /**
+     * Per-phase commit timings. The write is two phases with different parallelism potential:
+     * the data phase (DuckDB COPY to Parquet — internally multi-threaded, and overlappable
+     * across commit lanes) and the post-ingestion phase (e.g. the DuckLake catalog commit —
+     * single-writer, serialized no matter how many lanes exist). Their ratio bounds what
+     * parallelizing the commit path can gain (Amdahl: max speedup = (data + post) / post),
+     * so both are tracked separately and exposed as metrics.
+     */
+    private final java.util.concurrent.atomic.LongAccumulator dataPhaseNanos =
+            new java.util.concurrent.atomic.LongAccumulator(Long::sum, 0L);
+    private final java.util.concurrent.atomic.LongAccumulator postIngestPhaseNanos =
+            new java.util.concurrent.atomic.LongAccumulator(Long::sum, 0L);
+
+    /**
      * @param applicationId    producer identifier
      * @param inputFormat      source file format (e.g. {@code "parquet"}, {@code "arrow"})
      * @param outputPath       destination path for written Parquet files
@@ -73,9 +86,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         logger.debug("Ingestion queue '{}' received batch with {} files, outputPath={}",
                 queueId, writeTask.bucket().batches().size(), outputPath);
         try {
+            long start = System.nanoTime();
             IngestionResult ingestionResult = tryWrite(writeTask);
+            long copyDone = System.nanoTime();
             var postIngestionTask = postIngestionHandler.createPostIngestionTask(ingestionResult);
             postIngestionTask.execute();
+            long postIngestDone = System.nanoTime();
+            dataPhaseNanos.accumulate(copyDone - start);
+            postIngestPhaseNanos.accumulate(postIngestDone - copyDone);
+            logger.debug("Queue '{}' commit phases: data(COPY)={}ms, postIngest(catalog)={}ms",
+                    queueId, (copyDone - start) / 1_000_000, (postIngestDone - copyDone) / 1_000_000);
             writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
         } catch (Exception e) {
             var sql = constructWriteQuery(writeTask);
@@ -84,6 +104,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         } finally {
             cleanupInputFiles(writeTask);
         }
+    }
+
+    /** Cumulative nanoseconds spent in the data phase (DuckDB COPY to Parquet). */
+    public long getDataPhaseNanos() {
+        return dataPhaseNanos.get();
+    }
+
+    /** Cumulative nanoseconds spent in the post-ingestion phase (e.g. DuckLake catalog commit). */
+    public long getPostIngestPhaseNanos() {
+        return postIngestPhaseNanos.get();
     }
 
     /**

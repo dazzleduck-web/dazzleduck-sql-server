@@ -929,7 +929,9 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                         "failed_batches", queue::getFailedWriteBatches,
                         "failed_buckets", queue::getFailedWriteBuckets,
                         "bytes_failed", queue::getFailedWriteBytes,
-                        "producer_id_evictions", queue::getProducerIdEvictions),
+                        "producer_id_evictions", queue::getProducerIdEvictions,
+                        "data_phase_ms", () -> queue.getDataPhaseNanos() / 1_000_000,
+                        "post_ingest_phase_ms", () -> queue.getPostIngestPhaseNanos() / 1_000_000),
                 Map.of("pending_batches", queue::getPendingBatches,
                         "pending_buckets", queue::getPendingBuckets),
                 Map.of("write_latency", new FlightRecorder.WriteTimerSuppliers(

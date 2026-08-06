@@ -90,7 +90,7 @@ class OtelServiceBaseTest {
 
         assertNotNull(queue, "a known queue resolves");
         assertNull(obs.error, "no error sent for a resolvable queue");
-        assertEquals(8, meterCount("a"), "writer gauges/counters registered on creation");
+        assertEquals(10, meterCount("a"), "writer gauges/counters registered on creation");
         assertSame(queue, resolve("a", new CapturingObserver()), "second resolve returns the cached queue");
     }
 
@@ -118,7 +118,7 @@ class OtelServiceBaseTest {
     void evictedQueue_unregistersMetricsAndRejects() throws Exception {
         handler.known.add("a");
         assertNotNull(resolve("a", new CapturingObserver()));
-        assertEquals(8, meterCount("a"), "precondition: writer metrics present");
+        assertEquals(10, meterCount("a"), "precondition: writer metrics present");
 
         handler.known.remove("a"); // tombstone
 

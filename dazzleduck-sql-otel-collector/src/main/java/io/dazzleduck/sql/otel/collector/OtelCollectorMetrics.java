@@ -129,6 +129,16 @@ public class OtelCollectorMetrics implements Closeable {
                 .tag("queue", queueId)
                 .description("Cumulative producer ids evicted from the duplicate-protection cache")
                 .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.data_phase_ms", writer,
+                        w -> w.getDataPhaseNanos() / 1_000_000.0)
+                .tag("queue", queueId)
+                .description("Cumulative ms in the commit data phase (DuckDB COPY to Parquet, parallelizable)")
+                .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.post_ingest_phase_ms", writer,
+                        w -> w.getPostIngestPhaseNanos() / 1_000_000.0)
+                .tag("queue", queueId)
+                .description("Cumulative ms in the post-ingestion phase (e.g. DuckLake catalog commit, serialized)")
+                .register(registry));
         track(queueId, Gauge.builder("dazzleduck.otel.writer.pending_batches", writer,
                         w -> w.getStats().pendingBatches())
                 .tag("queue", queueId)

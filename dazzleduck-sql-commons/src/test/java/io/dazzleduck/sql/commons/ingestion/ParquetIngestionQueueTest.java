@@ -83,6 +83,11 @@ public class ParquetIngestionQueueTest {
             assertEquals(100, result.rowCount());
             assertFalse(result.filesCreated().isEmpty());
             assertTrue(postTaskExecuted.get());
+
+            // Per-phase commit instrumentation: the COPY (data phase) took measurable time and
+            // the post-ingestion phase was timed as well (it ran, so the clock advanced).
+            assertTrue(queue.getDataPhaseNanos() > 0, "data phase (COPY) should be timed");
+            assertTrue(queue.getPostIngestPhaseNanos() >= 0);
         }
     }
 
