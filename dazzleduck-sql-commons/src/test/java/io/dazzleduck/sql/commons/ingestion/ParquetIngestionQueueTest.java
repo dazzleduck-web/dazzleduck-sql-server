@@ -257,6 +257,60 @@ public class ParquetIngestionQueueTest {
     }
 
     @Test
+    public void testFailedWriteIsAccountedAndRetriable() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+
+        // Post-ingestion (e.g. DuckLake catalog commit) fails on the first write only.
+        var failNext = new AtomicBoolean(true);
+        var handler = new IngestionHandler() {
+            @Override
+            public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
+                return () -> {
+                    if (failNext.getAndSet(false)) {
+                        throw new RuntimeException("catalog commit failed");
+                    }
+                };
+            }
+
+            @Override
+            public String getTargetPath(String queueId) { return null; }
+
+            @Override
+            public String[] getPartitionBy(String queueId) { return new String[0]; }
+        };
+
+        try (var queue = new ParquetIngestionQueue(
+                TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "test-queue",
+                DEFAULT_MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
+                DEFAULT_MAX_DELAY, handler, service, clock)) {
+
+            long size = DEFAULT_MIN_BATCH_SIZE + 1;
+            var failed = queue.add(createBatch(sourceFile1.toString(), "producer1", 7, size));
+            service.tick(1, TimeUnit.MILLISECONDS);
+            assertThrows(Exception.class, () -> failed.get(5, SECONDS));
+
+            // The real queue must propagate the failure to the base-class accounting: the failed
+            // bucket is counted as failed, never as written, and is no longer pending.
+            assertEquals(size, queue.getFailedWriteBytes());
+            assertEquals(1, queue.getFailedWriteBatches());
+            assertEquals(0, queue.getTotalWriteBytes(), "failed bytes must not count as written");
+            assertEquals(0, queue.pendingWrite());
+            assertEquals(0, queue.getPendingBatches());
+
+            // And the producer sequence rolled back, so the exact same batch id is retriable.
+            // (The failed batch's input file was cleaned up, so the retry re-sends the data.)
+            var retry = queue.add(createBatch(sourceFile2.toString(), "producer1", 7, size));
+            service.tick(1, TimeUnit.MILLISECONDS);
+            assertNotNull(retry.get(5, SECONDS));
+            // On the success path futures complete inside write(), before the base class
+            // accumulates totalWrite — drain so the accounting is settled before asserting.
+            queue.drain();
+            assertEquals(0, queue.pendingWrite());
+        }
+    }
+
+    @Test
     @org.junit.jupiter.api.Disabled("Cancellation timing is hard to test with DeterministicScheduler")
     public void testCancellationDuringWrite() throws Exception {
         var service = new DeterministicScheduler();

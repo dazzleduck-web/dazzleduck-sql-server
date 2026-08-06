@@ -278,6 +278,9 @@ public class BulkIngestQueueTest {
         // still counted as pending; after the failure is accounted it is accepted and written.
         var recovered = queue.add(mockBatch("123", 1, batchSize));
         assertEquals(new MockWriteResult(1, batchSize), recovered.get(5, TimeUnit.SECONDS));
+        // On the success path futures complete inside write(), before the base class
+        // accumulates totalWrite — drain so the accounting is settled before asserting.
+        queue.drain();
         assertEquals(0, queue.pendingWrite());
         queue.close();
     }

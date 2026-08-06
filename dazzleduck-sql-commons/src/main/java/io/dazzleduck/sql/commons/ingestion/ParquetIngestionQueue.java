@@ -100,7 +100,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         } catch (Exception e) {
             var sql = constructWriteQuery(writeTask);
             logger.atError().setCause(e).log("Failed to write to queue {} sql {}", queueId, sql);
-            writeTask.bucket().futures().forEach(action -> action.completeExceptionally(e));
+            // Propagate instead of completing the futures here: BulkIngestQueue.processWriteQueue
+            // must account this bucket as failed (pendingWrite stays truthful, failed-write
+            // metrics accumulate) and roll back producer sequences BEFORE the futures complete,
+            // so a client observing the failure can immediately retry the same batch. Swallowing
+            // the exception would make the failed bytes count as written and leave retries
+            // rejected as OutOfSequenceBatch.
+            if (e instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new RuntimeException(e);
         } finally {
             cleanupInputFiles(writeTask);
         }

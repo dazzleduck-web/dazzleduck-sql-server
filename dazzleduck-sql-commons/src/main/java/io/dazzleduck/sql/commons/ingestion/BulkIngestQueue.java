@@ -454,7 +454,15 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
             return;
         }
         triggerScheduled = true;
-        executorService.schedule(this::triggerWriteIfRequired, delayMillis, TimeUnit.MILLISECONDS);
+        try {
+            executorService.schedule(this::triggerWriteIfRequired, delayMillis, TimeUnit.MILLISECONDS);
+        } catch (RuntimeException e) {
+            // e.g. RejectedExecutionException from an externally shut-down executor. Leave the
+            // flag clear so a later add()/flush can restart the chain; a stuck-true flag would
+            // silently disable all time-based flushes while the queue still accepts batches.
+            triggerScheduled = false;
+            throw e;
+        }
     }
 
     private synchronized void submitWriteTask() {

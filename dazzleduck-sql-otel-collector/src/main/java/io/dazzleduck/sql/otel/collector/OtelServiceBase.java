@@ -205,7 +205,9 @@ class OtelServiceBase implements Closeable {
      */
     static StatusRuntimeException toStatusError(Throwable t) {
         Throwable root = t;
-        for (Throwable current = t; current != null; current = current.getCause()) {
+        int depth = 0;
+        // depth-bounded so a pathological cause cycle cannot loop forever
+        for (Throwable current = t; current != null && depth < 20; current = current.getCause(), depth++) {
             if (current instanceof PendingWriteExceededException e) {
                 var status = com.google.rpc.Status.newBuilder()
                         .setCode(Status.RESOURCE_EXHAUSTED.getCode().value())
