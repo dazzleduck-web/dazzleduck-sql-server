@@ -7,6 +7,10 @@ public record Stats(String identifier,
                     long totalWriteBuckets,
                     long timeSpentWriting,
                     long pendingBatches,
-                    long pendingBuckets
+                    long pendingBuckets,
+                    long failedWriteBytes,
+                    long failedWriteBatches,
+                    long failedWriteBuckets,
+                    long producerIdEvictions
                     ) {
 }

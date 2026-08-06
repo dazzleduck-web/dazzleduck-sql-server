@@ -4,6 +4,7 @@ import io.dazzleduck.sql.commons.ingestion.IngestionConfig;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.IngestionResult;
 import io.dazzleduck.sql.commons.ingestion.ParquetIngestionQueue;
+import io.dazzleduck.sql.commons.ingestion.PendingWriteExceededException;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTask;
 import io.dazzleduck.sql.otel.collector.auth.JwtServerInterceptor;
 import io.grpc.Context;
@@ -29,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Unit tests for {@link OtelServiceBase#resolveQueue} — the collector's queue-resolution +
@@ -88,7 +90,7 @@ class OtelServiceBaseTest {
 
         assertNotNull(queue, "a known queue resolves");
         assertNull(obs.error, "no error sent for a resolvable queue");
-        assertEquals(4, meterCount("a"), "writer gauges/counters registered on creation");
+        assertEquals(8, meterCount("a"), "writer gauges/counters registered on creation");
         assertSame(queue, resolve("a", new CapturingObserver()), "second resolve returns the cached queue");
     }
 
@@ -116,7 +118,7 @@ class OtelServiceBaseTest {
     void evictedQueue_unregistersMetricsAndRejects() throws Exception {
         handler.known.add("a");
         assertNotNull(resolve("a", new CapturingObserver()));
-        assertEquals(4, meterCount("a"), "precondition: writer metrics present");
+        assertEquals(8, meterCount("a"), "precondition: writer metrics present");
 
         handler.known.remove("a"); // tombstone
 
@@ -126,6 +128,42 @@ class OtelServiceBaseTest {
         assertEquals(Status.Code.INVALID_ARGUMENT, statusOf(obs));
         assertEquals(0, meterCount("a"),
                 "eviction (onDeleted) must unregister the queue's metrics so it can be GC'd");
+    }
+
+    @Test
+    void backpressure_mapsToResourceExhaustedWithRetryInfo() throws Exception {
+        var ex = new java.util.concurrent.CompletionException(
+                new PendingWriteExceededException(100, 50, 7));
+        var sre = OtelServiceBase.toStatusError(ex);
+
+        assertEquals(Status.Code.RESOURCE_EXHAUSTED, sre.getStatus().getCode());
+        assertNotNull(sre.getStatus().getDescription());
+        assertTrue(sre.getStatus().getDescription().contains("Pending write limit exceeded"),
+                "the original backpressure message must survive");
+
+        com.google.rpc.Status proto = io.grpc.protobuf.StatusProto.fromThrowable(sre);
+        assertNotNull(proto);
+        assertEquals(1, proto.getDetailsCount(), "RetryInfo detail attached");
+        var retryInfo = proto.getDetails(0).unpack(com.google.rpc.RetryInfo.class);
+        assertEquals(7, retryInfo.getRetryDelay().getSeconds(),
+                "retry-after from the queue is propagated to the client");
+    }
+
+    @Test
+    void genericFailure_mapsToInternalWithMessage() {
+        var ex = new java.util.concurrent.CompletionException(
+                new java.io.IOException("disk full"));
+        var sre = OtelServiceBase.toStatusError(ex);
+        assertEquals(Status.Code.INTERNAL, sre.getStatus().getCode());
+        assertEquals("disk full", sre.getStatus().getDescription());
+    }
+
+    @Test
+    void existingStatusException_passesThrough() {
+        var original = Status.FAILED_PRECONDITION.withDescription("not ready").asRuntimeException();
+        var sre = OtelServiceBase.toStatusError(
+                new java.util.concurrent.CompletionException(original));
+        assertSame(original, sre);
     }
 
     // ----- helpers ---------------------------------------------------------

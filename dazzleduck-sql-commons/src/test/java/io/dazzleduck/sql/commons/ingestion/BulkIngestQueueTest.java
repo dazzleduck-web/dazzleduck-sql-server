@@ -248,6 +248,170 @@ public class BulkIngestQueueTest {
         }
     }
 
+    @Test
+    public void testFailedWriteIsAccountedAndQueueRecovers() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        long batchSize = DEFAULT_MIN_BATCH_SIZE + 1; // fills the bucket, triggering an immediate write
+        // Small enough that a phantom "pending" failed bucket would make the next add() exceed it.
+        long maxPendingWrite = DEFAULT_MIN_BATCH_SIZE + DEFAULT_MIN_BATCH_SIZE / 2;
+        var queue = new FailingOnceMockQueue(maxPendingWrite, service, clock);
+
+        var failed = queue.add(mockBatch("123", 0, batchSize));
+        var thrown = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> failed.get(5, TimeUnit.SECONDS));
+        assertEquals("simulated storage failure", thrown.getCause().getMessage());
+
+        // The failed bucket is accounted as failed, not pending, so the queue cannot wedge.
+        assertEquals(0, queue.pendingWrite());
+        assertEquals(0, queue.getPendingBatches());
+        assertEquals(batchSize, queue.getFailedWriteBytes());
+        assertEquals(1, queue.getFailedWriteBatches());
+        assertEquals(1, queue.getFailedWriteBuckets());
+        var stats = queue.getStats();
+        assertEquals(batchSize, stats.failedWriteBytes());
+        assertEquals(1, stats.failedWriteBatches());
+        assertEquals(1, stats.failedWriteBuckets());
+        assertEquals(0, stats.pendingBatches());
+
+        // This batch would be rejected with PendingWriteExceededException if the failed bytes
+        // still counted as pending; after the failure is accounted it is accepted and written.
+        var recovered = queue.add(mockBatch("123", 1, batchSize));
+        assertEquals(new MockWriteResult(1, batchSize), recovered.get(5, TimeUnit.SECONDS));
+        assertEquals(0, queue.pendingWrite());
+        queue.close();
+    }
+
+    @Test
+    public void testFailedBatchCanBeRetriedWithSameProducerBatchId() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        long batchSize = DEFAULT_MIN_BATCH_SIZE + 1; // fills the bucket, triggering an immediate write
+        var queue = new FailingOnceMockQueue(Long.MAX_VALUE, service, clock);
+
+        var failed = queue.add(mockBatch("123", 5, batchSize));
+        assertThrows(java.util.concurrent.ExecutionException.class, () -> failed.get(5, TimeUnit.SECONDS));
+
+        // The write failed, so resubmitting the exact same batch id must be accepted, not
+        // rejected as OutOfSequenceBatch.
+        var retry = queue.add(mockBatch("123", 5, batchSize));
+        assertEquals(new MockWriteResult(1, batchSize), retry.get(5, TimeUnit.SECONDS));
+
+        // Duplicate protection still applies to successfully written batches.
+        var duplicate = queue.add(mockBatch("123", 5, batchSize));
+        var thrown = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> duplicate.get(5, TimeUnit.SECONDS));
+        assertInstanceOf(OutOfSequenceBatch.class, thrown.getCause());
+
+        // And the sequence continues normally from there.
+        var next = queue.add(mockBatch("123", 6, batchSize));
+        assertEquals(new MockWriteResult(2, batchSize), next.get(5, TimeUnit.SECONDS));
+        queue.close();
+    }
+
+    @Test
+    public void testAllBatchesOfFailedBucketAreRetriable() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        long halfBucket = DEFAULT_MIN_BATCH_SIZE / 2 + 1; // two of these fill the bucket
+        var queue = new FailingOnceMockQueue(Long.MAX_VALUE, service, clock);
+
+        // Two batches from the same producer land in the same bucket, which fails to write.
+        var failed1 = queue.add(mockBatch("123", 3, halfBucket));
+        var failed2 = queue.add(mockBatch("123", 4, halfBucket));
+        assertThrows(java.util.concurrent.ExecutionException.class, () -> failed1.get(5, TimeUnit.SECONDS));
+        assertThrows(java.util.concurrent.ExecutionException.class, () -> failed2.get(5, TimeUnit.SECONDS));
+
+        // The sequence rolled back below the smallest failed id, so both retries are accepted
+        // in order and written together in the next bucket.
+        var retry1 = queue.add(mockBatch("123", 3, halfBucket));
+        var retry2 = queue.add(mockBatch("123", 4, halfBucket));
+        assertEquals(new MockWriteResult(1, 2 * halfBucket), retry1.get(5, TimeUnit.SECONDS));
+        assertEquals(new MockWriteResult(1, 2 * halfBucket), retry2.get(5, TimeUnit.SECONDS));
+        queue.close();
+    }
+
+    @Test
+    public void testBucketFlushesDoNotAccumulateScheduledTriggers() throws Exception {
+        var service = new CountingScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        var queue = createMockQueue(service, clock);
+        int afterConstruction = service.scheduleCount.get(); // the single chain start
+
+        // Sustained ingestion: every batch fills a bucket and triggers an immediate write.
+        long batchSize = DEFAULT_MIN_BATCH_SIZE + 1;
+        var futures = new ArrayList<Future<MockWriteResult>>();
+        for (int i = 0; i < 50; i++) {
+            futures.add(queue.add(mockBatch("123", i, batchSize)));
+        }
+        for (var f : futures) {
+            assertNotNull(f.get(5, TimeUnit.SECONDS));
+        }
+        assertEquals(afterConstruction, service.scheduleCount.get(),
+                "size-triggered flushes must not spawn additional scheduled trigger chains");
+
+        // The one chain is still alive and flushes a buffered batch via the delay path.
+        var small = queue.add(mockBatch("123", 100, DEFAULT_SMALL_BATCH_SIZE));
+        clock.advanceBy(DEFAULT_MAX_DELAY.plusMillis(10));
+        service.tick(DEFAULT_MAX_DELAY.toMillis() + 10, TimeUnit.MILLISECONDS);
+        assertEquals(new MockWriteResult(50, DEFAULT_SMALL_BATCH_SIZE), small.get(5, TimeUnit.SECONDS));
+        queue.close();
+    }
+
+    @Test
+    public void testProducerIdEvictionIsCounted() throws Exception {
+        withServiceAndQueue((service, queue, clock) -> {
+            int maxProducerIds = 10_000; // MAX_PRODUCER_IDS in BulkIngestQueue
+            // Zero-size batches never fill the bucket, so this only exercises the producer cache.
+            for (int i = 0; i <= maxProducerIds; i++) {
+                queue.add(mockBatch("p" + i, 7, 0));
+            }
+            assertEquals(1, queue.getProducerIdEvictions(),
+                    "one producer past the limit evicts exactly the least-recently-used entry");
+            assertEquals(1, queue.getStats().producerIdEvictions());
+
+            // The evicted producer ("p0") lost duplicate protection: the same batch id is
+            // accepted again rather than rejected as OutOfSequenceBatch.
+            var resubmitted = queue.add(mockBatch("p0", 7, 0));
+            assertFalse(resubmitted.isCompletedExceptionally());
+            assertEquals(2, queue.getProducerIdEvictions(),
+                    "re-adding the evicted producer evicts the next-eldest entry");
+        });
+    }
+
+    /** DeterministicScheduler that counts schedule() calls, to detect trigger-chain leaks. */
+    private static final class CountingScheduler extends DeterministicScheduler {
+        final java.util.concurrent.atomic.AtomicInteger scheduleCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            scheduleCount.incrementAndGet();
+            return super.schedule(command, delay, unit);
+        }
+    }
+
+    /** Queue whose first write() fails — used to verify failed-write accounting and recovery. */
+    private static final class FailingOnceMockQueue extends BulkIngestQueue<String, MockWriteResult> {
+        private final java.util.concurrent.atomic.AtomicBoolean failNext =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+
+        FailingOnceMockQueue(long maxPendingWrite, ScheduledExecutorService executorService, Clock clock) {
+            super("", DEFAULT_MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, maxPendingWrite,
+                    DEFAULT_MAX_DELAY, executorService, clock);
+        }
+
+        @Override
+        public void write(WriteTask<String, MockWriteResult> writeTask) {
+            if (failNext.getAndSet(false)) {
+                throw new RuntimeException("simulated storage failure");
+            }
+            for (var future : writeTask.bucket().futures()) {
+                future.complete(new MockWriteResult(writeTask.taskId(), writeTask.size()));
+            }
+        }
+    }
+
     /** Queue whose write() blocks until a latch is released — used to exercise drain/close timeouts. */
     private static final class BlockingMockQueue extends BulkIngestQueue<String, MockWriteResult> {
         private final java.util.concurrent.CountDownLatch release;

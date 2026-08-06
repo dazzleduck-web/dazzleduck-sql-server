@@ -1,12 +1,17 @@
 package io.dazzleduck.sql.otel.collector;
 
+import com.google.protobuf.Any;
+import com.google.rpc.RetryInfo;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.ingestion.Batch;
 import io.dazzleduck.sql.commons.ingestion.IngestionConfig;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.ParquetIngestionQueue;
+import io.dazzleduck.sql.commons.ingestion.PendingWriteExceededException;
 import io.dazzleduck.sql.otel.collector.auth.JwtServerInterceptor;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import io.micrometer.core.instrument.Timer;
 import org.apache.arrow.memory.RootAllocator;
@@ -179,13 +184,48 @@ class OtelServiceBase implements Closeable {
                 try { Files.deleteIfExists(arrowFile); } catch (IOException ignored) {}
                 metrics.recordError(queueId, sample);
                 log.error("Failed to persist {} records for queue '{}'", count, queueId, ex);
-                responseObserver.onError(ex);
+                responseObserver.onError(toStatusError(ex));
             } else {
                 metrics.recordExport(queueId, count, sample);
                 responseObserver.onNext(successResponse);
                 responseObserver.onCompleted();
             }
         };
+    }
+
+    /**
+     * Maps an ingestion failure to a meaningful gRPC status. Forwarding the raw exception would
+     * make gRPC surface it as {@code UNKNOWN} with an empty message, so clients could not tell
+     * overload from a server bug. Backpressure ({@link PendingWriteExceededException} anywhere in
+     * the cause chain — it arrives wrapped in {@code CompletionException}) becomes
+     * {@code RESOURCE_EXHAUSTED} with {@code RetryInfo} carrying the queue's suggested retry
+     * delay, which OTLP exporters honor for throttling; an already-built {@code
+     * StatusRuntimeException} passes through; anything else becomes {@code INTERNAL} with the
+     * root cause's message.
+     */
+    static StatusRuntimeException toStatusError(Throwable t) {
+        Throwable root = t;
+        for (Throwable current = t; current != null; current = current.getCause()) {
+            if (current instanceof PendingWriteExceededException e) {
+                var status = com.google.rpc.Status.newBuilder()
+                        .setCode(Status.RESOURCE_EXHAUSTED.getCode().value())
+                        .setMessage(e.getMessage())
+                        .addDetails(Any.pack(RetryInfo.newBuilder()
+                                .setRetryDelay(com.google.protobuf.Duration.newBuilder()
+                                        .setSeconds(e.getRetryAfterSeconds()))
+                                .build()))
+                        .build();
+                return StatusProto.toStatusRuntimeException(status);
+            }
+            if (current instanceof StatusRuntimeException sre) {
+                return sre;
+            }
+            root = current;
+        }
+        return Status.INTERNAL
+                .withDescription(root.getMessage() != null ? root.getMessage() : root.getClass().getName())
+                .withCause(root)
+                .asRuntimeException();
     }
 
     @Override

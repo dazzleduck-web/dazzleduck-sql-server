@@ -109,6 +109,26 @@ public class OtelCollectorMetrics implements Closeable {
                 .tag("queue", queueId)
                 .description("Cumulative number of Arrow batches flushed to Parquet")
                 .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.bytes_failed", writer,
+                        w -> w.getStats().failedWriteBytes())
+                .tag("queue", queueId)
+                .description("Cumulative bytes in buckets whose Parquet write failed")
+                .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.batches_failed", writer,
+                        w -> w.getStats().failedWriteBatches())
+                .tag("queue", queueId)
+                .description("Cumulative number of Arrow batches whose Parquet write failed")
+                .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.write_failures", writer,
+                        w -> w.getStats().failedWriteBuckets())
+                .tag("queue", queueId)
+                .description("Cumulative number of failed bucket write attempts")
+                .register(registry));
+        track(queueId, FunctionCounter.builder("dazzleduck.otel.writer.producer_id_evictions", writer,
+                        w -> w.getStats().producerIdEvictions())
+                .tag("queue", queueId)
+                .description("Cumulative producer ids evicted from the duplicate-protection cache")
+                .register(registry));
         track(queueId, Gauge.builder("dazzleduck.otel.writer.pending_batches", writer,
                         w -> w.getStats().pendingBatches())
                 .tag("queue", queueId)

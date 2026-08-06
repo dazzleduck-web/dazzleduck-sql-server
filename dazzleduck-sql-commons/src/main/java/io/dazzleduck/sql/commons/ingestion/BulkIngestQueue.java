@@ -14,6 +14,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -93,13 +94,30 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         return (currentSize + candidate.size() <= maxSize) &&
                (currentBatchCount + candidate.batchCount() <= maxBatchCount);
     }
+    /**
+     * Upper bound on tracked producer ids. The tracking map is an access-ordered LRU: when a new
+     * producer pushes the size past this limit, the least-recently-used producer's entry is
+     * evicted and duplicate/ordering protection for that producer silently disappears — its next
+     * batch is accepted with any sequence number. Evictions are logged and counted (see
+     * {@link #getProducerIdEvictions()}) so this is observable; size the limit above the number
+     * of concurrently active producers.
+     */
     private static final int MAX_PRODUCER_IDS = 10000;
     private final Map<String, Long> inProgressBatchIds = new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
-            return size() > MAX_PRODUCER_IDS;
+            if (size() > MAX_PRODUCER_IDS) {
+                producerIdEvictions.accumulate(1);
+                logger.warn("Producer-id cache for queue '{}' exceeded {} entries; evicting " +
+                                "least-recently-used producer '{}' (last batch id {}) — duplicate and " +
+                                "ordering protection no longer applies to it",
+                        identifier, MAX_PRODUCER_IDS, eldest.getKey(), eldest.getValue());
+                return true;
+            }
+            return false;
         }
     };
+    private final LongAccumulator producerIdEvictions = new LongAccumulator(Long::sum, 0L);
     private final long minBucketSize;
     private final long maxBucketSize;
     private final int maxBatches;
@@ -112,6 +130,15 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     private Bucket<T, R> currentBucket;
     private volatile boolean terminating;
     private volatile boolean draining;
+    /**
+     * Single-flight guard for the {@link #triggerWriteIfRequired} chain: true while a trigger is
+     * scheduled and not yet run. Exactly one chain must exist — the constructor starts it and each
+     * run schedules its successor. Without this guard every {@link #submitWriteTask} (one per
+     * flushed bucket) would spawn an additional never-terminating chain, and under sustained
+     * ingestion thousands of chains accumulate, all contending for the queue lock. Guarded by
+     * {@code this}.
+     */
+    private boolean triggerScheduled;
 
     private volatile WriteTask<T, R> runningWrite;
     private long writeTaskId;
@@ -130,6 +157,9 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     private final LongAccumulator acceptedBytes = new LongAccumulator(Long::sum, 0L);
     private final LongAccumulator bucketsCreated = new LongAccumulator(Long::sum, 0L);
     private final LongAccumulator totalWrite = new LongAccumulator(Long::sum, 0L);
+    private final LongAccumulator failedWriteBytes = new LongAccumulator(Long::sum, 0L);
+    private final LongAccumulator failedWriteBatches = new LongAccumulator(Long::sum, 0L);
+    private final LongAccumulator failedWriteBuckets = new LongAccumulator(Long::sum, 0L);
     private final LongAccumulator timeSpentWriting = new LongAccumulator(Long::sum, 0L);
 
     public BulkIngestQueue(String identifier,
@@ -152,7 +182,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         this.writeThread = new Thread(this::processWriteQueue, "BulkIngestQueue-" + identifier + "-writer");
         this.writeThread.setDaemon(true);
         this.writeThread.start();
-        executorService.schedule(this::triggerWriteIfRequired, maxDelay.toMillis(), TimeUnit.MILLISECONDS);
+        scheduleTrigger(maxDelay.toMillis());
     }
 
     private void createNewBucket(){
@@ -217,6 +247,17 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
                     totalWriteBuckets.accumulate(bucketsToCombine.size());
                     timeSpentWriting.accumulate(Duration.between(start, end).toMillis());
                 } catch (Exception e) {
+                    logger.error("Write failed for queue '{}': dropping bucket of {} batches / {} bytes",
+                            identifier, bucketToWrite.batchCount(), bucketToWrite.size(), e);
+                    // A failed bucket is no longer outstanding work: account it separately so
+                    // pendingWrite()/getPendingBatches() (acceptedBytes - written - failed) don't
+                    // count it as pending forever and eventually wedge add() at maxPendingWrite.
+                    // Accumulate before completing the futures so a caller observing the failure
+                    // already sees the corrected pending numbers.
+                    failedWriteBytes.accumulate(bucketToWrite.size());
+                    failedWriteBatches.accumulate(bucketToWrite.batchCount());
+                    failedWriteBuckets.accumulate(1);
+                    rollbackProducerSequences(bucketToWrite);
                     // Complete futures with exception but continue processing remaining tasks
                     for (var future : bucketToWrite.futures()) {
                         if (!future.isDone()) {
@@ -234,10 +275,37 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         }
     }
 
+    /**
+     * Rolls each producer's sequence entry back below the smallest id that failed in this bucket,
+     * so the client can resubmit exactly the batches whose futures failed; without this a retry is
+     * rejected as {@link OutOfSequenceBatch} and a recoverable write failure becomes data loss.
+     * Runs under the queue lock because {@link #add} reads and writes {@link #inProgressBatchIds}
+     * under the same lock, and before the futures are completed so a client observing the failure
+     * can retry immediately. Ids of later batches from the same producer still queued behind the
+     * failed bucket become re-submittable too; they either succeed (so dedup is only weakened for
+     * batches the client was told failed) or fail and legitimately need the same retry window.
+     */
+    private synchronized void rollbackProducerSequences(Bucket<T, R> bucket) {
+        var minFailedByProducer = new HashMap<String, Long>();
+        for (var batch : bucket.batches()) {
+            if (batch.producerId() != null) {
+                minFailedByProducer.merge(batch.producerId(), batch.producerBatchId(), Math::min);
+            }
+        }
+        minFailedByProducer.forEach((producerId, minFailedId) -> {
+            var current = inProgressBatchIds.get(producerId);
+            if (current != null && current >= minFailedId) {
+                inProgressBatchIds.put(producerId, minFailedId - 1);
+            }
+        });
+    }
+
     @Override
     public Stats getStats(){
         return new Stats(identifier, totalWrite.get(), totalWriteBatches.get(), totalWriteBuckets.get(),
-                timeSpentWriting.get(), getPendingBatches(), getPendingBuckets());
+                timeSpentWriting.get(), getPendingBatches(), getPendingBuckets(),
+                failedWriteBytes.get(), failedWriteBatches.get(), failedWriteBuckets.get(),
+                producerIdEvictions.get());
     }
 
     public long getTotalWriteBatches() {
@@ -256,8 +324,24 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         return timeSpentWriting.get();
     }
 
+    public long getFailedWriteBytes() {
+        return failedWriteBytes.get();
+    }
+
+    public long getFailedWriteBatches() {
+        return failedWriteBatches.get();
+    }
+
+    public long getFailedWriteBuckets() {
+        return failedWriteBuckets.get();
+    }
+
+    public long getProducerIdEvictions() {
+        return producerIdEvictions.get();
+    }
+
     public long getPendingBatches() {
-        return acceptedBatches.get() - totalWriteBatches.get();
+        return acceptedBatches.get() - totalWriteBatches.get() - failedWriteBatches.get();
     }
 
     public long getPendingBuckets() {
@@ -271,7 +355,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
 
     @Override
     public long pendingWrite() {
-        return acceptedBytes.get() - totalWrite.get();
+        return acceptedBytes.get() - totalWrite.get() - failedWriteBytes.get();
     }
 
     /**
@@ -332,6 +416,8 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     }
 
     private synchronized void triggerWriteIfRequired() {
+        // This run consumed the scheduled trigger; whichever path follows schedules the successor.
+        triggerScheduled = false;
         if (terminating || draining) {
             // Once draining, drain() owns the final flush and the write thread is stopping; any
             // further scheduled trigger is a no-op so the executor stops rescheduling this task.
@@ -344,7 +430,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
             // (initial state), nextTrigger is decades in the past, so timeRemaining is
             // deeply negative and Math.max(0, ...) collapses to 0, creating a tight
             // spin-loop that consumes 100% CPU and starves all other threads.
-            executorService.schedule(this::triggerWriteIfRequired, maxDelay.toMillis(), TimeUnit.MILLISECONDS);
+            scheduleTrigger(maxDelay.toMillis());
             return;
         }
 
@@ -359,7 +445,16 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     private void scheduleNextTrigger(Instant now) {
         var nextTrigger = lastWrite.plus(maxDelay);
         var timeRemaining = Duration.between(now, nextTrigger);
-        executorService.schedule(this::triggerWriteIfRequired, Math.max(0, timeRemaining.toMillis()), TimeUnit.MILLISECONDS);
+        scheduleTrigger(Math.max(0, timeRemaining.toMillis()));
+    }
+
+    /** Schedules the next {@link #triggerWriteIfRequired} run unless one is already pending. */
+    private void scheduleTrigger(long delayMillis) {
+        if (triggerScheduled) {
+            return;
+        }
+        triggerScheduled = true;
+        executorService.schedule(this::triggerWriteIfRequired, delayMillis, TimeUnit.MILLISECONDS);
     }
 
     private synchronized void submitWriteTask() {
