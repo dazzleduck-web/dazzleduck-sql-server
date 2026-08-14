@@ -47,6 +47,9 @@ public record QueueIdToTableMapping(
                     "Queue '%s': 'transformation' and 'view'/'input_table' are mutually exclusive"
                             .formatted(ingestionQueue));
         }
+        // Fail at config load, not per batch: a malformed watermark spec (partial/blank/typo'd
+        // keys) would otherwise write each batch's output and then orphan it at post-ingestion.
+        WatermarkSpec.fromParameters(ingestionQueue, additionalParameters);
     }
 
     /** Backward-compatible constructor without outputPath/inputSchema (DuckLake-managed entries). */

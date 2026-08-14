@@ -116,26 +116,19 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         }
     }
 
-    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask) {
+    /**
+     * The relation the output files are written from: the temp input files with the
+     * transformation and any partition projections applied. This is also the relation the
+     * watermark rows are computed over — same schema, same rows as the written output, read
+     * while the input files are still local.
+     */
+    private String constructSourceRelation(WriteTask<String, IngestionResult> writeTask) {
         var batches = writeTask.bucket().batches();
         // All Arrow files
         var arrowFiles = batches.stream().map(Batch::record).map("'%s'"::formatted).collect(Collectors.joining(","));
         String[] batchPartitionBy = batches.get(0).partitionBy();
         boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
-        String[] effectivePartitionBy = hasBatchPartitionBy
-                ? batchPartitionBy
-                : postIngestionHandler.getPartitionBy(queueId);
-        String partitionByClause = getClause(effectivePartitionBy, ", PARTITION_BY(%s)");
         String sortOrderClause = getClause(batches.get(0).sortOrder(), "ORDER BY %s ");
-        // Last format
-        var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
-        String fullFilePath;
-        if (partitionByClause.isEmpty()) {
-            String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
-            fullFilePath = this.outputPath + "/" + uniqueFileName;
-        } else {
-            fullFilePath = this.outputPath;
-        }
 
         // Inner SQL reads from the temp Arrow files
         var innerSql = "SELECT * FROM read_%s([%s]) %s".formatted(this.inputFormat, arrowFiles, sortOrderClause);
@@ -157,6 +150,28 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                         String.join(", ", partitionProjections), querySql);
             }
         }
+        return querySql;
+    }
+
+    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask) {
+        var batches = writeTask.bucket().batches();
+        String[] batchPartitionBy = batches.get(0).partitionBy();
+        boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
+        String[] effectivePartitionBy = hasBatchPartitionBy
+                ? batchPartitionBy
+                : postIngestionHandler.getPartitionBy(queueId);
+        String partitionByClause = getClause(effectivePartitionBy, ", PARTITION_BY(%s)");
+        // Last format
+        var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
+        String fullFilePath;
+        if (partitionByClause.isEmpty()) {
+            String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
+            fullFilePath = this.outputPath + "/" + uniqueFileName;
+        } else {
+            fullFilePath = this.outputPath;
+        }
+
+        var querySql = constructSourceRelation(writeTask);
 
         // Build SQL
         // https://duckdb.org/docs/stable/sql/statements/copy
@@ -174,8 +189,18 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         logger.debug("Executing COPY SQL: {}", sql);
         List<String> files = new ArrayList<>();
         long count = 0;
+        // Watermark rows are computed BEFORE the COPY, over the same source relation the output
+        // is written from: the data is still local, the transformation is already applied (so
+        // partition columns are real typed columns, not hive path fragments), and a misconfigured
+        // spec fails fast without leaving an unregistered output file behind.
+        WatermarkSpec watermarkSpec = postIngestionHandler.getWatermarkSpec(queueId);
+        List<List<String>> watermarkRows = null;
         try (var conn = ConnectionPool.getConnection();
              var stmt = conn.createStatement()) {
+
+            if (watermarkSpec != null) {
+                watermarkRows = watermarkSpec.computeRows(conn, constructSourceRelation(writeTask));
+            }
 
             // Set up cancellation hook
             var cancelHookSet = writeTask.setCancelHook(() -> {
@@ -210,6 +235,6 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
                 writeTask.bucket().getProducerMaxBatchId(),
                 count,
-                files, sql);
+                files, sql, watermarkRows);
     }
 }

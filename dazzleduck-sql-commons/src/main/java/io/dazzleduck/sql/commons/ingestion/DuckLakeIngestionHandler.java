@@ -179,6 +179,13 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     @Override
+    public WatermarkSpec getWatermarkSpec(String queueId) {
+        QueueIdToTableMapping mapping = queueIdsToTableMappings.get(queueId);
+        if (mapping == null) mapping = queueIdsToTableMappings.get(extractSuffix(queueId));
+        return mapping == null ? null : WatermarkSpec.fromParameters(queueId, mapping.additionalParameters());
+    }
+
+    @Override
     public PostIngestionTask createPostIngestionTask(IngestionResult result) {
         QueueIdToTableMapping mapping = queueIdsToTableMappings.get(result.queueName());
         if (mapping == null) mapping = queueIdsToTableMappings.get(extractSuffix(result.queueName()));

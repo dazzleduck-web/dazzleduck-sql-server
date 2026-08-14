@@ -13,9 +13,17 @@ import java.util.Map;
  * @param applicationId Application which is responsible for Ingestion
  * @param maxProducerIds Id of the producer
  * @param filesCreated This will be populated when the  files are written in the s3
+ * @param watermarkRows Per-group MIN-timestamp rows precomputed at write time from the source
+ *                      relation (group values in {@link WatermarkSpec#groupColumns()} order,
+ *                      timestamp last, as DuckDB-rendered strings); null when the queue has no
+ *                      watermark configured
  */
-public record IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query) {
+public record IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query, List<List<String>> watermarkRows) {
     IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated) {
-        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, null);
+        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, null, null);
+    }
+
+    public IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query) {
+        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, query, null);
     }
 }

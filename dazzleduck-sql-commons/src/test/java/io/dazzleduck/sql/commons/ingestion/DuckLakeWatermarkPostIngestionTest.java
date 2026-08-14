@@ -16,11 +16,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * DuckLakePostIngestionTask's optional watermark append: when the queue mapping's
- * {@code additional_parameters} configure a watermark table, timestamp column and group columns,
- * the task inserts one MIN-timestamp row per group — computed from only the newly registered
- * Parquet files — in the SAME transaction as {@code ducklake_add_data_files}, so file
- * registration and watermark rows commit or roll back together.
+ * DuckLakePostIngestionTask's watermark append: watermark rows are precomputed at write time
+ * (see {@link WatermarkSpec#computeRows}) and carried on {@link IngestionResult#watermarkRows()};
+ * the task appends them via INSERT ... VALUES in the SAME transaction as
+ * {@code ducklake_add_data_files}, so file registration and watermark rows commit or roll back
+ * together. The task itself never re-reads the written files.
  */
 class DuckLakeWatermarkPostIngestionTest {
 
@@ -63,25 +63,36 @@ class DuckLakeWatermarkPostIngestionTest {
         return List.of(f1, f2);
     }
 
-    private static IngestionResult result(List<String> files) {
-        return new IngestionResult("q1", 1, "test-app", Map.of(), 4, files, null);
+    private static final WatermarkSpec SPEC = new WatermarkSpec("ingest_watermark", "ts", List.of("county", "state"));
+
+    private static Map<String, String> watermarkParams(String table) {
+        return Map.of(
+                WatermarkSpec.TABLE_KEY, table,
+                WatermarkSpec.TIMESTAMP_COLUMN_KEY, "ts",
+                WatermarkSpec.GROUP_COLUMNS_KEY, "county, state");
     }
 
-    private static Map<String, String> watermarkParams() {
-        return Map.of(
-                DuckLakePostIngestionTask.WATERMARK_TABLE_KEY, "ingest_watermark",
-                DuckLakePostIngestionTask.WATERMARK_TIMESTAMP_COLUMN_KEY, "ts",
-                DuckLakePostIngestionTask.WATERMARK_GROUP_COLUMNS_KEY, "county, state");
+    /** Computes the rows the way ParquetIngestionQueue does at write time: over the source relation. */
+    private List<List<String>> computeRows(List<String> files) throws Exception {
+        String relation = "SELECT * FROM read_parquet(['%s', '%s'])".formatted(files.get(0), files.get(1));
+        try (Connection conn = ConnectionPool.getConnection()) {
+            return SPEC.computeRows(conn, relation);
+        }
+    }
+
+    private static IngestionResult result(List<String> files, List<List<String>> watermarkRows) {
+        return new IngestionResult("q1", 1, "test-app", Map.of(), 4, files, null, watermarkRows);
     }
 
     @Test
-    void appendsMinTimestampPerGroupInSameTransaction() throws Exception {
+    void appendsPrecomputedRowsInSameTransaction() throws Exception {
         List<String> files = writeBatchFiles();
-        new DuckLakePostIngestionTask(result(files), CATALOG, "facts", "main", watermarkParams()).execute();
+        List<List<String>> rows = computeRows(files);
+        new DuckLakePostIngestionTask(result(files, rows), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark")).execute();
 
         try (Connection conn = ConnectionPool.getConnection()) {
-            List<String> facts = collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.facts".formatted(CATALOG));
-            assertEquals(List.of("4"), facts);
+            assertEquals(List.of("4"), collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.facts".formatted(CATALOG)));
 
             List<String> watermarks = collect(conn,
                     ("SELECT county || '|' || state || '|' || strftime(ts, '%%Y-%%m-%%d %%H:%%M') AS r "
@@ -97,10 +108,9 @@ class DuckLakeWatermarkPostIngestionTest {
     @Test
     void watermarkFailureRollsBackFileRegistration() throws Exception {
         List<String> files = writeBatchFiles();
-        Map<String, String> params = Map.of(
-                DuckLakePostIngestionTask.WATERMARK_TABLE_KEY, "missing_watermark_table",
-                DuckLakePostIngestionTask.WATERMARK_TIMESTAMP_COLUMN_KEY, "ts");
-        var task = new DuckLakePostIngestionTask(result(files), CATALOG, "facts", "main", params);
+        List<List<String>> rows = computeRows(files);
+        var task = new DuckLakePostIngestionTask(result(files, rows), CATALOG, "facts", "main",
+                watermarkParams("missing_watermark_table"));
         assertThrows(RuntimeException.class, task::execute);
 
         try (Connection conn = ConnectionPool.getConnection()) {
@@ -110,9 +120,10 @@ class DuckLakeWatermarkPostIngestionTest {
     }
 
     @Test
-    void noWatermarkParametersRegistersFilesOnly() throws Exception {
+    void emptyWatermarkRowsSkipTheInsert() throws Exception {
         List<String> files = writeBatchFiles();
-        new DuckLakePostIngestionTask(result(files), CATALOG, "facts", "main", Map.of()).execute();
+        new DuckLakePostIngestionTask(result(files, List.of()), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark")).execute();
 
         try (Connection conn = ConnectionPool.getConnection()) {
             assertEquals(List.of("4"), collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.facts".formatted(CATALOG)));
@@ -121,11 +132,14 @@ class DuckLakeWatermarkPostIngestionTest {
     }
 
     @Test
-    void watermarkTableWithoutTimestampColumnIsRejected() throws Exception {
+    void noWatermarkParametersRegistersFilesOnly() throws Exception {
         List<String> files = writeBatchFiles();
-        Map<String, String> params = Map.of(DuckLakePostIngestionTask.WATERMARK_TABLE_KEY, "ingest_watermark");
-        assertThrows(IllegalArgumentException.class,
-                () -> new DuckLakePostIngestionTask(result(files), CATALOG, "facts", "main", params));
+        new DuckLakePostIngestionTask(result(files, null), CATALOG, "facts", "main", Map.of()).execute();
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(List.of("4"), collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.facts".formatted(CATALOG)));
+            assertEquals(List.of("0"), collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.ingest_watermark".formatted(CATALOG)));
+        }
     }
 
     private static List<String> collect(Connection conn, String sql) throws Exception {

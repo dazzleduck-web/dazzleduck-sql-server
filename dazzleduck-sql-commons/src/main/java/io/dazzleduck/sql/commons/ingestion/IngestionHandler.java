@@ -17,6 +17,13 @@ public interface IngestionHandler {
      */
     default String[] getPartitionProjections(String queueId) { return new String[0]; }
 
+    /**
+     * Watermark configuration for the queue, or {@code null} when none is configured. When
+     * non-null, {@link ParquetIngestionQueue} computes the watermark rows at write time (from the
+     * same relation the output is written from) and carries them on the {@link IngestionResult}.
+     */
+    default WatermarkSpec getWatermarkSpec(String queueId) { return null; }
+
     default boolean supportPartitionByHeader() { return true; }
 
     // -----------------------------------------------------------------------
