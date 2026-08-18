@@ -664,4 +664,354 @@ public class PruneUnusedLeftJoinsTest {
             conn.createStatement().execute("DROP SCHEMA IF EXISTS s3");
         }
     }
+
+    // ---- complex select-list entries: droppable when aliased and unused ----
+    //
+    // An entry is droppable when we can name it and the outer query never uses that name — which
+    // now includes aliased CASE/CAST/FUNCTION/SUBQUERY entries, not only COLUMN_REFs. Two payoffs:
+    // the expression stops being computed, and it stops contributing references, so an expression
+    // whose lambda parameter reads as an unqualified column no longer disables join elimination
+    // for the whole view. STARs and unaliased expressions are still kept unconditionally.
+
+    /** Body with an aliased plain expression and both dimension joins. */
+    private static final String EXPR_VIEW_BODY =
+            "SELECT f.f_id, f.f_col, a.a_name, b.b_name, f.f_col + f.a_id AS total " +
+            "FROM f " +
+            "LEFT JOIN a ON f.a_id = a.a_id " +
+            "LEFT JOIN b ON f.b_id = b.b_id";
+
+    /** Body with a lambda: the parameter `r` is a single-part COLUMN_REF to the reference
+     *  counter, so while this entry survives, no join in the body is eliminable. */
+    private static final String LAMBDA_VIEW_BODY =
+            "SELECT f.f_id, f.f_col, a.a_name, b.b_name, " +
+            "list_filter([f.a_id], r -> r > 0) AS flt " +
+            "FROM f " +
+            "LEFT JOIN a ON f.a_id = a.a_id " +
+            "LEFT JOIN b ON f.b_id = b.b_id";
+
+    @Test
+    void unusedAliasedExpression_isDropped() throws Exception {
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fve AS " + EXPR_VIEW_BODY);
+        try {
+            String outer = "SELECT f_col FROM fve WHERE f_col > 10";
+            JsonNode pruned = prune(outer, EXPR_VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertFalse(sql.contains("total"), "the unused aliased expression must be dropped: " + sql);
+            assertEquals(0, countJoins(pruned), "no dimension column is used");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fve");
+        }
+    }
+
+    @Test
+    void usedAliasedExpression_isKept() throws Exception {
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fve AS " + EXPR_VIEW_BODY);
+        try {
+            String outer = "SELECT f_col, total FROM fve";
+            JsonNode pruned = prune(outer, EXPR_VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("total"), "the referenced expression must survive: " + sql);
+            assertEquals(0, countJoins(pruned),
+                    "the expression references only f, so both joins still go");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fve");
+        }
+    }
+
+    @Test
+    void unaliasedExpression_isKept() throws Exception {
+        // No alias → its output name is whatever DuckDB derives from the expression text, which
+        // the prune does not model. Kept regardless of projection; the unused join still goes.
+        String body =
+                "SELECT f.f_id, f.f_col, a.a_name, f.f_col + f.a_id " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id " +
+                "LEFT JOIN b ON f.b_id = b.b_id";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvu AS " + body);
+        try {
+            String outer = "SELECT f_col FROM fvu";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("f_col + "),
+                    "an unaliased expression is unnameable and must be kept: " + sql);
+            assertEquals(0, countJoins(pruned),
+                    "the kept expression references only f, and the unused a_name column is "
+                    + "pruned as usual — so both joins still go");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvu");
+        }
+    }
+
+    /** The §7.0 regression case (analytics-schema): dropping the unused lambda entry removes its
+     *  unqualified `r` before join elimination counts references, so elimination works again. */
+    @Test
+    void unusedLambdaExpression_droppedAndJoinsEliminated() throws Exception {
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvl AS " + LAMBDA_VIEW_BODY);
+        try {
+            String outer = "SELECT f_col FROM fvl WHERE f_col > 10";
+            JsonNode pruned = prune(outer, LAMBDA_VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertFalse(sql.contains("list_filter"), "the unused lambda entry must be dropped: " + sql);
+            assertEquals(0, countJoins(pruned),
+                    "with the lambda gone, its parameter no longer reads as an unqualified column, "
+                    + "so both joins are eliminable");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvl");
+        }
+    }
+
+    /** The complement: a lambda the caller DID ask for still blocks elimination — that limitation
+     *  is unchanged, this feature only removes entries nobody uses. */
+    @Test
+    void usedLambdaExpression_keptAndJoinsRetained() throws Exception {
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvl AS " + LAMBDA_VIEW_BODY);
+        try {
+            String outer = "SELECT f_col, flt FROM fvl";
+            JsonNode pruned = prune(outer, LAMBDA_VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("list_filter"), "the referenced lambda entry must survive: " + sql);
+            assertEquals(2, countJoins(pruned),
+                    "the surviving lambda parameter still blocks elimination of every join");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvl");
+        }
+    }
+
+    @Test
+    void allEntriesUnused_selectListIsNeverEmptied() throws Exception {
+        // The outer query references no view column at all, so every (droppable) entry is unused.
+        // The kept-list-empty guard must leave the select list alone rather than emit `SELECT FROM`;
+        // join elimination still fires independently.
+        String body =
+                "SELECT f.f_col + f.a_id AS total " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvx AS " + body);
+        try {
+            String outer = "SELECT 42 AS c FROM fvx";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("total"),
+                    "the last entry must be kept — a select list can never be emptied: " + sql);
+            assertEquals(0, countJoins(pruned), "the unused join is still eliminated");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvx");
+        }
+    }
+
+    // ---- shapes where the select list is semantically load-bearing: pruning must not run ----
+
+    /** GROUP BY ALL derives the grouping key FROM the select list, and serializes with EMPTY
+     *  group_expressions (aggregate_handling=FORCE_AGGREGATES is the only marker) — so without its
+     *  own gate, dropping an entry silently changes the grouping. Join elimination still applies. */
+    @Test
+    void groupByAllBody_selectListNotPruned_unusedJoinStillDropped() throws Exception {
+        String body =
+                "SELECT f.a_id, a.a_name, sum(f.f_col) AS s " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id " +
+                "LEFT JOIN b ON f.b_id = b.b_id " +
+                "GROUP BY ALL";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvall AS " + body);
+        try {
+            String outer = "SELECT a_id, s FROM fvall";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("a_name"),
+                    "under GROUP BY ALL the select list IS the grouping key — a_name must stay: " + sql);
+            assertEquals(1, countJoins(pruned), "b is unused and still eliminable under GROUP BY ALL");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvall");
+        }
+    }
+
+    /** QUALIFY is its own field (not a modifier) and may reference a select-list alias — dropping
+     *  the aliased window function would unbind a valid query. With an inline window in the
+     *  QUALIFY (every reference qualified), the gate is what keeps the rn entry; join elimination
+     *  still applies. */
+    @Test
+    void qualifyBody_selectListNotPruned_unusedJoinStillDropped() throws Exception {
+        String body =
+                "SELECT f.f_id, f.f_col, " +
+                "row_number() OVER (PARTITION BY f.a_id ORDER BY f.f_id) AS rn " +
+                "FROM f " +
+                "LEFT JOIN b ON f.b_id = b.b_id " +
+                "QUALIFY row_number() OVER (PARTITION BY f.a_id ORDER BY f.f_id) = 1";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvq AS " + body);
+        try {
+            String outer = "SELECT f_col FROM fvq";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("rn"),
+                    "the QUALIFY gate must keep the whole select list, rn included: " + sql);
+            assertEquals(0, countJoins(pruned), "b is unused and still eliminable under QUALIFY");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvq");
+        }
+    }
+
+    /** The common QUALIFY spelling references the alias unqualified ({@code QUALIFY rn = 1}), which
+     *  ALSO reads as an unqualified column to the join-elimination counter — so the entire prune
+     *  no-ops for that shape: select list gated, joins retained, input returned as-is. */
+    @Test
+    void qualifyReferencingAnAlias_wholePruneBailsOut() throws Exception {
+        String body =
+                "SELECT f.f_id, f.f_col, " +
+                "row_number() OVER (PARTITION BY f.a_id ORDER BY f.f_id) AS rn " +
+                "FROM f " +
+                "LEFT JOIN b ON f.b_id = b.b_id " +
+                "QUALIFY rn = 1";
+        assertBailsOut("SELECT f_col FROM fvq2", body);
+    }
+
+    /** HAVING may reference a select alias, and HAVING without GROUP BY also forces implicit
+     *  aggregation — either way the select list must be left alone. */
+    @Test
+    void havingBody_selectListNotPruned() throws Exception {
+        String body =
+                "SELECT sum(f.f_col) AS s, 42 AS tag " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id " +
+                "HAVING sum(f.f_col) > 0";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvh AS " + body);
+        try {
+            String outer = "SELECT tag FROM fvh";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("sum("), "HAVING forces aggregation — s must stay: " + sql);
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvh");
+        }
+    }
+
+    /** Implicit aggregation has NO parse-level marker (STANDARD_HANDLING, empty groups, no HAVING):
+     *  `SELECT 42 AS tag, sum(x) AS s` is one row, and dropping s would make it N. Aggregate-ness is
+     *  a binder fact, so the guard is structural: when nothing kept references a column, every kept
+     *  entry may be a plain constant, and nothing is dropped. Join elimination is unaffected. */
+    @Test
+    void implicitAggregationBody_aggregateNotDroppedForAConstantProjection() throws Exception {
+        String body =
+                "SELECT 42 AS tag, sum(f.f_col) AS s " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvagg AS " + body);
+        try {
+            String outer = "SELECT tag FROM fvagg";
+            JsonNode pruned = prune(outer, body);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("sum("),
+                    "dropping the only aggregate would turn 1 row into N — s must stay: " + sql);
+            assertEquals(0, countJoins(pruned), "a is unused and still eliminable");
+            assertEquals(1, exec(Transformations.parseToSql(conn, pruned)).size(),
+                    "the pruned body must still aggregate to one row");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvagg");
+        }
+    }
+
+    // ---- case-insensitive identifier matching (DuckDB resolves identifiers case-insensitively) ----
+
+    /** A consumer spelling a column in a different case binds in DuckDB, so the prune must read it
+     *  as used — exact matching dropped the entry and the pruned body then failed to bind. */
+    @Test
+    void differentlyCasedReference_stillCountsAsUsed() throws Exception {
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fve AS " + EXPR_VIEW_BODY);
+        try {
+            String outer = "SELECT F_COL, TOTAL FROM fve";
+            JsonNode pruned = prune(outer, EXPR_VIEW_BODY);
+
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertTrue(sql.contains("total"), "TOTAL must match the total alias case-insensitively: " + sql);
+            assertTrue(sql.contains("f_col"), "F_COL must match the f_col column case-insensitively: " + sql);
+            assertEquals(0, countJoins(pruned), "no dimension column is used under any casing");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fve");
+        }
+    }
+
+    /** A body referencing {@code A.a_name} against a join on table {@code a} binds in DuckDB, so the
+     *  qualifier count must fold case — exact matching read the join as unused and eliminated it
+     *  out from under a still-projected column. */
+    @Test
+    void differentlyCasedQualifierInBody_keepsItsJoin() throws Exception {
+        String body =
+                "SELECT f.f_id, f.f_col, A.a_name, b.b_name " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id " +
+                "LEFT JOIN b ON f.b_id = b.b_id";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fvc AS " + body);
+        try {
+            String outer = "SELECT f_col, a_name FROM fvc";
+            JsonNode pruned = prune(outer, body);
+
+            assertEquals(1, countJoins(pruned),
+                    "the a join is used through the differently-cased A.a_name and must survive; "
+                    + "only b is eliminable");
+            assertEquivalentToView(pruned, outer);
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fvc");
+        }
+    }
+
+    /** A CTE named {@code FV} shadows view {@code fv} in DuckDB, so the shadow bail must also
+     *  match case-insensitively — an exact match would inline the view over a reference that
+     *  actually resolves to the CTE. */
+    @Test
+    void differentlyCasedCteShadow_stillBailsOut() throws Exception {
+        assertBailsOut("WITH FV AS (SELECT 1 AS f_col) SELECT f_col FROM fv", "fv", VIEW_BODY);
+    }
+
+    /**
+     * The one observable behaviour change, pinned as a decision: a correlated scalar subquery that
+     * returns more than one row errors at runtime — and DuckDB plans it as a delim join regardless
+     * of projection, so the view errors even for callers who never projected the column. Dropping
+     * the unused entry makes those callers succeed. One direction only: an error becomes a result,
+     * never a result a different result.
+     */
+    @Test
+    void multiRowScalarSubquery_errorSuppressedWhenColumnUnused() throws Exception {
+        conn.createStatement().execute("CREATE TABLE dup (d_id INT, d_name VARCHAR)");
+        conn.createStatement().execute("INSERT INTO dup VALUES (10,'x'),(10,'y')");
+        String body =
+                "SELECT f.f_id, f.f_col, " +
+                "(SELECT dup.d_name FROM dup WHERE dup.d_id = f.a_id) AS one_name " +
+                "FROM f " +
+                "LEFT JOIN a ON f.a_id = a.a_id";
+        conn.createStatement().execute("CREATE OR REPLACE VIEW fverr AS " + body);
+        try {
+            String outer = "SELECT f_col FROM fverr";
+            org.junit.jupiter.api.Assertions.assertThrows(SQLException.class, () -> exec(outer),
+                    "precondition: the un-pruned view must error even though one_name is not projected");
+
+            JsonNode pruned = prune(outer, body);
+            String sql = Transformations.parseToSql(conn, pruned).toLowerCase();
+            assertFalse(sql.contains("one_name"), "the unused subquery entry must be dropped: " + sql);
+            assertEquals(3, exec(Transformations.parseToSql(conn, pruned)).size(),
+                    "with the subquery dropped, the same projection succeeds");
+        } finally {
+            conn.createStatement().execute("DROP VIEW IF EXISTS fverr");
+            conn.createStatement().execute("DROP TABLE IF EXISTS dup");
+        }
+    }
 }

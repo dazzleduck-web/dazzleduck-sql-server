@@ -202,11 +202,41 @@ Additional conservative rules:
 - **Projection pushdown is skipped** (join elimination still applies) when the
   view body has `DISTINCT`, `GROUP BY` / grouping sets, or any other modifier —
   under `DISTINCT` the select list *is* the dedup key, and positional references
-  (`GROUP BY 1`, `ORDER BY 1`) would silently re-point if entries were dropped.
+  (`GROUP BY 1`, `ORDER BY 1`) would silently re-point if entries were dropped —
+  and likewise when it has `GROUP BY ALL` (the grouping key is *derived from* the
+  select list, and it serializes with EMPTY `group_expressions`;
+  `aggregate_handling = FORCE_AGGREGATES` is the only marker), a `QUALIFY`
+  (its own field, not a modifier; may reference a select-list alias), or a
+  `HAVING` (alias references, and without GROUP BY it forces implicit
+  aggregation).
+- **Any nameable entry is droppable, not only `COLUMN_REF`s** — an aliased
+  `CASE`/`CAST`/`FUNCTION`/`SUBQUERY` whose alias the outer query never uses is
+  dropped too, so unused expressions stop being computed and stop contributing
+  references to (b)'s counts (an unused lambda parameter, which reads as an
+  unqualified column, no longer disables elimination for the whole view).
+  `STAR` entries and unaliased expressions are always kept. One deliberate
+  consequence: a correlated scalar subquery that would error at runtime (more
+  than one row) no longer errors for callers who never projected its column —
+  an error becomes a result, never a result a different result.
+- **Implicit aggregation guard.** `SELECT 42 AS c, sum(x) AS s FROM t` is one
+  row and serializes with NO marker at all (STANDARD_HANDLING, empty groups, no
+  HAVING); dropping `s` would make it N rows. Aggregate-ness is a binder fact —
+  at parse level `sum` and `+` are both just `FUNCTION` nodes — so the guard is
+  structural: if nothing kept references a column (SUBQUERY subtrees excluded,
+  their refs bind in their own scope), every kept entry may be a plain constant
+  and nothing is dropped. A kept column reference proves a valid aggregated body
+  stays aggregated, and a non-aggregated body's row count is
+  projection-independent anyway.
 - **Multi-part column references** (`s.field`) are ambiguous at parse time
   between `table.column` and `struct_column.field`; *every* part is recorded as
   a potentially-used column name so a struct column projected by the view is
   never pruned away (keeps too much, never too little).
+- **Identifier comparisons fold case**, matching DuckDB's case-insensitive
+  resolution (quoted identifiers included): used-column matching, join-qualifier
+  counting, the CTE-shadow bail, and view-name location. Exact matching read a
+  differently-cased-but-binding reference as unused — pruning the entry (a bind
+  failure after inlining) or the join (eliminated out from under a still-bound
+  qualified reference).
 
 ---
 

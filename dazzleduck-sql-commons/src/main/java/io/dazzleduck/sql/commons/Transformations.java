@@ -960,7 +960,9 @@ public class Transformations {
         if (map == null || !map.isArray()) return false;
         for (JsonNode entry : map) {
             JsonNode key = entry.get("key");
-            if (key != null && name.equals(key.asText())) return true;
+            // Case-insensitive: a CTE named FV shadows view fv in DuckDB, so an exact match here
+            // would miss the shadow and inline the view over a reference that resolves to the CTE.
+            if (key != null && name.equalsIgnoreCase(key.asText())) return true;
         }
         return false;
     }
@@ -1157,17 +1159,17 @@ public class Transformations {
         if (fromRef == null
                 || view.table == null
                 || !NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
-                || !view.table.equals(asText(fromRef, FIELD_TABLE_NAME))) return false;
+                || !view.table.equalsIgnoreCase(asText(fromRef, FIELD_TABLE_NAME))) return false;
         return qualifierMatches(view.schema, asText(fromRef, FIELD_SCHEMA_NAME))
                 && qualifierMatches(view.catalog, asText(fromRef, FIELD_CATALOG_NAME));
     }
 
-    /** Both absent, or both present and equal. */
+    /** Both absent, or both present and equal — case-insensitively, matching DuckDB resolution. */
     private static boolean qualifierMatches(String expected, String actual) {
         boolean expectedEmpty = expected == null || expected.isEmpty();
         boolean actualEmpty = actual == null || actual.isEmpty();
         if (expectedEmpty != actualEmpty) return false;
-        return expectedEmpty || expected.equals(actual);
+        return expectedEmpty || expected.equalsIgnoreCase(actual);
     }
 
     /**
@@ -1216,12 +1218,23 @@ public class Transformations {
 
     /** Column usage collected from the outer query: referenced name parts and STAR presence. */
     private static final class UsedColumns {
-        final Set<String> columnNames = new HashSet<>(); // every part of every COLUMN_REF (see collectUsage)
+        final Set<String> columnNames = new HashSet<>(); // every part of every COLUMN_REF, case-folded (see collectUsage)
         boolean hasStar = false;          // a bare (unqualified) STAR
         boolean hasQualifiedStar = false; // a table-qualified STAR, e.g. fv.*
     }
 
-    /** Deep-walk the outer query collecting COLUMN_REF name parts and STAR presence. */
+    /**
+     * DuckDB resolves identifiers case-insensitively — quoted ones included — so every identifier
+     * comparison in the prune must fold case, or a consumer spelling {@code "total tokens"} against a
+     * view column {@code "Total Tokens"} binds at execution but reads as unused here, and the pruned
+     * body then fails to bind. Folding also only errs conservative on the join side: a fold collision
+     * over-counts a qualifier, which keeps a join, never drops one.
+     */
+    private static String foldCase(String identifier) {
+        return identifier == null ? null : identifier.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** Deep-walk the outer query collecting COLUMN_REF name parts (case-folded) and STAR presence. */
     private static void collectUsage(JsonNode node, UsedColumns out) {
         if (node == null || node.isNull()) return;
         if (node.isObject()) {
@@ -1231,7 +1244,7 @@ public class Transformations {
                 // cannot distinguish. Record every part as a potentially-used column name so a
                 // struct column projected by the view is never pruned away (conservative: keeps
                 // too much, never too little).
-                for (String part : getReferenceName(node)) out.columnNames.add(part);
+                for (String part : getReferenceName(node)) out.columnNames.add(foldCase(part));
                 return; // a COLUMN_REF has no nested COLUMN_REF/STAR children
             }
             if (STAR_CLASS.equals(clazz)) {
@@ -1246,13 +1259,18 @@ public class Transformations {
         }
     }
 
-    /** Reference counts over a view-body fragment, used to decide join eliminability. */
+    /** Reference counts over a view-body fragment, used to decide join eliminability.
+     *  Qualifiers are case-folded on both insert and lookup: a body referencing {@code TN.name}
+     *  against a join aliased {@code tn} binds in DuckDB, so an exact-match count would read the
+     *  join as unused and wrongly eliminate it. */
     private static final class UsageCounts {
-        final Map<String, Integer> qualifierCounts = new HashMap<>(); // table/alias -> #references
+        final Map<String, Integer> qualifierCounts = new HashMap<>(); // folded table/alias -> #references
         int unqualified = 0;  // single-part COLUMN_REFs
         int bareStars = 0;    // unqualified STARs
 
-        int count(String qualifier) { return qualifierCounts.getOrDefault(qualifier, 0); }
+        int count(String qualifier) { return qualifierCounts.getOrDefault(foldCase(qualifier), 0); }
+
+        void record(String qualifier) { qualifierCounts.merge(foldCase(qualifier), 1, Integer::sum); }
     }
 
     /** Deep-walk a body fragment counting per-qualifier references, unqualified refs, and bare stars. */
@@ -1262,13 +1280,13 @@ public class Transformations {
             String clazz = asText(node, FIELD_CLASS);
             if (COLUMN_REF_CLASS.equals(clazz)) {
                 String[] parts = getReferenceName(node);
-                if (parts.length >= 2) out.qualifierCounts.merge(parts[0], 1, Integer::sum);
+                if (parts.length >= 2) out.record(parts[0]);
                 else out.unqualified++;
                 return;
             }
             if (STAR_CLASS.equals(clazz)) {
                 String relation = asText(node, FIELD_RELATION_NAME);
-                if (relation != null && !relation.isEmpty()) out.qualifierCounts.merge(relation, 1, Integer::sum);
+                if (relation != null && !relation.isEmpty()) out.record(relation);
                 else out.bareStars++;
                 return;
             }
@@ -1279,22 +1297,59 @@ public class Transformations {
     }
 
     /**
-     * Projection pushdown is only safe when dropping a select-list entry cannot change row count
-     * or shift positional references: under DISTINCT the select list <em>is</em> the dedup key,
-     * and GROUP BY / ORDER BY may reference entries by position ({@code GROUP BY 1}). Join
-     * elimination remains applicable either way.
+     * Projection pushdown is only safe when dropping a select-list entry cannot change row count,
+     * shift positional references, or unbind a body-internal alias reference:
+     * <ul>
+     *   <li>under DISTINCT the select list <em>is</em> the dedup key (DISTINCT is a modifier);</li>
+     *   <li>GROUP BY / ORDER BY may reference entries by position ({@code GROUP BY 1});</li>
+     *   <li>under {@code GROUP BY ALL} the grouping key is <b>derived from</b> the select list —
+     *       it serializes with EMPTY group_expressions and {@code aggregate_handling =
+     *       FORCE_AGGREGATES}, so the group checks below never see it, and dropping an entry
+     *       would silently change the grouping;</li>
+     *   <li>a {@code QUALIFY} clause (its own field, not a modifier) may reference a select-list
+     *       alias ({@code QUALIFY rn = 1}), so dropping the aliased entry unbinds it;</li>
+     *   <li>{@code HAVING} likewise, and a HAVING without GROUP BY also forces implicit
+     *       aggregation.</li>
+     * </ul>
+     * Join elimination remains applicable in every one of these cases.
+     *
+     * <p>Implicit aggregation with no marker at all ({@code SELECT 42 AS c, sum(x) AS s FROM t}
+     * serializes with STANDARD_HANDLING, empty groups, no HAVING) is handled inside
+     * {@link #pruneSelectList} instead — aggregate-ness is a binder fact invisible at parse level,
+     * so it is guarded structurally there rather than detected here.
      */
     private static boolean projectionPruningIsSafe(JsonNode body) {
         JsonNode modifiers = body.get(FIELD_MODIFIERS);
         if (modifiers != null && modifiers.isArray() && !modifiers.isEmpty()) return false;
         JsonNode groups = body.get(FIELD_GROUP_EXPRESSIONS);
         if (groups != null && groups.isArray() && !groups.isEmpty()) return false;
+        JsonNode qualify = body.get(FIELD_QUALIFY);
+        if (qualify != null && !qualify.isNull()) return false;
+        JsonNode having = body.get(FIELD_HAVING);
+        if (having != null && !having.isNull()) return false;
+        String aggregateHandling = asText(body, FIELD_AGGREGATE_HANDLING);
+        if (aggregateHandling != null && !AGGREGATE_HANDLING_STANDARD.equals(aggregateHandling)) return false;
         JsonNode groupSets = body.get(FIELD_GROUP_SETS);
         return groupSets == null || !groupSets.isArray() || groupSets.isEmpty();
     }
 
     /**
-     * (a) Keep every STAR and non-column expression; keep a COLUMN_REF only if its output name is used.
+     * (a) An entry is droppable when we can name it and the outer query never uses that name: a
+     * COLUMN_REF under its alias or column name, any other expression under its alias. A STAR is
+     * always kept (it expands to an unknown column set), as is an unaliased expression — its output
+     * name is whatever DuckDB derives from the expression text, which we do not model.
+     *
+     * <p>Dropping expressions, not just columns, matters twice over. The expression stops being
+     * computed — on a view carrying correlated scalar subqueries that is the dominant cost of every
+     * projection that doesn't reference them, since the engine plans them as delim joins at bind
+     * time regardless of projection. And it stops contributing references: join elimination (b)
+     * counts over the pruned body, so an unused expression whose lambda parameter reads as an
+     * unqualified column no longer disables elimination for the whole view.
+     *
+     * <p>One observable consequence, accepted deliberately: a correlated scalar subquery that would
+     * error at runtime (more than one row) no longer errors when its column is not projected. That
+     * direction only — an error becomes a result, never a result a different result.
+     *
      * @return true if any entry was dropped
      */
     private static boolean pruneSelectList(ObjectNode body, Set<String> usedViewCols) {
@@ -1302,17 +1357,54 @@ public class Transformations {
         if (!(selectList instanceof ArrayNode list)) return false;
         ArrayNode kept = objectMapper.createArrayNode();
         for (JsonNode entry : list) {
-            String clazz = asText(entry, FIELD_CLASS);
-            if (COLUMN_REF_CLASS.equals(clazz)) {
-                if (usedViewCols.contains(selectOutputName(entry))) kept.add(entry);
-                // else: dropped (outer query never references this column)
-            } else {
-                kept.add(entry); // STAR or complex expression — keep conservatively
+            if (STAR_CLASS.equals(asText(entry, FIELD_CLASS))) {
+                kept.add(entry); // expands to an unknown column set — never droppable
+                continue;
             }
+            String name = selectOutputName(entry);
+            if (name.isEmpty() || usedViewCols.contains(foldCase(name))) {
+                kept.add(entry); // unnameable, or actually referenced (usedViewCols is case-folded)
+            }
+            // else: dropped — the outer query cannot see this entry under any name
         }
         if (kept.isEmpty() || kept.size() == list.size()) return false; // nothing droppable (never emit an empty list)
+        // Implicit-aggregation guard: `SELECT 42 AS c, sum(x) AS s FROM t` is one row, and dropping
+        // s makes it N — but aggregate-ness is a binder fact, invisible at parse level (sum is just a
+        // function name, and operators like + are FUNCTION nodes too), so it cannot be detected, only
+        // excluded structurally. In a VALID implicitly-aggregated query, every entry that references
+        // a column does so through an aggregate; so a kept column reference proves the pruned body is
+        // still aggregated, and in a non-aggregated body row count is projection-independent anyway.
+        // If nothing kept references a column, every kept entry may be a plain constant — drop
+        // nothing. (SUBQUERY subtrees are skipped by referencesAColumn: their refs are their own
+        // scope, and an uncorrelated scalar subquery is exactly the constant-like case this guards.)
+        boolean keptReferencesAColumn = false;
+        for (JsonNode entry : kept) {
+            if (referencesAColumn(entry)) {
+                keptReferencesAColumn = true;
+                break;
+            }
+        }
+        if (!keptReferencesAColumn) return false;
         body.set(FIELD_SELECT_LIST, kept);
         return true;
+    }
+
+    /** Any COLUMN_REF or STAR in this expression's own scope — SUBQUERY subtrees excluded. */
+    private static boolean referencesAColumn(JsonNode node) {
+        if (node == null || node.isNull()) return false;
+        if (node.isObject()) {
+            String clazz = asText(node, FIELD_CLASS);
+            if (SUBQUERY_CLASS.equals(clazz)) return false; // its refs bind in the subquery's scope
+            if (COLUMN_REF_CLASS.equals(clazz) || STAR_CLASS.equals(clazz)) return true;
+            for (JsonNode child : node) {
+                if (referencesAColumn(child)) return true;
+            }
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                if (referencesAColumn(child)) return true;
+            }
+        }
+        return false;
     }
 
     /** Output name of a select-list entry: its alias, else the last part of a COLUMN_REF's names. */

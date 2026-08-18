@@ -109,6 +109,10 @@ public class ExpressionConstants {
     public static final String FIELD_SAMPLE = "sample";
     public static final String FIELD_GROUP_EXPRESSIONS = "group_expressions";
     public static final String FIELD_GROUP_SETS = "group_sets";
+    public static final String FIELD_QUALIFY = "qualify";
+    public static final String FIELD_HAVING = "having";
+    public static final String FIELD_AGGREGATE_HANDLING = "aggregate_handling";
+    public static final String AGGREGATE_HANDLING_STANDARD = "STANDARD_HANDLING";
 
     // Type ID constants for data types
     public static final String TYPE_VARCHAR = "VARCHAR";
