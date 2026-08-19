@@ -1,7 +1,7 @@
 package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
-import io.dazzleduck.sql.commons.config.ConfigProvider;
+import io.dazzleduck.sql.commons.TableConfigProvider;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.StartupScriptProvider;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -53,11 +53,11 @@ public class Main {
      * running under an orchestrator.
      */
     private static Config withOverrides(Config rawConfig) throws Exception {
-        ConfigProvider provider = ConfigProvider.load(rawConfig);
-        if (provider == ConfigProvider.NONE) {
+        TableConfigProvider provider = TableConfigProvider.load(rawConfig);
+        if (provider == null) {
             return rawConfig;
         }
-        Config overrides = provider.overrides(rawConfig);
+        Config overrides = provider.overrides();
         logger.info("Applied {} config override(s) from the configured provider",
                 overrides.entrySet().size());
         return overrides.withFallback(rawConfig);

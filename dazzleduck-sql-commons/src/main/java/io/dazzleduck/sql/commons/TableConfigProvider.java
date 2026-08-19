@@ -2,7 +2,7 @@ package io.dazzleduck.sql.commons;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.commons.config.ConfigProvider;
+import io.dazzleduck.sql.commons.config.ConfigBasedProvider;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -60,7 +60,10 @@ import java.util.regex.Pattern;
  * be what tells the process where to look. Anything needed to REACH the database belongs in the
  * file that gets the process there; everything read afterwards is a candidate for the table.
  */
-public class TableConfigProvider implements ConfigProvider {
+public class TableConfigProvider implements ConfigBasedProvider {
+
+    /** The block this provider is configured under, by convention across the services here. */
+    public static final String CONFIG_PROVIDER_PREFIX = "config_provider";
 
     private static final System.Logger LOG = System.getLogger(TableConfigProvider.class.getName());
 
@@ -94,8 +97,15 @@ public class TableConfigProvider implements ConfigProvider {
         }
     }
 
-    @Override
-    public Config overrides(Config serviceConfig) throws SQLException {
+    /**
+     * The overrides to overlay on the file-based config, possibly empty. Never null.
+     *
+     * @throws SQLException when the relation cannot be read. Whether that is fatal is the CALLER's
+     *         decision: a service whose configuration must be authoritative should refuse to start,
+     *         while one that can run on its bundled defaults may log and continue. This reports the
+     *         failure honestly; it does not choose.
+     */
+    public Config overrides() throws SQLException {
         Map<String, Object> values = new LinkedHashMap<>();
         String sql = "SELECT " + keyColumn + ", " + valueColumn + " FROM " + table;
         try (Connection connection = ConnectionPool.getConnection();
@@ -139,6 +149,19 @@ public class TableConfigProvider implements ConfigProvider {
             }
         }
         return true;
+    }
+
+    /**
+     * The provider configured under {@code config_provider}, or null when the block is absent or
+     * names no {@code class}. Delegates to {@link ConfigBasedProvider#load} — the shared
+     * class-name/constructor resolution every provider here uses.
+     */
+    public static TableConfigProvider load(Config config) throws Exception {
+        if (!config.hasPath(CONFIG_PROVIDER_PREFIX)
+                || !config.getConfig(CONFIG_PROVIDER_PREFIX).hasPath(ConfigBasedProvider.CLASS_KEY)) {
+            return null;
+        }
+        return ConfigBasedProvider.load(config, CONFIG_PROVIDER_PREFIX);
     }
 
     private static String identifier(String field, String value) {

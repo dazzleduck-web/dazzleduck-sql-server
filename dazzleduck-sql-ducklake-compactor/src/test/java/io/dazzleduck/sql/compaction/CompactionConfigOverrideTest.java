@@ -2,7 +2,6 @@ package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.commons.config.ConfigProvider;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.TableConfigProvider;
 import org.junit.jupiter.api.AfterEach;
@@ -62,10 +61,8 @@ class CompactionConfigOverrideTest {
 
     /** The composition Main performs: provider overrides, file as fallback. */
     private static CompactionConfig resolve(Config raw) throws Exception {
-        ConfigProvider provider = ConfigProvider.load(raw);
-        Config merged = provider == ConfigProvider.NONE
-                ? raw
-                : provider.overrides(raw).withFallback(raw);
+        TableConfigProvider provider = TableConfigProvider.load(raw);
+        Config merged = provider == null ? raw : provider.overrides().withFallback(raw);
         return CompactionConfig.from(merged);
     }
 
