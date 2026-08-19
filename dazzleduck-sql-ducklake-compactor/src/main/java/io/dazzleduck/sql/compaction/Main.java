@@ -2,7 +2,7 @@ package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
 import io.dazzleduck.sql.commons.ConnectionPool;
-import io.dazzleduck.sql.flight.StartupScriptProvider;
+import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
 import org.slf4j.Logger;

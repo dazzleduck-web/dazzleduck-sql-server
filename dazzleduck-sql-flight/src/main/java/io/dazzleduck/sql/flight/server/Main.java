@@ -2,9 +2,7 @@ package io.dazzleduck.sql.flight.server;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.commons.config.ConfigBasedProvider;
-import io.dazzleduck.sql.flight.ConfigBasedStartupScriptProvider;
-import io.dazzleduck.sql.flight.StartupScriptProvider;
+import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.util.CommandLineConfigUtil;
 import io.dazzleduck.sql.commons.ConnectionPool;
@@ -66,9 +64,9 @@ public class Main {
     }
     public static FlightServer createServer(Config config) throws Exception {
         // Execute startup script if provided
-        StartupScriptProvider startupScriptProvider = ConfigBasedProvider.load(config,
-                StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX,
-                new ConfigBasedStartupScriptProvider());
+        // StartupScriptProvider.load does exactly this — same prefix, same default — so call it
+        // rather than re-deriving the arguments at the call site.
+        StartupScriptProvider startupScriptProvider = StartupScriptProvider.load(config);
         if (startupScriptProvider.getStartupScript() != null) {
             ConnectionPool.executeOnSingleton(startupScriptProvider.getStartupScript());
         }

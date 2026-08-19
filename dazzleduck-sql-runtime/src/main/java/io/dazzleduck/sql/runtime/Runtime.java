@@ -4,10 +4,8 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 
 import static io.dazzleduck.sql.common.ConfigConstants.CONFIG_PATH;
-import io.dazzleduck.sql.commons.config.ConfigBasedProvider;
 import io.dazzleduck.sql.commons.util.CommandLineConfigUtil;
-import io.dazzleduck.sql.flight.ConfigBasedStartupScriptProvider;
-import io.dazzleduck.sql.flight.StartupScriptProvider;
+import io.dazzleduck.sql.common.StartupScriptProvider;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.server.DuckDBFlightSqlProducer;
@@ -107,9 +105,8 @@ public class Runtime implements Closeable {
     }
 
     private static void executeStartupScript(Config config) throws Exception {
-        StartupScriptProvider startupScriptProvider = ConfigBasedProvider.load(config,
-                StartupScriptProvider.STARTUP_SCRIPT_CONFIG_PREFIX,
-                new ConfigBasedStartupScriptProvider());
+        // StartupScriptProvider.load does exactly this — same prefix, same default.
+        StartupScriptProvider startupScriptProvider = StartupScriptProvider.load(config);
         String startupScript = startupScriptProvider.getStartupScript();
         if (startupScript != null && !startupScript.isBlank()) {
             logger.info("Executing startup script on singleton connection");

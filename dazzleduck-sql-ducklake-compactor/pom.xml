@@ -22,14 +22,17 @@
     </properties>
 
     <dependencies>
+        <!-- ConnectionPool + CommandLineConfigUtil; brings dazzleduck-sql-common transitively. -->
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- StartupScriptProvider. Declared even though commons pulls it in, because this module
+             imports it directly and a transitive path is not a contract. -->
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
-            <artifactId>dazzleduck-sql-flight</artifactId>
+            <artifactId>dazzleduck-sql-common</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
