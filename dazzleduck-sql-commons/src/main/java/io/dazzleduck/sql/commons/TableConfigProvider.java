@@ -2,7 +2,7 @@ package io.dazzleduck.sql.commons;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.common.ConfigProvider;
+import io.dazzleduck.sql.commons.config.ConfigProvider;
 
 import java.sql.Connection;
 import java.sql.ResultSet;

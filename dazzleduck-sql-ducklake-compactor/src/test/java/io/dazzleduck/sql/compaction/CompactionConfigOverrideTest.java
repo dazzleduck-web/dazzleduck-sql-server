@@ -2,7 +2,7 @@ package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
-import io.dazzleduck.sql.common.ConfigProvider;
+import io.dazzleduck.sql.commons.config.ConfigProvider;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.TableConfigProvider;
 import org.junit.jupiter.api.AfterEach;

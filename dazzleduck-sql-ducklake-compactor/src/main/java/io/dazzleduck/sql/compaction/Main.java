@@ -1,7 +1,7 @@
 package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
-import io.dazzleduck.sql.common.ConfigProvider;
+import io.dazzleduck.sql.commons.config.ConfigProvider;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.flight.StartupScriptProvider;
 import io.micrometer.core.instrument.MeterRegistry;
