@@ -194,7 +194,7 @@ Counter counter = Counter.builder("api.calls")
 | `baseUrl` | Target server URL | `http://localhost:8081` |
 | `username` | Authentication username (login mode) | `admin` |
 | `password` | Authentication password (login mode) | `admin` |
-| `jwt` | Preconfigured `Bearer <token>` (skips login; mutually exclusive with username/password) | _(none)_ |
+| `jwt` | Preconfigured `Bearer` token string (skips login; builder-only, mutually exclusive with username/password) | _(none)_ |
 | `targetPath` | Server endpoint path | `metrics` |
 | `stepInterval` | How often metrics are published | `10 seconds` |
 | `httpClientTimeout` | HTTP request timeout | `3 seconds` |
@@ -251,17 +251,8 @@ MicrometerForwarder forwarder = MicrometerForwarder.createAndStart(config);
 `jwt` and `username`/`password` are mutually exclusive. Setting `jwt` overrides
 the login flow; `username` and `password` are ignored when `jwt` is present.
 
-Via `application.conf`:
-
-```hocon
-dazzleduck_micrometer {
-  http {
-    base_url        = "http://localhost:8081"
-    jwt             = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-    ingestion_queue = "metrics"
-  }
-}
-```
+Note: the preconfigured JWT is available only through the programmatic builder —
+`MetricsRegistryFactory` / `application.conf` supports the username/password mode.
 
 ---
 
@@ -271,16 +262,20 @@ Claims are key-value pairs sent to the server during login. The server embeds th
 
 Use claims when the server is configured with `access_mode = RESTRICTED` and you need to scope metric ingestion to a specific database, schema, or table. Claims apply only in username/password mode — when using a preconfigured JWT the token already encodes any required claims.
 
-### Supported Claim Keys
+### Common Claim Keys
+
+Claims are forwarded verbatim to `/v1/login`; the server embeds them in the JWT. The claim
+names the server understands are:
 
 | Key | Description |
 |-----|-------------|
-| `database` | Target database |
-| `catalog` | Target catalog |
-| `schema` | Target schema |
-| `table` | Target table |
-| `filter` | Row-level filter expression |
-| `path` | Storage path |
+| `database` | Target database (unprefixed — Flight SQL / JDBC interop) |
+| `schema` | Target schema (unprefixed) |
+| `x-dd-table` | Authorized table |
+| `x-dd-filter` | Row-level filter expression |
+| `x-dd-path` | Authorized storage path prefix |
+| `x-dd-function` | Authorized table function |
+| `x-dd-access` | Full access tuple list (see the root README) |
 
 ### Programmatic Configuration
 

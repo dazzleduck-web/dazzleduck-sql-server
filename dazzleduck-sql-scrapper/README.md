@@ -37,8 +37,8 @@ It works with any system that exposes a standard Prometheus text format endpoint
 ./mvnw package jib:dockerBuild -pl dazzleduck-sql-scrapper -DskipTests
 ```
 
-The fat JAR lands in `target/dazzleduck-sql-scrapper-<version>.jar`.
-The Docker image is tagged `dazzleduck-sql-scrapper:latest`.
+The fat JAR lands in `target/` named after the module and version.
+The Docker image is tagged `dazzleduck/dazzleduck-sql-scrapper:latest` (amd64).
 
 ---
 
@@ -51,7 +51,7 @@ The Docker image is tagged `dazzleduck-sql-scrapper:latest`.
 ```
 
 Jib builds the image directly from Maven without needing a Docker daemon or a `docker build` step.
-The output image is `dazzleduck-sql-scrapper:latest`.
+The output image is `dazzleduck/dazzleduck-sql-scrapper:latest`.
 
 ### How Environment Variables Work
 
@@ -93,7 +93,7 @@ The entrypoint script converts this into a HOCON list and passes it via `--confi
 services:
 
   dazzleduck-scrapper:
-    image: dazzleduck-sql-scrapper:latest
+    image: dazzleduck/dazzleduck-sql-scrapper:latest
     container_name: dazzleduck-scrapper
     depends_on:
       - metrics-log-backend
@@ -106,7 +106,6 @@ services:
       - collector.enabled=true
       - collector.target-prefix=http://envoy:9901
       - collector.base-url=http://metrics-log-backend:8081
-      - collector.server-url=http://metrics-log-backend:8081/ingest
       - collector.path=envoy_metrics
 
       # ---- scrape settings ----
@@ -131,7 +130,7 @@ services:
 services:
 
   dazzleduck-scrapper:
-    image: dazzleduck-sql-scrapper:latest
+    image: dazzleduck/dazzleduck-sql-scrapper:latest
     container_name: dazzleduck-scrapper
     depends_on:
       - my-spring-app
@@ -141,7 +140,6 @@ services:
 
       - collector.enabled=true
       - collector.base-url=http://dazzleduck-server:8081
-      - collector.server-url=http://dazzleduck-server:8081/ingest
       - collector.path=app_metrics
       - collector.scrape-interval-ms=15000
 
@@ -164,7 +162,7 @@ mount a HOCON config file into the container:
 services:
 
   dazzleduck-scrapper:
-    image: dazzleduck-sql-scrapper:latest
+    image: dazzleduck/dazzleduck-sql-scrapper:latest
     volumes:
       - ./collector.conf:/etc/collector/collector.conf:ro
     command: ["--config", "/etc/collector/collector.conf"]
@@ -181,8 +179,7 @@ collector {
         "http://app:8080/actuator/prometheus"
     ]
 
-    base-url   = "http://metrics-log-backend:8081"
-    server-url = "http://metrics-log-backend:8081/ingest"
+    base-url = "http://metrics-log-backend:8081"
     path = "metrics"
 
     scrape-interval-ms = 15000
@@ -262,13 +259,11 @@ collector {
     # "http://host:port" + "/actuator/prometheus" → "http://host:port/actuator/prometheus"
     target-prefix = "http://localhost:8080"
 
-    # DazzleDuck server base URL (used for login + ingest)
+    # DazzleDuck server base URL — the forwarder logs in at {base-url}/v1/login and
+    # ingests at {base-url}/v1/ingest?ingestion_queue={path}
     base-url = "http://localhost:8081"
 
-    # Full ingest endpoint URL
-    server-url = "http://localhost:8081/ingest"
-
-    # Table/path name used when storing metrics on the server
+    # Ingestion queue name used when storing metrics on the server
     path = "scraped_metrics"
 
     # How often to scrape targets (milliseconds)
@@ -377,8 +372,7 @@ collector {
         "/stats/prometheus"
     ]
 
-    base-url   = "http://localhost:8081"
-    server-url = "http://localhost:8081/ingest"
+    base-url = "http://localhost:8081"
     path = "envoy_metrics"
 
     scrape-interval-ms = 15000
@@ -410,8 +404,7 @@ collector {
         "http://envoy-egress:9901/stats/prometheus"
     ]
 
-    base-url   = "http://localhost:8081"
-    server-url = "http://localhost:8081/ingest"
+    base-url = "http://localhost:8081"
     path = "envoy_metrics"
 
     scrape-interval-ms = 15000
@@ -557,7 +550,6 @@ public class Example {
         props.setEnabled(true);
         props.setTargets(List.of("http://envoy-host:9901/stats/prometheus?usedonly"));
         props.setBaseUrl("http://localhost:8081");
-        props.setServerUrl("http://localhost:8081/ingest");
         props.setPath("envoy_metrics");
         props.setScrapeIntervalMs(15000);
         props.setFlushThreshold(100);
@@ -611,14 +603,14 @@ long dropped      = collector.getMetricsDroppedCount();
 
 - Check that `collector.enabled = true` is set
 - Verify the target URL is reachable: `curl http://envoy-host:9901/stats/prometheus`
-- Check that `base-url`, `server-url`, and `path` point to the correct DazzleDuck instance
+- Check that `base-url` and `path` point to the correct DazzleDuck instance
 - Increase log level to DEBUG: `logging.level = "DEBUG"`
 
 **Too many metrics / buffer fills up quickly**
 
 - Add `?usedonly` to the target URL to filter zero-value metrics
 - Add `?filter=<regex>` to focus on specific metric families
-- Reduce `scrape-interval-ms` to scrape less frequently
+- Increase `scrape-interval-ms` to scrape less frequently
 - Increase `tailing.flush-threshold` and `tailing.flush-interval-ms`
 
 **Authentication failures**

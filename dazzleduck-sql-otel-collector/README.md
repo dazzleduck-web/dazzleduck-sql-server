@@ -6,19 +6,26 @@ An OTLP gRPC collector that receives OpenTelemetry signals (logs, traces, metric
 
 ```
 OTLP Exporter
-     │  gRPC (port 4317)
+     │  gRPC (port 4317), JWT with x-dd-ingestion-queue claim
      ▼
 OtelCollectorServer
      │
-     ├── OtelLogService      → SignalWriter → ParquetIngestionQueue → Parquet files
-     ├── OtelTraceService    → SignalWriter → ParquetIngestionQueue → Parquet files
-     └── OtelMetricsService  → SignalWriter → ParquetIngestionQueue → Parquet files
+     ├── OtelLogService      ┐
+     ├── OtelTraceService    ├─→ IngestionHandler → ParquetIngestionQueue → Parquet files (+ DuckLake)
+     └── OtelMetricsService  ┘
 ```
 
 Each incoming export request is:
-1. Flattened from the 3-level OTLP hierarchy (Resource → Scope → Record) into a flat Arrow batch
-2. Written to a temp Arrow file
-3. Handed to `SignalWriter`, which batches by size (`min_bucket_size`) and time (`max_delay_ms`) before flushing to Parquet
+1. Routed to an ingestion queue by the `x-dd-ingestion-queue` claim in the caller's JWT — there
+   is no default queue; requests without the claim are rejected with `INVALID_ARGUMENT`
+2. Flattened from the 3-level OTLP hierarchy (Resource → Scope → Record) into a flat Arrow batch
+   and written to a temp Arrow file
+3. Handed to the queue's `ParquetIngestionQueue`, which batches by size (`min_bucket_size`) and
+   time (`max_delay_ms`) before flushing to Parquet — and, when a DuckLake provider is
+   configured, registers the files with the catalog in the same post-ingestion transaction
+
+Queues are never pre-created: the configured `IngestionHandler` is the single registry, so
+queues added or removed at runtime (dynamic provider) become routable without a restart.
 
 ## Features
 
@@ -38,24 +45,38 @@ Configuration is loaded from HOCON (`application.conf`) with environment variabl
 otel_collector {
     grpc_port = 4317
 
-    logs_output_path    = "./otel-logs"
-    traces_output_path  = "./otel-traces"
-    metrics_output_path = "./otel-metrics"
+    health {
+        port = 8081                       # GET /health
+        shutdown_grace_period_ms = 2000   # MAINTENANCE/LB-drain window; 0 to skip
+    }
+
+    # Startup SQL run before any queue is created (load extensions, ATTACH DuckLake catalogs)
+    startup_script_provider {
+        content = "INSTALL arrow FROM community; LOAD arrow;"
+        # script_location = "/config/startup.sql"
+    }
 
     ingestion {
         min_bucket_size = 1048576   # 1 MB — flush when accumulated batch size exceeds this
         max_delay_ms    = 5000      # flush after this many ms even if min_bucket_size not reached
+        queue_config_refresh_delay_ms = 120000
     }
 
-    # Columns to partition Parquet output by
-    partition_by = []
-
-    # Optional SQL expressions appended as: SELECT *, <transformations>
-    # Example: transformations = "cast(timestamp as date) as date"
+    # One entry per ingestion queue. Without a provider class, batches are written
+    # as plain Parquet under output_path. Per-queue keys: transformation,
+    # partition_by, min_bucket_size, max_delay_ms, and (with DuckLake)
+    # catalog / schema / table / additional_parameters.
+    ingestion_task_factory_provider {
+        ingestion_queue_table_mapping = [
+            { ingestion_queue = "logs",    output_path = "./otel-logs" }
+            { ingestion_queue = "traces",  output_path = "./otel-traces" }
+            { ingestion_queue = "metrics", output_path = "./otel-metrics" }
+        ]
+    }
 
     # Authentication (required)
     authentication = "jwt"
-    secret_key     = "<base64-encoded-hmac-key>"
+    secret_key     = "base64-encoded-hmac-key"
 
     # Local users (Basic auth → JWT)
     users = [
@@ -228,23 +249,33 @@ Wide-table design — all metric types (GAUGE, SUM, HISTOGRAM, EXPONENTIAL_HISTO
 
 ### Export Metrics
 
-| Metric | Type | Tags |
-|--------|------|------|
-| `dazzleduck.otel.export.requests` | FunctionCounter | `signal=logs\|traces\|metrics` |
-| `dazzleduck.otel.export.records` | FunctionCounter | `signal=logs\|traces\|metrics` |
-| `dazzleduck.otel.export.errors` | FunctionCounter | `signal=logs\|traces\|metrics` |
-| `dazzleduck.otel.export.latency` | Timer (p50/p95/p99) | `signal=..., max.delay.ms=<configured>` |
+All meters are tagged with the ingestion `queue` id.
 
-`export.latency` covers the full RPC duration — from receiving the request to `onCompleted` or `onError`, including Arrow serialization and `SignalWriter` queue submission.
+| Metric | Type |
+|--------|------|
+| `dazzleduck.otel.export.requests` | FunctionCounter |
+| `dazzleduck.otel.export.records` | FunctionCounter |
+| `dazzleduck.otel.export.errors` | FunctionCounter |
+| `dazzleduck.otel.export.latency` | Timer (p50/p95/p99) |
+
+`export.latency` covers the full RPC duration — from receiving the request to `onCompleted` or `onError`, including Arrow serialization and queue submission.
 
 ### Writer Metrics
 
-| Metric | Type | Tags |
-|--------|------|------|
-| `dazzleduck.otel.writer.bytes_written` | FunctionCounter | `signal=...` |
-| `dazzleduck.otel.writer.batches_written` | FunctionCounter | `signal=...` |
-| `dazzleduck.otel.writer.pending_batches` | Gauge | `signal=...` |
-| `dazzleduck.otel.writer.pending_buckets` | Gauge | `signal=...` |
+Registered per queue when the queue is created, and unregistered when the queue is removed.
+
+| Metric | Type |
+|--------|------|
+| `dazzleduck.otel.writer.bytes_written` | FunctionCounter |
+| `dazzleduck.otel.writer.batches_written` | FunctionCounter |
+| `dazzleduck.otel.writer.bytes_failed` | FunctionCounter |
+| `dazzleduck.otel.writer.batches_failed` | FunctionCounter |
+| `dazzleduck.otel.writer.write_failures` | FunctionCounter |
+| `dazzleduck.otel.writer.producer_id_evictions` | FunctionCounter |
+| `dazzleduck.otel.writer.data_phase_ms` | FunctionCounter |
+| `dazzleduck.otel.writer.post_ingest_phase_ms` | FunctionCounter |
+| `dazzleduck.otel.writer.pending_batches` | Gauge |
+| `dazzleduck.otel.writer.pending_buckets` | Gauge |
 
 ### Registering a Real Registry
 
@@ -257,30 +288,51 @@ server.start();
 
 ## DuckLake Integration
 
-To register written Parquet files into a DuckLake catalog, configure an `IngestionTaskFactory` per signal:
-
-```java
-CollectorProperties props = new CollectorConfig().toProperties();
-props.setLogIngestionTaskFactory(myDuckLakeFactory);
-props.setTraceIngestionTaskFactory(myDuckLakeFactory);
-props.setMetricIngestionTaskFactory(myDuckLakeFactory);
-```
-
-Or via HOCON using `ConfigBasedProvider`:
+To register written Parquet files into a DuckLake catalog, set a provider `class` on
+`ingestion_task_factory_provider` and add the DuckLake fields per queue (the catalog must be
+attached by the startup script):
 
 ```hocon
 otel_collector {
-    log_ingestion_task_factory_provider {
+    startup_script_provider {
+        content = "INSTALL ducklake; LOAD ducklake; ATTACH 'ducklake:...' AS my_catalog (DATA_PATH 's3://...');"
+    }
+
+    ingestion_task_factory_provider {
         class = "io.dazzleduck.sql.commons.ingestion.DuckLakeIngestionTaskFactoryProvider"
-        catalog = "my_catalog"
-        mappings = [
-            { queue = "logs",    table = "my_catalog.logs" }
-            { queue = "traces",  table = "my_catalog.spans" }
-            { queue = "metrics", table = "my_catalog.metrics" }
+        ingestion_queue_table_mapping = [
+            {
+                ingestion_queue = "logs"
+                catalog = "my_catalog"
+                schema  = "main"
+                table   = "logs"
+                # transformation = "CAST(timestamp AS DATE) AS date, severity_text AS level"
+                # additional_parameters {   # optional per-batch watermark row, committed
+                #     watermark_table                = "ingest_watermark"   # with the file registration
+                #     watermark_timestamp_column     = "timestamp"
+                #     watermark_min_timestamp_column = "min_timestamp"
+                #     watermark_max_timestamp_column = "max_timestamp"
+                #     watermark_row_count_column     = "row_count"
+                #     watermark_group_columns        = "county,state"      # optional
+                # }
+            }
         ]
     }
 }
 ```
+
+For runtime add/remove of queues, use the dynamic provider backed by a SQLite registry:
+
+```hocon
+otel_collector.ingestion_task_factory_provider {
+    class = "io.dazzleduck.sql.commons.ingestion.DynamicDuckLakeIngestionTaskFactoryProvider"
+    db_path = "/var/data/ingestion-queues.db"
+    config_load_interval_ms = 5000
+}
+```
+
+Watermarks are not available for dynamically registered queues — the SQLite registry does not
+store `additional_parameters`.
 
 ## Building
 
@@ -299,4 +351,14 @@ Or with an external config file:
 
 ```bash
 java -cp ... io.dazzleduck.sql.otel.collector.Main -c /etc/otel-collector.conf
+```
+
+## Docker
+
+The collector is published as `dazzleduck/dazzleduck-otel-collector` (multi-arch). Local build via Jib:
+
+```bash
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector
+# Apple Silicon:
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector -Djib.architecture=arm64
 ```

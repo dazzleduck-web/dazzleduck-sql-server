@@ -22,7 +22,11 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | `major_compaction_max_size` | `64MB` | Only compact files smaller than this during major pass |
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |
+| `health_port` | `8080` | Port for the `GET /health` endpoint |
 | `startup_script_provider` | — | How to load the startup SQL (attach catalogs, load extensions) |
+| `config_provider` | — | Optional: overlay config values read from a table (see below) |
+
+The bundled defaults live in this module's `application.conf` (not `reference.conf`).
 
 ### Startup Script
 
@@ -41,6 +45,33 @@ dazzleduck_sql_compaction.startup_script_provider {
   content = "ATTACH 'ducklake:...' AS mydb (DATA_PATH 's3://...');"
 }
 ```
+
+The startup script runs before configuration overrides are read, so catalogs referenced by the
+config-provider table must be attached here.
+
+### Configuration Overrides from a Table
+
+Settings can be overlaid from a two-column key/value table (readable after the startup script
+has attached its catalog):
+
+```hocon
+dazzleduck_sql_compaction.config_provider {
+  table = "mydb.main.compactor_config"
+  # key_column   = "config_key"   (default)
+  # value_column = "value"        (default)
+  # prefix       = ""             (optional key prefix filter)
+}
+```
+
+A configured table that cannot be read is a fatal startup error by design — silently falling
+back to file defaults would hide a broken override source.
+
+## Health Check
+
+`GET /health` on `health_port` (default 8080) returns uptime plus per-database compaction
+counters (total minor/major compactions, files compacted, last/next execution time, current
+small/medium/total file counts). Note: the status is always `UP` while the process is running —
+it does not reflect failing compaction cycles.
 
 ## Build
 
@@ -83,7 +114,10 @@ Micrometer metrics are emitted via the logging registry by default:
 
 | Metric | Tags | Description |
 |--------|------|-------------|
-| `ducklake.compaction.duration` | `type` (minor/major/housekeeping), `step`, `database` | Time per compaction step |
+| `ducklake.compaction.duration` | `type` (minor/major/housekeeping), `step` (merge/expire/cleanup), `database` | Time per compaction step |
+| `ducklake.compaction.minor` | `database` | Total minor compactions run |
+| `ducklake.compaction.major` | `database` | Total major compactions run |
+| `ducklake.files.compacted` | `database` | Total files compacted |
 | `ducklake.files.total` | `database` | Total active Parquet files |
 | `ducklake.files.small` | `database` | Files below `minor_compaction_max_size` |
 | `ducklake.files.medium` | `database` | Files between minor and major thresholds |

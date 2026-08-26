@@ -45,7 +45,7 @@ Only needed when upgrading Java, DuckDB version, or example data/startup scripts
 ```bash
 # Read version directly from pom.xml
 DUCKDB_VERSION=$(./mvnw help:evaluate -Dexpression=duckdb.version -q -DforceStdout)
-JAVA_VERSION=21   # or 25 for JDK 25
+JAVA_VERSION=25   # must match the base-jre tag referenced by the module poms (currently 25)
 
 # Multi-platform — push to Docker Hub (CI/CD)
 docker buildx build \
@@ -133,7 +133,7 @@ To rebuild the base for ARM64 only:
 
 ```bash
 DUCKDB_VERSION=$(./mvnw help:evaluate -Dexpression=duckdb.version -q -DforceStdout)
-JAVA_VERSION=21
+JAVA_VERSION=25
 docker build \
   --platform linux/arm64 \
   --build-arg JAVA_VERSION=$JAVA_VERSION \

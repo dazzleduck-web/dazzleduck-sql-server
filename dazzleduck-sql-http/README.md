@@ -4,11 +4,15 @@ This module provides HTTP REST API endpoints for the DazzleDuck SQL Server, buil
 
 ## Overview
 
-- **Framework**: Helidon WebServer
+- **Framework**: Helidon WebServer 4.x with HTTP/2 (h2 when TLS is enabled, h2c otherwise, with HTTP/1.1 fallback)
 - **API Version**: v1
-- **Base Path**: `/v1` (except health check and UI)
-- **Authentication**: JWT token-based (required for all versioned endpoints by default)
-- **Data Format**: Apache Arrow IPC streaming format for query results
+- **Base Path**: `/v1` (except the health check)
+- **Authentication**: JWT token-based, always enforced on all versioned endpoints
+- **Data Formats**: Apache Arrow IPC (default, ZSTD-compressed), TSV, and JSONL/NDJSON via `Accept` negotiation
+
+The module is a thin adapter over the same `DuckDBFlightSqlProducer` used by the Arrow Flight
+SQL server: each HTTP request becomes a synthetic Flight call context, so authorization, access
+modes, metrics, and ingestion behave identically on both protocols.
 
 ## API Endpoints
 
@@ -114,9 +118,23 @@ Execute SQL queries and return results in Apache Arrow format.
 | 500 Internal Server Error | Execution error |
 | 504 Gateway Timeout | Query timeout exceeded |
 
-- **Content-Type**: `application/vnd.apache.arrow.stream`
-- **Body**: Binary Apache Arrow IPC stream
-- **Timeout**: Default 120 seconds (configurable)
+**Response format** is selected by the `Accept` request header:
+
+| Accept | Content-Type returned | Body |
+|--------|----------------------|------|
+| _(default)_ | `application/vnd.apache.arrow.stream` | Arrow IPC stream, ZSTD-compressed (override with `x-dd-arrow-compression: none`) |
+| `text/tab-separated-values` | `text/tab-separated-values; charset=utf-8` | Header row + tab-separated values |
+| `application/jsonl` or `application/x-ndjson` | `application/jsonl; charset=utf-8` | One JSON object per row |
+
+**Other request headers** (each also accepted as a URL query parameter):
+
+| Header | Description |
+|--------|-------------|
+| `x-dd-fetch-size` | Rows per Arrow batch (default 10000) |
+| `x-dd-query-timeout` | Per-query timeout in seconds; must be non-negative and below the server's `max_query_timeout_ms` |
+| `x-dd-arrow-compression` | `zstd` (default) or `none` |
+
+- **Timeout**: Default 120 seconds (`query_timeout_ms`)
 
 ---
 
@@ -143,7 +161,7 @@ Get query execution plan with endpoint locations and statement handles for distr
 **Headers**:
 | Header | Type | Required | Description |
 |--------|------|----------|-------------|
-| split_size | long | No | Target split size in bytes for partitioning (default: 1GB) |
+| `x-dd-split-size` | long | No | Target split size in bytes for partitioning (default: 1GB); also accepted as a query parameter |
 
 **Response**:
 | Status | Description |
@@ -188,7 +206,7 @@ When using `split_size` header to partition large queries:
 ```bash
 curl -X POST http://localhost:8081/v1/plan \
   -H "Content-Type: application/json" \
-  -H "split_size: 1" \
+  -H "x-dd-split-size: 1" \
   -d '{"query": "SELECT * FROM read_parquet(...)"}'
 ```
 
@@ -266,7 +284,7 @@ Bulk ingest data in Arrow format into tables.
 **Query Parameters**:
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| ingestion_queue | string | Yes | Target table path (cannot start with "/" or contain "..") |
+| ingestion_queue | string | Yes | Target ingestion queue (cannot start with "/" or contain ".."). In restricted access modes the JWT must grant write access to this queue |
 
 **Headers**:
 | Header | Type | Required | Description |
@@ -297,6 +315,7 @@ x-dd-partition: year,month
 | 200 OK | Ingestion completed |
 | 400 Bad Request | Invalid parameters |
 | 415 Unsupported Media Type | Wrong content type |
+| 429 Too Many Requests | Ingestion backpressure — retry after the number of seconds in the `Retry-After` response header |
 | 500 Internal Server Error | Ingestion error |
 
 ---
@@ -321,6 +340,24 @@ Web-based monitoring dashboard for real-time metrics and query management.
 - Open prepared statements
 - Running bulk ingestion status
 - Query cancellation support
+
+---
+
+### Named Queries
+
+**Endpoint**: `/v1/named-query` — registered only when `named_query_table` is set in the
+configuration.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/v1/named-query` | GET | Paginated list (`offset` default 0, `limit` default 20, max 200), JSON |
+| `/v1/named-query/{name}` | GET | Full named-query definition, JSON; `404` if unknown |
+| `/v1/named-query` | POST | Execute — body `{"name": "...", "parameters": {...}}`; response follows the same `Accept` negotiation as `/v1/query` (Arrow IPC / TSV / JSONL) |
+
+Errors: missing/blank `name` → `400`; validator failures → `400` with all failures collected;
+unknown template → `404`; timeout → `504`.
+
+See the root `README.md` for the named-query table schema, template syntax, and examples.
 
 ---
 
@@ -460,7 +497,7 @@ When passing header values in query parameters or HTTP headers, remember to URL-
 
 **Example**:
 ```bash
-curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
+curl -X POST "http://localhost:8081/v1/ingest?ingestion_queue=my_table" \
   -H "Content-Type: application/vnd.apache.arrow.stream" \
   -H "x-dd-partition: year,month" \
   -H "x-dd-project: col1,\"col2 + col3\",col4" \
@@ -471,16 +508,20 @@ curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
 
 ## Authentication
 
-### JWT Authentication (Required)
+### JWT Authentication (Always Enforced)
 
-All versioned API endpoints require a valid JWT Bearer token for authentication.
+All versioned API endpoints require a valid JWT Bearer token. The authentication filter is
+always installed — the `http.authentication` config key is read but no longer disables it.
+For tests and demos, set `jwt_token.verify_signature = false` to skip signature verification
+instead.
 
 **Protected Endpoints**:
 - `/v1/query`
 - `/v1/plan`
-- `/v1/ingest`
+- `/v1/ingest` (additionally requires write access to the requested `ingestion_queue`)
 - `/v1/cancel`
 - `/v1/ui`
+- `/v1/named-query`
 
 **Unprotected Endpoints**:
 - `/health` - Health check (always accessible)
@@ -491,29 +532,38 @@ All versioned API endpoints require a valid JWT Bearer token for authentication.
 Authorization: Bearer <JWT token>
 ```
 
-**Note**: To disable authentication (not recommended for production), set `http.authentication` to `"none"` in your configuration.
+When `login_url` is configured, `/v1/login` proxies credentials to that external login service
+instead of validating against the local `users` list.
 
 ### CORS Configuration
 
-- **Default Allow-Origin**: `*` (configurable)
+- **Default Allow-Origin**: `["https://dazzleduck-ui.netlify.app"]` (configurable via `http.allow-origin`)
 - **Allowed Methods**: GET, POST
-- **Allowed Headers**: Content-Type, Authorization
+- **Allowed Headers**: Content-Type, Authorization, x-dd-arrow-compression
 
 ---
 
 ## Configuration
 
+All keys live under the `dazzleduck_server` HOCON root.
+
 | Key | Description | Default |
 |-----|-------------|---------|
-| `http.host` | Server host | localhost |
-| `http.port` | Server port | 8080 |
-| `http.authentication` | Auth mode ("none" or "jwt") | jwt |
-| `jwt_token.expiration` | JWT token expiration | - |
-| `jwt_token.claims.generate.headers` | Headers to extract as JWT claims | - |
-| `jwt_token.claims.validate.headers` | Headers to validate | - |
-| `allow-origin` | CORS allow-origin value | * |
-| `warehouse_path` | DuckDB warehouse path | - |
-| `secret_key` | Base64-encoded JWT secret key | - |
+| `http.host` | Server host | `0.0.0.0` |
+| `http.port` | Server port | `8081` |
+| `http.allow-origin` | CORS allow-origin list | `["https://dazzleduck-ui.netlify.app"]` |
+| `http.tls.enabled` | Enable TLS (activates HTTP/2 h2) | `false` |
+| `warehouse` | DuckDB warehouse path | `${user.dir}/warehouse` |
+| `secret_key` | Base64-encoded JWT/HMAC secret key | dev placeholder — change in production |
+| `access_mode` | `COMPLETE`, `READ_ONLY`, `RESTRICTED`, `RESTRICT_READ_ONLY` | `COMPLETE` |
+| `query_timeout_ms` | Default query timeout | `120000` |
+| `max_query_timeout_ms` | Upper bound for client `x-dd-query-timeout` | `300000` |
+| `jwt_token.expiration` | JWT token expiration | `60m` |
+| `jwt_token.verify_signature` | Verify JWT signatures | `true` |
+| `jwt_token.claims.generate.headers` | Headers embedded as JWT claims on login | see flight `reference.conf` |
+| `named_query_table` | Table holding named queries; enables `/v1/named-query` | unset |
+| `login_url` | External login service; makes `/v1/login` a proxy | unset |
+| `ingestion.*` | Ingestion queue tuning (`min_bucket_size`, `max_delay_ms`, `max_pending_write`, ...) | see flight `reference.conf` |
 
 ---
 
@@ -522,7 +572,9 @@ Authorization: Bearer <JWT token>
 | Content-Type | Usage |
 |--------------|-------|
 | `application/json` | JSON requests/responses |
-| `application/vnd.apache.arrow.stream` | Arrow IPC streaming format |
+| `application/vnd.apache.arrow.stream` | Arrow IPC streaming format (default query results, ingestion body) |
+| `text/tab-separated-values` | TSV query results |
+| `application/jsonl` / `application/x-ndjson` | JSONL/NDJSON query results |
 | `text/html` | UI dashboard pages |
 | `text/css` | CSS stylesheets |
 | `application/javascript` | JavaScript |
@@ -556,12 +608,12 @@ Authorization: Bearer <JWT token>
 ```bash
 # JWT authentication is required by default
 # First, login to get a token
-curl -X POST http://localhost:8080/v1/login \
+curl -X POST http://localhost:8081/v1/login \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "secret"}'
 
 # Use the returned token in subsequent requests
-curl -X POST http://localhost:8080/v1/query \
+curl -X POST http://localhost:8081/v1/query \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"query": "SELECT * FROM users"}' \
@@ -571,14 +623,14 @@ curl -X POST http://localhost:8080/v1/query \
 ### Check Health Status
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8081/health
 ```
 
 ### Ingest Data
 
 ```bash
 # JWT authentication is required by default
-curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
+curl -X POST "http://localhost:8081/v1/ingest?ingestion_queue=my_table" \
   -H "Content-Type: application/vnd.apache.arrow.stream" \
   -H "Authorization: Bearer <token>" \
   -H "x-dd-format: parquet" \
@@ -592,17 +644,20 @@ curl -X POST "http://localhost:8080/v1/ingest?ingestion_queue=my_table" \
 ```
 dazzleduck-sql-http/
 └── src/main/java/io/dazzleduck/sql/http/server/
-    ├── Main.java                        # Application entry point
-    ├── QueryService.java                # Query execution endpoint
+    ├── Main.java                        # Application entry point (also embeddable via Main.start)
+    ├── QueryService.java                # Query execution endpoint (Arrow/TSV/JSONL)
     ├── HealthCheckService.java          # Health check endpoint
     ├── PlanningService.java             # Query planning endpoint
     ├── CancelService.java               # Query cancellation endpoint
     ├── IngestionService.java            # Data ingestion endpoint
+    ├── NamedQueryService.java           # Named-query endpoints (conditional)
     ├── UIService.java                   # Metrics dashboard UI
     ├── AbstractQueryBasedService.java   # Base service for query endpoints
+    ├── ControllerService.java           # Synthetic Flight context + error mapping
     ├── JwtAuthenticationFilter.java     # JWT authentication filter
-    ├── QueryRequest.java                # Query request model
-    ├── ContentTypes.java                # Content type constants
-    ├── HttpConfig.java                  # HTTP configuration
-    └── HttpException.java               # Exception base class
+    ├── ParameterUtils.java              # Header-or-query-param extraction
+    ├── FlightToHttpEndpointMapper.java  # Flight locations to HTTP endpoint URLs
+    └── model/                           # QueryRequest, PlanResponse, Descriptor, HttpConfig
 ```
+
+Content-type constants live in `io.dazzleduck.sql.common.ContentTypes`.

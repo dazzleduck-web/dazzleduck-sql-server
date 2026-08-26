@@ -48,11 +48,8 @@ Create a standard Logback XML file (any filename) in `src/main/resources/`:
         <baseUrl>http://localhost:8081</baseUrl>
         <username>admin</username>
         <password>admin</password>
-        <claims>
-            <database>logs_db</database>
-            <schema>public</schema>
-            <environment>production</environment>
-        </claims>
+        <!-- claims is a comma-separated list of key=value pairs -->
+        <claims>database=logs_db,schema=public,environment=production</claims>
         <ingestionQueue>app-logs</ingestionQueue>
     </appender>
 
@@ -202,26 +199,26 @@ refreshed automatically before it expires.
 </appender>
 ```
 
-### Preconfigured JWT
+### Preconfigured Token
 
 When your deployment already provides a token (e.g. a sidecar injects it via an
-environment variable, or an external auth service issues it), pass the full
-`Bearer <token>` string directly. Login is skipped entirely and the token is used
-as-is for every request. If the server rejects it the call fails immediately —
-there is no re-login attempt.
+environment variable, or an external auth service issues it), pass the **raw** JWT via the
+`token` property — the `Bearer ` prefix is added automatically at startup. Login is skipped
+entirely and the token is used as-is for every request. If the server rejects it the call
+fails immediately — there is no re-login attempt.
 
 ```xml
 <appender name="LOG_FORWARDER" class="io.dazzleduck.sql.logback.LogForwardingAppender">
     <baseUrl>http://localhost:8081</baseUrl>
-    <jwt>Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...</jwt>
+    <token>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...</token>
     <ingestionQueue>app-logs</ingestionQueue>
 </appender>
 ```
 
-`jwt` and `username`/`password` are mutually exclusive. Setting `jwt` overrides
-the login flow; `username` and `password` are ignored when `jwt` is present.
+A non-blank `token` takes precedence over `username`/`password`; a blank or absent token
+falls back to the login flow.
 
-Programmatic equivalent:
+Programmatic equivalent (the builder takes the full header value, prefix included):
 
 ```java
 LogForwarderConfig config = LogForwarderConfig.builder()
@@ -242,8 +239,8 @@ All properties that can appear inside the `<appender>` element:
 | `baseUrl` | DazzleDuck server URL | `http://localhost:8081` |
 | `username` | Authentication username (login mode) | `admin` |
 | `password` | Authentication password (login mode) | `admin` |
-| `jwt` | Preconfigured `Bearer <token>` (skips login; mutually exclusive with username/password) | _(none)_ |
-| `claims` | Custom JWT claims for row-level security (login mode only) | `{}` |
+| `token` | Preconfigured raw JWT (`Bearer ` prefix added automatically; skips login, takes precedence over username/password) | _(none)_ |
+| `claims` | Custom JWT claims as comma-separated `key=value` pairs (login mode only) | _(none)_ |
 | `ingestionQueue` | Target ingestion queue name | `log` |
 | `minBatchSize` | Min bytes to accumulate before sending | `1024` |
 | `partitionBy` | Comma-separated partition column names | _(none)_ |

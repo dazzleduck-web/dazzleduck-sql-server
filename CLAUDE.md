@@ -39,20 +39,24 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 
 ```
 dazzleduck-sql-server/
-├── dazzleduck-sql-runtime/     # Main entry point, server startup orchestration
-├── dazzleduck-sql-flight/      # Arrow Flight SQL server implementation
-├── dazzleduck-sql-http/        # HTTP REST API (Helidon-based)
-├── dazzleduck-sql-common/      # Shared utilities, type handling, config
-├── dazzleduck-sql-commons/     # DuckDB utilities, connection pool, transformations
-├── dazzleduck-sql-client/      # HTTP client (JDK 11+)
-├── dazzleduck-sql-client-grpc/ # gRPC/Flight SQL client (JDK 11+)
-├── dazzleduck-sql-login/       # JWT authentication service
-├── dazzleduck-sql-search/      # Full-text search indexing
-├── dazzleduck-sql-micrometer/  # Micrometer metrics forwarding
-├── dazzleduck-sql-logger/      # SLF4J Arrow logging provider
-├── dazzleduck-sql-logback/     # Logback appender for log forwarding
-└── dazzleduck-sql-scrapper/    # Prometheus metrics scraping
+├── dazzleduck-sql-runtime/           # Main entry point, server startup orchestration, Docker image
+├── dazzleduck-sql-flight/            # Arrow Flight SQL server implementation (also named-query + output listeners)
+├── dazzleduck-sql-http/              # HTTP REST API (Helidon 4, HTTP/2)
+├── dazzleduck-sql-common/            # Shared constants (ConfigConstants, Headers, ContentTypes), SslUtils, JWT claim extraction (JDK 11)
+├── dazzleduck-sql-commons/           # DuckDB utilities: connection pool, AST transformations, authorization, ingestion (JDK 21)
+├── dazzleduck-sql-client/            # HTTP ingestion client, Arrow batching + backpressure (JDK 11)
+├── dazzleduck-sql-client-grpc/       # gRPC/Flight SQL ingestion client (JDK 11)
+├── dazzleduck-sql-login/             # JWT login service (LoginService / ProxyLoginService)
+├── dazzleduck-sql-search/            # Inverted-index construction for full-text search (query side unimplemented)
+├── dazzleduck-sql-micrometer/        # Micrometer StepMeterRegistry → Arrow → /v1/ingest
+├── dazzleduck-sql-logback/           # Logback appender for log forwarding (JDK 11)
+├── dazzleduck-sql-scrapper/          # Prometheus endpoint scraper → Arrow → /v1/ingest
+├── dazzleduck-sql-otel-collector/    # OTLP gRPC collector (logs/traces/metrics → Parquet/DuckLake), port 4317
+├── dazzleduck-sql-ducklake-compactor/# Scheduled DuckLake minor/major compaction + snapshot housekeeping
+└── dazzleduck-sql-examples/          # docker-compose integration tests (Testcontainers, packaging=pom)
 ```
+
+Note: `dazzleduck-sql-logger` was removed (2026-02); `dazzleduck-sql-logback` is its independent replacement.
 
 ## Module Details
 
@@ -70,27 +74,36 @@ Key files: `QueryService.java`, `IngestionService.java`, `PlanningService.java`,
 |----------|--------|-------------|
 | `/v1/login` | POST | Authenticate, get JWT token |
 | `/v1/query` | GET/POST | Execute SQL — Arrow IPC (default), TSV (`Accept: text/tab-separated-values`), or JSONL/NDJSON (`Accept: application/jsonl` or `application/x-ndjson`) |
-| `/v1/plan` | POST | Generate query execution plan |
-| `/v1/ingest` | POST | Ingest Arrow data to Parquet |
-| `/v1/cancel` | POST | Cancel running query |
-| `/health` | GET | Health check |
+| `/v1/plan` | GET/POST | Query plan with splits (`x-dd-split-size` header or query param) |
+| `/v1/ingest` | POST | Ingest Arrow data to Parquet (`?ingestion_queue=` required; 429 + `Retry-After` on backpressure) |
+| `/v1/cancel` | GET/POST | Cancel running query by statement `id` |
+| `/v1/named-query` | GET/POST | List / get-by-name / execute Jinja-templated named queries (only when `named_query_table` is configured) |
+| `/v1/ui` | GET | Metrics dashboard (HTML) |
+| `/health` | GET | Health check (unversioned, unauthenticated) |
 
 TSV format: header row + tab-separated string values. Ideal for LLM agents and scripts.
 JSONL format: one JSON object per row, per line (newline-delimited, no enclosing array). Numbers/booleans/nulls keep their JSON types; temporal values are ISO-8601 strings; lists/structs/maps are real nested JSON. Streamable and append-friendly.
 
 ### dazzleduck-sql-commons
-Core DuckDB abstraction. Key classes:
-- `ConnectionPool.java` — singleton DuckDB connection management, Arrow reader, bulk ingest
-- `Transformations.java` (~600 lines) — SQL → JSON AST, CTE/subquery handling, fingerprinting
-- `ExpressionFactory.java` — build SQL AST nodes programmatically
-- `ExpressionConstants.java` — AST field/type string constants
-- `Fingerprint.java` — SHA-256 of normalized query (literals replaced with placeholders)
-- `BulkIngestQueue.java` / `ParquetIngestionQueue.java` — time+size-batched ingestion
-- `SqlAuthorizer.java`, `JwtClaimBasedAuthorizer.java` — authorization framework
-- Partition pruning: `DucklakePartitionPruning.java`, `HivePartitionPruning.java`, `SplitPlanner.java`
+Core DuckDB abstraction (JDK 21). Key classes:
+- `ConnectionPool.java` — enum-singleton DuckDB connection (`connection.duplicate()` per use), Arrow reader, record mapping, `executeOnSingleton` for startup scripts
+- `Transformations.java` (~2300 lines) — SQL ↔ JSON AST via `json_serialize_sql`, filter-CTE injection (RLS), LEFT-JOIN pruning, limit injection, table-reference collection
+- `ExpressionFactory.java` / `ExpressionConstants.java` — build SQL AST nodes / AST string constants
+- `Fingerprint.java` — SHA-256 of normalized query (literals replaced with placeholders; does not work with CTEs)
+- `ingestion/` — `BulkIngestQueue` (batching, backpressure, producer-id dedup, drain), `ParquetIngestionQueue` (COPY-based writes, transformations via `__this` placeholder), `WatermarkSpec` (per-group MIN/MAX timestamp + row count committed in the DuckLake post-ingestion transaction), `DuckLakeIngestionHandler`, `DynamicDuckLakeIngestionTaskFactoryProvider` (SQLite-backed queue registry)
+- `authorization/` — `SqlAuthorizer` with `NOOPAuthorizer`, `SelectOnlyAuthorizer`, `RestrictedDatasourceOnlyAuthorizer`, `RestrictedReadOnlyAuthorizer`, `RedirectAuthorizer` (external `/resolve` endpoint)
+- Partition pruning: `ducklake/DucklakePartitionPruning.java` (DuckLake metadata tables), `hive/HivePartitionPruning.java`, `delta/PartitionPruning.java` (Delta Kernel), `planner/SplitPlanner.java` + `planner/PartitionPrunerV2.java`
+- `TableConfigProvider.java` — config overrides read from a key/value table
+- `namedquery/` — named-query store, request/response models, validator cache
 
 ### dazzleduck-sql-common
-Shared utilities: `ConfigUtils.java` (all config key constants), `Headers.java` (all HTTP/Flight header constants + type extractors), `SslUtils.java` (env-aware SSL via `DD_TRUST_SELF_SIGNED_CERTS`), `CryptoUtils.java`.
+Shared constants and small utilities (JDK 11): `ConfigConstants.java` (all config key constants — there is no `ConfigUtils`), `Headers.java` (all HTTP/Flight header + JWT claim constants + type extractors), `ContentTypes.java`, `SslUtils.java` (env-aware SSL via `DD_TRUST_SELF_SIGNED_CERTS`), `StartupScriptProvider.java` (env-var substitution in startup SQL), `auth/JwtClaimsExtractor.java`, `types/` Arrow row writers. (`CryptoUtils` lives in the flight module.)
+
+### dazzleduck-sql-otel-collector
+OTLP gRPC receiver (default port 4317) for logs/traces/metrics → flattened Arrow schemas → `ParquetIngestionQueue` → Parquet/DuckLake. JWT auth mandatory; queue routing via the `x-dd-ingestion-queue` JWT claim (no default fallback). Embedded `/health` endpoint with MAINTENANCE-aware graceful shutdown. Config root `otel_collector`.
+
+### dazzleduck-sql-ducklake-compactor
+Standalone service running `ducklake_merge_adjacent_files` (minor/major) plus snapshot expiry and file cleanup on schedules. Config root `dazzleduck_sql_compaction`; `/health` on port 8080 (always UP). Docker image `dazzleduck/ducklake-compactor`.
 
 ## Authorization & Access Modes
 
@@ -146,19 +159,20 @@ dazzleduck_server = {
 
     flight_sql.port = 59307
     http.port = 8081
-    http.authentication = "none"     # or "jwt"
 
     ingestion.min_bucket_size = 1048576
     ingestion.max_delay_ms = 2000
 
     jwt_token.expiration = 60m
-    jwt_token.claims.generate.headers = [database,catalog,schema,table,filter,path,function]
+    jwt_token.claims.generate.headers = [database, schema, x-dd-table, x-dd-filter, x-dd-access, x-dd-path, x-dd-function, x-dd-access-type]
 
     users = [{ username = admin, password = admin, groups = [admin, general] }]
 }
 ```
 
-**CLI override:** `--conf key=value` (e.g. `--conf warehouse=/data`, `--conf http.authentication=jwt`)
+**CLI override:** `--conf key=value` (e.g. `--conf warehouse=/data`)
+
+Note: the JWT filter is always installed on versioned HTTP endpoints — the `http.authentication` key is read but no longer disables auth. Tests/demos that need to skip real tokens set `jwt_token.verify_signature = false` instead.
 
 ## Testing
 
@@ -191,8 +205,9 @@ curl -X POST http://localhost:8081/v1/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin"}'
 
-# Ingest Arrow data
-curl -X POST "http://localhost:8081/v1/ingest?path=file1.parquet" \
+# Ingest Arrow data (routed by ingestion queue)
+curl -X POST "http://localhost:8081/v1/ingest?ingestion_queue=my_table" \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/vnd.apache.arrow.stream" \
   --data-binary "@file.arrow"
 

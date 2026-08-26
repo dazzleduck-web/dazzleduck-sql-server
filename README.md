@@ -1,127 +1,56 @@
-# Flight-Sql-Duckdb
+# DazzleDuck SQL Server
 
-## An [Arrow Flight SQL Server](https://arrow.apache.org/docs/format/FlightSql.html) with [DuckDB](https://duckdb.org) back-end execution engines
-
-[<img src="https://img.shields.io/badge/dockerhub-image-green.svg?logo=Docker">](https://hub.docker.com/r/voltrondata/sqlflite)
-[<img src="https://img.shields.io/badge/Documentation-dev-yellow.svg?logo=">](https://arrow.apache.org/docs/format/FlightSql.html)
-[<img src="https://img.shields.io/badge/Arrow%20JDBC%20Driver-download%20artifact-red?logo=Apache%20Maven">](https://search.maven.org/search?q=a:flight-sql-jdbc-driver)
-[<img src="https://img.shields.io/badge/PyPI-Arrow%20ADBC%20Flight%20SQL%20driver-blue?logo=PyPI">](https://pypi.org/project/adbc-driver-flightsql/)
-[<img src="https://img.shields.io/badge/PyPI-SQLFlite%20Ibis%20Backend-blue?logo=PyPI">](https://pypi.org/project/ibis-sqlflite/)
-[<img src="https://img.shields.io/badge/PyPI-SQLFlite%20SQLAlchemy%20Dialect-blue?logo=PyPI">](https://pypi.org/project/sqlalchemy-sqlflite-adbc-dialect/)
-[<img src="https://img.shields.io/badge/API-v1-blue.svg?logo=">](https://github.com)
-
-**DazzleDuck SQL Server** is a high-performance remote DuckDB server that supports both Arrow Flight SQL and RESTful HTTP protocols. It enables multiple users to connect remotely and execute queries through various client libraries.
+**DazzleDuck SQL Server** is a high-performance remote DuckDB server that supports both
+[Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html) (gRPC) and a RESTful
+HTTP API. It enables multiple users to connect remotely and execute queries through JDBC,
+ADBC, plain HTTP, or DuckDB itself.
 
 ### Key Features
-- **Dual Protocol Support**: Arrow Flight SQL (gRPC) and RESTful HTTP API (versioned with `/v1`)
-- **Multiple Client Support**: JDBC, ADBC Python drivers, and CLI tools
-- **Arrow-Native**: All data transfers use Apache Arrow format for maximum performance
-- **Versioned REST API**: Future-proof HTTP endpoints with `/v1` versioning
-- **JWT Authentication**: Secure access control for HTTP endpoints
-- **Remote Query Execution**: Run DuckDB queries remotely with distributed execution support
 
-### Client Modules
+- **Dual Protocol Support**: Arrow Flight SQL (gRPC, port `59307`) and RESTful HTTP API (port `8081`, versioned with `/v1`, HTTP/2 enabled)
+- **Arrow-Native**: query results and ingestion both use Apache Arrow IPC (ZSTD-compressed by default); TSV and JSONL/NDJSON output are also available over HTTP
+- **JWT Authentication**: all versioned HTTP endpoints and Flight SQL calls are authenticated; Basic credentials are upgraded to a server-issued JWT
+- **Row-Level Security**: four access modes with filter injection scoped by JWT claims
+- **Ingestion Pipeline**: batched Arrow-to-Parquet ingestion with backpressure, producer-id deduplication, DuckLake catalog registration, and per-group watermarks
+- **Partition Pruning**: Hive, Delta Lake, and DuckLake pruning based on query predicates, plus split planning for distributed execution
+- **Named Queries**: Jinja-templated SQL stored in a DuckDB table, executed by name over HTTP
 
-The project includes JDK 11 compatible client libraries:
+## Modules
 
-| Module | Description |
-|--------|-------------|
-| `dazzleduck-sql-client` | HTTP client (`HttpArrowProducer`) for Arrow data ingestion |
-| `dazzleduck-sql-client-grpc` | gRPC/Flight SQL client (`GrpcArrowProducer`) for Arrow data ingestion |
-| `dazzleduck-sql-common` | Shared types and utilities (LoginRequest, LoginResponse, DataType, etc.) |
-| `dazzleduck-sql-logger` | SLF4J provider for Arrow-based logging |
-| `dazzleduck-sql-logback` | Logback appender for log forwarding |
+| Module | Description | Bytecode target |
+|--------|-------------|-----------------|
+| `dazzleduck-sql-runtime` | Entry point, startup orchestration, the `dazzleduck/dazzleduck` Docker image | 17 |
+| `dazzleduck-sql-flight` | Arrow Flight SQL server (producers per access mode, auth middleware, named queries, output listeners) | 17 |
+| `dazzleduck-sql-http` | HTTP REST API on Helidon 4 (reuses the same producer as Flight SQL) | 17 |
+| `dazzleduck-sql-common` | Shared constants (`ConfigConstants`, `Headers`, `ContentTypes`), `SslUtils`, JWT claim extraction, Arrow row writers | 11 |
+| `dazzleduck-sql-commons` | DuckDB utilities: connection pool, SQL AST transformations, authorization, ingestion queues, partition pruning, split planning | 21 |
+| `dazzleduck-sql-client` | HTTP ingestion client (`HttpArrowProducer`) with Arrow batching, disk spill, and backpressure | 11 |
+| `dazzleduck-sql-client-grpc` | gRPC/Flight SQL ingestion client (`GrpcArrowProducer`) | 11 |
+| `dazzleduck-sql-login` | JWT login service (`LoginService`, `ProxyLoginService`) | 21 |
+| `dazzleduck-sql-search` | Inverted-index construction for full-text search (indexing only) | 21 |
+| `dazzleduck-sql-micrometer` | Micrometer registry that forwards application metrics as Arrow to the ingest endpoint | 21 |
+| `dazzleduck-sql-logback` | Logback appender that forwards logs as Arrow to the ingest endpoint | 11 |
+| `dazzleduck-sql-scrapper` | Prometheus endpoint scraper that forwards metrics as Arrow | 21 |
+| `dazzleduck-sql-otel-collector` | OTLP gRPC collector (logs/traces/metrics to Parquet/DuckLake), the `dazzleduck/dazzleduck-otel-collector` image | 21 |
+| `dazzleduck-sql-ducklake-compactor` | Scheduled DuckLake compaction and snapshot housekeeping, the `dazzleduck/ducklake-compactor` image | 21 |
+| `dazzleduck-sql-examples` | docker-compose integration tests for the demos under `example/docker` | 17 |
+
+Client-side artifacts (`dazzleduck-sql-client`, `dazzleduck-sql-client-grpc`,
+`dazzleduck-sql-common`, `dazzleduck-sql-logback`) target JDK 11 bytecode so they can be
+embedded in older applications. Everything is built and tested with **JDK 21**.
 
 ## Dev Setup
+
 ### Requirements
-- **Server modules**: JDK 21
-- **Client modules** (dazzleduck-sql-client, dazzleduck-sql-client-grpc, dazzleduck-sql-common, dazzleduck-sql-logger, dazzleduck-sql-logback): JDK 11+
 
-## Getting started with Docker
-
-### 1. Build the base image (one-time, or when Java/DuckDB version changes)
-
-The base image bundles the JRE and the native DuckDB JDBC driver. It must be built for each
-target platform and pushed to Docker Hub before the application image can be assembled.
-
-```bash
-DUCKDB_VERSION=$(./mvnw help:evaluate -Dexpression=duckdb.version -q -DforceStdout)
-
-# Single platform — local daemon (development)
-docker build \
-  --platform linux/arm64 \
-  --build-arg DUCKDB_VERSION=$DUCKDB_VERSION \
-  -t dazzleduck/base-jre:21-noble-duckdb-${DUCKDB_VERSION} \
-  -f dazzleduck-sql-runtime/docker/Dockerfile.base \
-  dazzleduck-sql-runtime/docker/
-
-# Multi-platform manifest push to Docker Hub (CI/CD)
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --build-arg DUCKDB_VERSION=$DUCKDB_VERSION \
-  -t dazzleduck/base-jre:21-noble-duckdb-${DUCKDB_VERSION} \
-  -f dazzleduck-sql-runtime/docker/Dockerfile.base \
-  dazzleduck-sql-runtime/docker/ \
-  --push
-```
-
-### 2. Build the application image
-
-The application image is assembled by Jib (no Dockerfile required). Two platform-specific
-images are built during `mvn verify` and combined into a local multi-arch manifest list.
-
-```bash
-# Quick single-arch build — Apple Silicon (arm64)
-./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime -Djib.architecture=arm64
-
-# Quick single-arch build — x86-64 (amd64, requires amd64 base image)
-./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime
-
-# Both arm64 + amd64 + local manifest list (verify phase)
-# amd64 is skipped until the base image has an amd64 variant;
-# enable with -Dskip.docker.amd64=false once the base image supports it
-./mvnw verify -DskipTests -pl dazzleduck-sql-runtime --also-make
-```
-
-Images produced:
-
-| Tag | Description |
-|---|---|
-| `dazzleduck/dazzleduck:{version}-arm64` | arm64 platform image |
-| `dazzleduck/dazzleduck:{version}-amd64` | amd64 platform image (when enabled) |
-| `dazzleduck/dazzleduck:{version}` | local multi-arch manifest list |
-| `dazzleduck/dazzleduck:latest` | local multi-arch manifest list |
-
-To push to Docker Hub after building both platform images:
-
-```bash
-docker push dazzleduck/dazzleduck:{version}-arm64
-docker push dazzleduck/dazzleduck:{version}-amd64
-# Create and push the multi-arch manifest list
-./dazzleduck-sql-runtime/docker/manifest.sh {version}
-docker manifest push dazzleduck/dazzleduck:{version}
-docker manifest push dazzleduck/dazzleduck:latest
-```
-
-### 3. Run the container
-
-```bash
-docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest \
-  --conf warehouse=/data \
-  --conf users.0.password="your password"
-```
-
-The server runs both Arrow Flight SQL (gRPC) on port `59307` and HTTP REST API on port `8081`.
-
-## Getting started from the command line (development)
-
-Build the project once, then start the server directly via Maven — no Docker needed:
+- JDK 21 (build and test — JDK 25 causes test failures)
+- Maven wrapper (`./mvnw`)
 
 ```bash
 # Build all modules
 ./mvnw clean package -DskipTests
 
-# Start the server
+# Start the server locally (no Docker needed)
 ./mvnw exec:java -pl dazzleduck-sql-runtime \
   -Dexec.args="--conf warehouse=warehouse --conf users.0.password='your password'"
 ```
@@ -136,115 +65,152 @@ To run a specific main class (e.g. for demos or tooling):
   -Dexec.args="[args...]"
 ```
 
-### Supported functionality
-1. Database and schema specified as part of connection url. Passed to server as header database and schema.
-2. Fetch size can be specified. It's passed to the server in header fetch_size.
-3. Bulk write to parquet file using bulk upload functionality. Idea is to bulk upload and then add those files to metadata.
-4. Username and Passwords can be specified in application.conf file.
+## Getting Started with Docker
 
-## HTTP API Endpoints
+```bash
+docker run -ti -p 59307:59307 -p 8081:8081 dazzleduck/dazzleduck:latest \
+  --conf warehouse=/data \
+  --conf users.0.password="your password"
+```
 
-All HTTP API endpoints use a `/v1` version prefix for backward compatibility and future API evolution.
+The server runs both Arrow Flight SQL (gRPC) on port `59307` and the HTTP REST API on port `8081`.
 
-### Available Endpoints
+Image build instructions (base image, Jib, multi-arch manifests) live in
+[`dazzleduck-sql-runtime/docker/README.md`](dazzleduck-sql-runtime/docker/README.md).
+Release publishing is scripted in `scripts/docker-publish.sh`, which also builds the
+`dazzleduck/dazzleduck-otel-collector`, `dazzleduck/ducklake-compactor`, and
+`dazzleduck/dazzleduck-sql-scrapper` images.
+
+## HTTP API
+
+All endpoints use a `/v1` version prefix except `/health`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/login` | POST | Authenticate and obtain JWT token |
-| `/v1/query` | GET/POST | Execute SQL queries and return results in Arrow format |
-| `/v1/plan` | POST | Generate query execution plan with splits |
-| `/v1/ingest` | POST | Ingest Arrow data to Parquet files |
-| `/v1/cancel` | POST | Cancel a running query |
-| `/v1/named-query` | GET | List named queries (paginated) |
-| `/v1/named-query/{name}` | GET | Get a named query by name |
-| `/v1/named-query` | POST | Execute a named (templated) query |
-| `/v1/ui` | GET | Access web UI dashboard |
-| `/health` | GET | Health check endpoint (unversioned) |
+| `/v1/login` | POST | Authenticate and obtain a JWT token |
+| `/v1/query` | GET/POST | Execute SQL — Arrow IPC (default), TSV, or JSONL depending on the `Accept` header |
+| `/v1/plan` | GET/POST | Query execution plan with splits (`x-dd-split-size` header or query param) |
+| `/v1/ingest` | POST | Ingest an Arrow IPC stream (`?ingestion_queue=` required) |
+| `/v1/cancel` | GET/POST | Cancel a running query by statement `id` |
+| `/v1/named-query` | GET/POST | List, inspect, and execute named queries (only registered when `named_query_table` is configured) |
+| `/v1/ui` | GET | Metrics dashboard |
+| `/health` | GET | Health check (unversioned, unauthenticated) |
 
-### API Versioning
-All HTTP API endpoints are versioned with a `/v1` prefix to ensure backward compatibility and allow for future API evolution. The health check endpoint remains unversioned as it's a standard operational endpoint.
+### Output formats
 
-## Connecting to HTTP server.
+The `Accept` header selects the response format on `/v1/query` and `/v1/named-query`:
 
-The server is running on HTTP mode on port 8081 which can used to query DuckDB with POST and GET methods. This will return data in arrow format.<p>
-The return data can itself be queried with duckdb
+| Accept value | Format |
+|--------------|--------|
+| _(default)_ | Arrow IPC stream (`application/vnd.apache.arrow.stream`), ZSTD-compressed; override with the `x-dd-arrow-compression` header (`zstd` or `none`) |
+| `text/tab-separated-values` | TSV: header row + tab-separated values. Ideal for scripts and LLM agents |
+| `application/jsonl` or `application/x-ndjson` | JSONL: one JSON object per row. Numbers/booleans/nulls keep JSON types; temporal values are ISO-8601 strings; lists/structs/maps are nested JSON |
 
-## Getting start with duckdb.
-Learn more about it here [dazzleduck](https://github.com/dazzleduck-web/dazzleduck-sql-duckdb/blob/main/README.md)
+### Useful request headers
 
-## Connecting to the flight server via Flight JDBC
-Download the [Apache Arrow Flight SQL JDBC driver](https://search.maven.org/search?q=a:flight-sql-jdbc-driver)
+Every header can also be passed as a URL query parameter.
 
-You can then use the JDBC driver to connect from your host computer to the locally running Docker Flight SQL server with this JDBC string (change the password value to match the value specified for the SQLFLITE_PASSWORD environment variable if you changed it from the example above):
+| Header | Purpose |
+|--------|---------|
+| `x-dd-fetch-size` | Rows per Arrow batch (default 10000) |
+| `x-dd-query-timeout` | Per-query timeout in seconds (capped by `max_query_timeout_ms`) |
+| `x-dd-split-size` | Target split size in bytes for `/v1/plan` |
+| `x-dd-arrow-compression` | `zstd` (default) or `none` |
+| `x-dd-partition`, `x-dd-sort-order`, `x-dd-format`, `x-dd-producer-id`, `x-dd-producer-batch-id` | Ingestion options for `/v1/ingest` |
+
+### Examples
+
+```bash
+# Get a token
+curl -X POST 'http://localhost:8081/v1/login' \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin"}'
+
+# Query (Arrow IPC by default)
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8081/v1/query?q=select%201"
+
+# Query as TSV
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/tab-separated-values" \
+  "http://localhost:8081/v1/query?q=select%201"
+
+# Ingest Arrow data
+curl -X POST "http://localhost:8081/v1/ingest?ingestion_queue=my_table" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/vnd.apache.arrow.stream" \
+  --data-binary "@data.arrow"
+```
+
+When the ingestion pipeline is saturated, `/v1/ingest` responds `429 Too Many Requests`
+with a `Retry-After` header — clients should back off and resend the batch.
+
+Query results can also be read directly from DuckDB:
+
+```sql
+INSTALL arrow FROM community; LOAD arrow;
+CREATE SECRET http_auth (
+    TYPE http,
+    EXTRA_HTTP_HEADERS MAP {
+        'Authorization': 'Bearer <jwt-token>'
+    }
+);
+SELECT * FROM read_arrow(concat('http://localhost:8081/v1/query?q=', url_encode('select 1, 2, 3')));
+```
+
+## Connecting via Flight SQL JDBC
+
+Download the [Apache Arrow Flight SQL JDBC driver](https://search.maven.org/search?q=a:flight-sql-jdbc-driver) and connect with:
+
 ```bash
 jdbc:arrow-flight-sql://localhost:59307?database=memory&useEncryption=0&user=admin&password=admin
 ```
 
-For instructions on setting up the JDBC driver in popular Database IDE tool: [DBeaver Community Edition](https://dbeaver.io) - see this [repo](https://github.com/voltrondata/setup-arrow-jdbc-driver-in-dbeaver).
+For instructions on setting up the JDBC driver in [DBeaver Community Edition](https://dbeaver.io),
+see this [repo](https://github.com/voltrondata/setup-arrow-jdbc-driver-in-dbeaver).
 
-**Note** - if you stop/restart the Flight SQL Docker container, and attempt to connect via JDBC with the same password - you could get error: "Invalid bearer token provided. Detail: Unauthenticated".  This is because the client JDBC driver caches the bearer token signed with the previous instance's secret key.  Just change the password in the new container by changing the "SQLFLITE_PASSWORD" env var setting - and then use that to connect via JDBC.
+**Note** — if you stop/restart the server and reconnect via JDBC with the same password, you may
+get: "Invalid bearer token provided. Detail: Unauthenticated". The JDBC driver caches the bearer
+token signed with the previous instance's secret key. Change the password (`users.0.password`)
+in the new container and reconnect to force a fresh token.
 
-## Connecting to the flight server via the new [ADBC Python Flight SQL driver](https://pypi.org/project/adbc-driver-flightsql/)
+## Connecting via the ADBC Python Flight SQL driver
 
-You can now use the new Apache Arrow Python ADBC Flight SQL driver to query the Flight SQL server.  ADBC offers performance advantages over JDBC - because it minimizes serialization/deserialization, and data stays in columnar format at all phases.
+The [ADBC Flight SQL driver](https://pypi.org/project/adbc-driver-flightsql/) keeps data in
+columnar form end to end and avoids JDBC serialization overhead.
 
-You can learn more about ADBC and Flight SQL [here](https://voltrondata.com/resources/simplifying-database-connectivity-with-arrow-flight-sql-and-adbc).
-
-Ensure you have Python 3.9+ installed, then open a terminal, then run:
 ```bash
-# Create a Python virtual environment
 python3 -m venv .venv
-
-# Activate the virtual environment
 . .venv/bin/activate
-
-# Install the requirements including the new Arrow ADBC Flight SQL driver
 pip install --upgrade pip
 pip install pandas pyarrow adbc_driver_flightsql
-
-# Start the python interactive shell
 python
 ```
 
-In the Python shell - you can then run:
 ```python
 import os
-from adbc_driver_flightsql import dbapi as sqlflite, DatabaseOptions
+from adbc_driver_flightsql import dbapi, DatabaseOptions
 
-
-with sqlflite.connect(uri="grpc+tls://localhost:59307",
-                        db_kwargs={"username": os.getenv("SQLFLITE_USERNAME", "admin"),
-                                   "password": os.getenv("SQLFLITE_PASSWORD", "admin"),
-                                   DatabaseOptions.TLS_SKIP_VERIFY.value: "true"  # Not needed if you use a trusted CA-signed TLS cert
-                                   }
-                        ) as conn:
-   with conn.cursor() as cur:
-       cur.execute("select * from generate_series(20)",
-                   )
-       x = cur.fetch_arrow_table()
-       print(x)
+with dbapi.connect(
+    uri="grpc+tls://localhost:59307",
+    db_kwargs={
+        "username": os.getenv("DAZZLEDUCK_USERNAME", "admin"),
+        "password": os.getenv("DAZZLEDUCK_PASSWORD", "admin"),
+        DatabaseOptions.TLS_SKIP_VERIFY.value: "true",  # not needed with a CA-signed TLS cert
+    },
+) as conn:
+    with conn.cursor() as cur:
+        cur.execute("select * from generate_series(20)")
+        print(cur.fetch_arrow_table())
 ```
-
-You should see results:
-
-
-## Connecting via [Ibis](https://ibis-project.org)
-See: https://github.com/ibis-project/ibis-sqlflite
-
-## Connecting via [SQLAlchemy](https://www.sqlalchemy.org)
-See: https://github.com/prmoore77/sqlalchemy-sqlflite-adbc-dialect
-
-
-
-
 
 ## Named Queries
 
-Named queries allow pre-defined, parameterized SQL templates to be stored in a DuckDB table and executed by name over HTTP. Templates use [Jinja2](https://jinja.palletsprojects.com) syntax via Jinjava.
+Named queries are pre-defined, parameterized SQL templates stored in a DuckDB table and executed
+by name over HTTP. Templates use [Jinja2](https://jinja.palletsprojects.com) syntax via Jinjava.
 
 ### Setup
 
-Enable the named query endpoint by setting `named_query_table` in your configuration:
+Enable the endpoint by setting `named_query_table` in your configuration:
 
 ```hocon
 dazzleduck_server {
@@ -252,15 +218,18 @@ dazzleduck_server {
 }
 ```
 
-Create the table in DuckDB:
+Create the table in DuckDB (all eight columns are required by the store):
 
 ```sql
 CREATE TABLE named_queries (
-    name                   VARCHAR PRIMARY KEY,
+    id                     BIGINT PRIMARY KEY,
+    name                   VARCHAR UNIQUE,
     template               VARCHAR,
     validators             VARCHAR[],
     description            VARCHAR,
-    parameter_descriptions MAP(VARCHAR, VARCHAR)
+    parameter_descriptions MAP(VARCHAR, VARCHAR),
+    preferred_display      VARCHAR,
+    query_group            VARCHAR DEFAULT 'general'
 );
 ```
 
@@ -268,82 +237,50 @@ Insert a template:
 
 ```sql
 INSERT INTO named_queries VALUES (
+    1,
     'top_sales',
-    'SELECT * FROM sales WHERE region = ''{{ region }}'' LIMIT {{ limit }}',
+    'SELECT * FROM sales WHERE region = ''{{ region }}'' LIMIT {{ limit | default(''10'') }}',
     NULL,
     'Returns top sales rows for a given region',
-    MAP { 'region': 'Sales region name', 'limit': 'Maximum number of rows' }
+    MAP { 'region': 'Sales region name', 'limit': 'Maximum number of rows' },
+    'table',
+    'sales'
 );
 ```
 
-### Executing a Named Query
+A complete seeded example lives in `example/seed/create_named_queries.sql` with the demo
+stack under `example/docker/named-query-demo`.
+
+### Executing a named query
 
 ```bash
 curl -X POST http://localhost:8081/v1/named-query \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "top_sales", "parameters": {"region": "WEST", "limit": "10"}}'
 ```
 
-The response is an Arrow IPC stream, identical to `/v1/query`.
+The response format follows the same `Accept` negotiation as `/v1/query` (Arrow IPC by
+default, TSV or JSONL on request). Parameter validation failures return `400` with all
+failures collected; an unknown name returns `404`.
 
-#### Query Modes
-
-An optional `mode` field controls how the SQL is executed:
-
-| Mode | Description |
-|------|-------------|
-| `EXECUTE` (default) | Run the query and return results in Arrow format |
-| `EXPLAIN` | Return the query plan without executing |
-| `EXPLAIN_ANALYZE` | Return the query plan with execution statistics |
-| `GENERATE` | Render the SQL template and return the generated SQL as plain text without executing |
+### Listing and inspecting
 
 ```bash
-# Execute
-curl -X POST http://localhost:8081/v1/named-query \
-  -H "Content-Type: application/json" \
-  -d '{"name": "top_sales", "parameters": {"region": "WEST", "limit": "10"}}'
+# Paginated list (limit is capped at 200)
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8081/v1/named-query?offset=0&limit=20"
 
-# Inspect the generated SQL before running it
-curl -X POST http://localhost:8081/v1/named-query \
-  -H "Content-Type: application/json" \
-  -d '{"name": "top_sales", "parameters": {"region": "WEST", "limit": "10"}, "mode": "GENERATE"}'
-# Returns: SELECT * FROM sales WHERE region = 'WEST' LIMIT 10
+# Full definition of one named query
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/v1/named-query/top_sales
 ```
 
-### Listing Named Queries
+Both return JSON including each query's `name`, `description`, parameter descriptions,
+validator descriptions, `preferred_display`, and `query_group`.
 
-```bash
-# First page
-curl http://localhost:8081/v1/named-query?offset=0&limit=20
+### Parameter validators
 
-# Response
-{
-  "items": [
-    {"name": "top_sales", "description": "Returns top sales rows for a given region"}
-  ],
-  "total": 1,
-  "offset": 0,
-  "limit": 20
-}
-```
-
-### Getting a Named Query by Name
-
-```bash
-curl http://localhost:8081/v1/named-query/top_sales
-
-# Response
-{
-  "name": "top_sales",
-  "description": "Returns top sales rows for a given region",
-  "parameterDescriptions": {"region": "Sales region name", "limit": "Maximum number of rows"},
-  "validatorDescriptions": []
-}
-```
-
-### Parameter Validators
-
-Each named query can reference a list of validator class names. Validators are Java classes that implement `NamedQueryParameterValidator` from `dazzleduck-sql-common`:
+Each named query may reference validator class names. Validators implement
+`NamedQueryParameterValidator` from `dazzleduck-sql-common`:
 
 ```java
 public class RegionValidator implements NamedQueryParameterValidator {
@@ -362,13 +299,13 @@ public class RegionValidator implements NamedQueryParameterValidator {
 }
 ```
 
-All validators run on every request and all failures are collected before returning HTTP 400. Validator instances are cached (up to 500) to avoid repeated reflection overhead.
+All validators run on every request and all failures are collected before returning HTTP 400.
+Validator instances are cached (up to 500) to avoid repeated reflection overhead.
 
 ## Security and Access Modes
 
-DazzleDuck SQL Server supports four access modes that control query permissions and external access capabilities:
-
-### Access Modes
+DazzleDuck SQL Server supports four access modes that control query permissions and external
+access capabilities:
 
 | Mode | Description | Query Types Allowed | External Access |
 |-------|-------------|---------------------|-----------------|
@@ -377,41 +314,22 @@ DazzleDuck SQL Server supports four access modes that control query permissions 
 | **RESTRICTED** | SELECT on one datasource; table/path/function scoped via JWT | SELECT on the authorized datasource only | Controlled by startup script |
 | **RESTRICT_READ_ONLY** | SELECT on any table; mandatory per-table filter always injected | SELECT on any table (filter always applied) | Disabled by default |
 
-### Configuring Access Mode
-
-Set the access mode in `application.conf` or via command-line:
+### Configuring access mode
 
 ```hocon
 dazzleduck_server {
-    access_mode = COMPLETE  # Options: COMPLETE, READ_ONLY, RESTRICTED, RESTRICT_READ_ONLY
+    access_mode = COMPLETE  # COMPLETE | READ_ONLY | RESTRICTED | RESTRICT_READ_ONLY
 }
 ```
 
-### External Access Control
+### External access control
 
-External access refers to DuckDB's ability to access external tables and functions:
-- `read_parquet`, `read_json`, `read_csv` - External file access
-- `httpfs`, `httpsfs` - HTTP/HTTPS file system access
-- `s3fs`, `gcsfs` - Cloud storage access
-
-**By access mode:**
-
-- **COMPLETE mode**: All external tables and functions are accessible by default
-- **READ_ONLY / RESTRICTED / RESTRICT_READ_ONLY modes**: External access must be explicitly enabled in startup script
-
-```sql
--- Disable external access (recommended for restricted modes)
-SET enable_external_access = false;
-
--- Enable external access (use with caution)
-SET enable_external_access = true;
-```
-
-This security feature prevents restricted users from accessing arbitrary external data sources while still allowing them to query authorized tables. Configure external access in the startup script:
+External access refers to DuckDB's ability to reach external files and functions
+(`read_parquet`, `read_json`, `read_csv`, httpfs, cloud storage). In restricted modes it should
+be disabled in the startup script:
 
 ```hocon
-startup_script_provider {
-    class = "io.dazzleduck.sql.flight.ConfigBasedStartupScriptProvider"
+dazzleduck_server.startup_script_provider {
     content = """
         INSTALL arrow FROM community;
         LOAD arrow;
@@ -422,11 +340,14 @@ startup_script_provider {
 }
 ```
 
-### JWT Claims for RESTRICTED Mode
+The startup script provider also supports `script_location` (path to a SQL file) and
+substitutes `${ENV_VAR}` references from the environment.
+
+### JWT claims for RESTRICTED mode
 
 Project-specific JWT claims and HTTP headers use the `x-dd-` prefix to avoid colliding with
-standard claim names. When using `RESTRICTED` access mode, the preferred way to specify access
-is the `x-dd-access` JWT claim.
+standard claim names. In `RESTRICTED` mode, the preferred way to grant access is the
+`x-dd-access` JWT claim.
 
 **`x-dd-access` claim — format: `[[type, name, projection, filter]]` (exactly one entry)**
 
@@ -438,15 +359,16 @@ is the `x-dd-access` JWT claim.
 | `filter` | SQL expression or `"true"` | Row-level filter; `"true"` = no restriction |
 
 Examples:
+
 ```bash
 # BASE_TABLE access with filter
--H 'x-dd-access: [["table","orders","*","tenant_id='\''abc'\''"]]]'
+-H 'x-dd-access: [["table","orders","*","tenant_id='\''abc'\''"]]'
 
 # Path-prefix access (TABLE_FUNCTION)
 -H 'x-dd-access: [["path","s3://bucket/tenant1/","*","true"]]'
 
 # Named function access
--H 'x-dd-access: [["function","read_parquet","*","tenant_id='\''abc'\''"]]]'
+-H 'x-dd-access: [["function","read_parquet","*","tenant_id='\''abc'\''"]]'
 ```
 
 **Legacy claims (backward compatible):**
@@ -459,109 +381,123 @@ Examples:
 | `x-dd-path` | Authorized path prefix (TABLE_FUNCTION) |
 | `x-dd-filter` | Optional row filter expression |
 
-### JWT Claims for RESTRICT_READ_ONLY Mode
+### JWT claims for RESTRICT_READ_ONLY mode
 
-`RESTRICT_READ_ONLY` allows SELECT on any table but **always injects the filter** into every base table via CTEs — including JOIN arms, WHERE subqueries, and EXISTS clauses.
+`RESTRICT_READ_ONLY` allows SELECT on any table but **always injects the filter** into every
+base table reference via CTEs — including JOIN arms, WHERE subqueries, and EXISTS clauses.
+Table functions and multi-statement queries are rejected. Tables not covered by the claim
+get a `false` filter (they return no rows).
 
 **`x-dd-access` claim — format: `[[type, name, projection, filter], ...]` (one or more `"table"` entries)**
 
 ```bash
 # Single table
--H 'x-dd-access: [["table","orders","*","tenant_id='\''abc'\''"]]]'
+-H 'x-dd-access: [["table","orders","*","tenant_id='\''abc'\''"]]'
 
-# Multiple tables with different filter columns (CROSS JOIN-safe)
--H 'x-dd-access: [["table","orders","*","owner_id='\''alice'\''"],["table","items","*","region='\''us'\''"]]]'
+# Multiple tables with different filter columns
+-H 'x-dd-access: [["table","orders","*","owner_id='\''alice'\''"],["table","items","*","region='\''us'\''"]]'
 ```
 
 **Legacy — `x-dd-filter` + `x-dd-table` claims (single table only):**
+
 ```bash
 -H "x-dd-table: orders" -H "x-dd-filter: tenant_id='abc'"
 ```
+
 The filter is mandatory — requests without `access` or `filter` are rejected.
+
+### Redirect authorization
+
+A token carrying `x-dd-token-type: redirect` plus `x-dd-redirect_url` makes the server resolve
+grants from an external endpoint: the authorizer sends a GET with the caller's bearer token and
+expects a JSON response listing authorized tables/functions and row filters. Responses are
+cached for five minutes.
 
 ## SSL / TLS Configuration
 
-By default, all HTTP clients in DazzleDuck enforce strict certificate and hostname validation using the JVM's default SSL context.
+By default, all HTTP clients in DazzleDuck enforce strict certificate and hostname validation
+using the JVM's default SSL context.
 
-### Self-Signed Certificates (Dev / Test)
+### Self-signed certificates (dev / test)
 
-If you are running against a server with a self-signed certificate, set the `DD_TRUST_SELF_SIGNED_CERTS` environment variable before starting the process:
+If you are running against a server with a self-signed certificate, set the
+`DD_TRUST_SELF_SIGNED_CERTS` environment variable before starting the process:
 
 ```bash
 export DD_TRUST_SELF_SIGNED_CERTS=true
 ```
 
-When this variable is set (to any non-empty value), all internal HTTP clients — including `HttpArrowProducer`, `RedirectAuthorizer`, `ProxyLoginService`, `HttpCredentialValidator`, `AuthUtils`, `JwtServerInterceptor`, and `MetricsScraper` — will skip certificate validation and hostname verification.
+When this variable is set (to any non-empty value), all internal HTTP clients — including
+`HttpArrowProducer`, `RedirectAuthorizer`, `ProxyLoginService`, `HttpCredentialValidator`,
+`AuthUtils`, `JwtServerInterceptor`, and `MetricsScraper` — will skip certificate validation
+and hostname verification.
 
-> **Warning:** Never set `DD_TRUST_SELF_SIGNED_CERTS` in production. Use a properly signed certificate instead.
+**Warning:** never set `DD_TRUST_SELF_SIGNED_CERTS` in production. Use a properly signed
+certificate instead.
 
-## Enabling Authentication in HTTP Mode.
-Authentication is supported with jwt. Client need to invoke login api with username/password this api would return jwt  token. This jwt token can be used for all subsequent invocation
-- Run the server with authentication enabled
-  `docker run -ti -v "$PWD/example/data":/local-data -p 59307:59307 -p 8081:8081 flight-sql-duckdb --conf useEncryption=false --conf warehouse=/data/warehouse --conf http.authentication=jwt`
-- Get the jwt token with login <br>
- ```curl -X POST 'http://localhost:8081/v1/login' -H "Content-Type: application/json" -d '{"username": "admin", "password" : "admin"}'```
-- Invoke api with jwt token
+## HTTP Authentication
+
+JWT authentication is always enforced on the versioned (`/v1`) HTTP endpoints — only `/health`
+and `/v1/login` are open. Clients call the login API with username/password and use the
+returned token on every subsequent request:
+
+```bash
+# Get the JWT token
+curl -X POST 'http://localhost:8081/v1/login' \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin"}'
+
+# Invoke an API with the token
+curl -H "Authorization: Bearer <jwt-token>" -s "http://localhost:8081/v1/query?q=select%201"
 ```
-URL="http://localhost:8081/v1/query?q=select%201"
-curl -H "Authorization': 'Bearer <jwt-token>" -s "$URL"
-```
-- Run the query with jwt token by setting <br>
-```
-INSTALL arrow FROM community; LOAD arrow;
-CREATE SECRET http_auth (
-              TYPE http,
-              EXTRA_HTTP_HEADERS MAP {
-                 'Authorization': 'Bearer <jwt-token>'
-                 }
-              );
-SELECT * FROM read_arrow(concat('http://localhost:8081/v1/query?q=', url_encode('select 1, 2, 3')));
-```
+
+Users are configured under `dazzleduck_server.users`; setting `login_url` instead delegates
+`/v1/login` to an external login service. `jwt_token.verify_signature = false` disables
+signature verification (tests/demos only).
 
 ## Ingestion Queue Routing
 
-Producers identify their target queue via the `x-dd-ingestion-queue` JWT claim. The claim value must match one of the `ingestion_queue` entries configured in `ingestion_queue_table_mapping` (or the SQLite registry when using `DynamicDuckLakeIngestionTaskFactoryProvider`).
+Every ingested batch is routed to a named **ingestion queue**, which maps to a target path (and
+optionally a DuckLake table).
 
-| Claim | Required | Description |
-|-------|----------|-------------|
-| `x-dd-ingestion-queue` | Yes | Queue identifier. The server routes each ingested batch to the writer registered under this name. Requests without this claim are rejected with `INVALID_ARGUMENT`. |
-
-The claim is read from the JWT — it does not need to be sent as a separate request header.
-
-**Generating a token with the ingestion queue claim** (example using the login endpoint):
+- **HTTP `/v1/ingest`**: the queue is the `ingestion_queue` URL query parameter. In restricted
+  modes the JWT must also grant write access: `x-dd-access-type = WRITE` and an
+  `ingestion_queue` claim matching the requested queue.
+- **OTel collector (gRPC)**: the queue comes from the `x-dd-ingestion-queue` JWT claim; requests
+  without it are rejected with `INVALID_ARGUMENT`. There is no default fallback.
 
 ```bash
-# Login — the server embeds x-dd-ingestion-queue in the returned JWT when
-# the claim is listed in jwt_token.claims.generate.headers
+# Login — the server embeds requested claims in the returned JWT
 curl -X POST http://localhost:8081/v1/login \
   -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "admin"}'
-```
-
-For the OTel collector (gRPC), include the JWT as a Bearer token in the `authorization` metadata header:
-
-```
-authorization: Bearer <jwt-containing-x-dd-ingestion-queue>
+  -d '{"username": "admin", "password": "admin", "claims": {"x-dd-ingestion-queue": "logs"}}'
 ```
 
 ## DuckLake Post-Ingestion Provider
 
-After Arrow data is ingested and written as Parquet, DazzleDuck can automatically register those files with a DuckLake catalog table via `ingestion_task_factory_provider` (disabled by default in `reference.conf`).
+After Arrow data is ingested and written as Parquet, DazzleDuck can automatically register those
+files with a DuckLake catalog table via `ingestion_task_factory_provider` (disabled by default).
 
-Set `class` to `io.dazzleduck.sql.commons.ingestion.DuckLakeIngestionTaskFactoryProvider` and configure `ingestion_queue_table_mapping` entries:
+Set `class` to `io.dazzleduck.sql.commons.ingestion.DuckLakeIngestionTaskFactoryProvider` and
+configure `ingestion_queue_table_mapping` entries:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `ingestion_queue` | Yes | Queue name; must match the `x-dd-ingestion-queue` JWT claim sent by the producer |
+| `ingestion_queue` | Yes | Queue name the producer targets |
 | `catalog` | Yes | DuckLake catalog owning the target table |
 | `schema` | Yes | Schema within the catalog |
 | `table` | Yes | Target table name |
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
-| `additional_parameters` | No | Extra key/value pairs forwarded to the post-ingestion task |
+| `additional_parameters` | No | Extra key/value pairs, including the watermark spec below |
+
+Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
+registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
+runtime without a restart.
 
 ### Transformation
 
-`transformation` is a SQL `SELECT` that runs on each batch before it is persisted. The server wraps it as:
+`transformation` is a SQL `SELECT` that runs on each batch before it is persisted. The server
+wraps it as:
 
 ```sql
 WITH __this AS (SELECT * FROM read_parquet([...]) ORDER BY ...)
@@ -584,8 +520,32 @@ SELECT * FROM __this WHERE level != 'DEBUG'
 SELECT id, ts, msg, current_timestamp AS ingested_at FROM __this
 ```
 
-### Publishing the project
-- export GPG_TTY=$(tty)
-- ./mvnw -P release-sign-artifacts -DskipTests clean verify
-- ./mvnw -P release-sign-artifacts -DskipTests deploy
+### Watermarks
 
+A queue mapping can commit a watermark row per ingested batch, in the **same transaction** as
+the DuckLake file registration. Each row carries the per-group MIN timestamp, MAX timestamp, and
+row count. Configure under `additional_parameters`:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `watermark_table` | Yes | Watermark table (same catalog/schema as the target table) |
+| `watermark_timestamp_column` | Yes | Source column both MIN and MAX are computed from |
+| `watermark_min_timestamp_column` | Yes | Destination column for the MIN timestamp |
+| `watermark_max_timestamp_column` | Yes | Destination column for the MAX timestamp |
+| `watermark_row_count_column` | Yes | Destination column for the batch row count |
+| `watermark_group_columns` | No | Comma-separated grouping columns; empty = one global row per batch |
+
+A malformed spec (partial keys, blanks, typos in `watermark_*` keys) fails at startup rather
+than per batch. Watermarks are not available for queues registered via the dynamic SQLite
+provider, whose registry does not store `additional_parameters`.
+
+## Publishing
+
+Tagged releases (`v*`) publish all modules to Maven Central via the GitHub Actions release
+workflow. Manual publishing:
+
+```bash
+export GPG_TTY=$(tty)
+./mvnw -P release-sign-artifacts -DskipTests clean verify
+./mvnw -P release-sign-artifacts -DskipTests deploy
+```
