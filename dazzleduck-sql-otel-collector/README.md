@@ -45,10 +45,7 @@ Configuration is loaded from HOCON (`application.conf`) with environment variabl
 otel_collector {
     grpc_port = 4317
 
-    health {
-        port = 8081                       # GET /health
-        shutdown_grace_period_ms = 2000   # MAINTENANCE/LB-drain window; 0 to skip
-    }
+    # health { port, shutdown_grace_period_ms } — see the Health Check section below
 
     # Startup SQL run before any queue is created (load extensions, ATTACH DuckLake catalogs)
     startup_script_provider {
