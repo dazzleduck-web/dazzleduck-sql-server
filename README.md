@@ -488,6 +488,7 @@ configure `ingestion_queue_table_mapping` entries:
 | `schema` | Yes | Schema within the catalog |
 | `table` | Yes | Target table name |
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
+| `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
 | `additional_parameters` | No | Extra key/value pairs, including the watermark spec below |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
@@ -519,6 +520,32 @@ SELECT * FROM __this WHERE level != 'DEBUG'
 -- Add ingestion timestamp
 SELECT id, ts, msg, current_timestamp AS ingested_at FROM __this
 ```
+
+### View-Based Transformation
+
+Instead of embedding the transformation SQL in configuration, a mapping can point at a DuckDB
+view. The server reads the view's definition and rewrites every reference to `input_table`
+into the `__this` placeholder — the view body becomes the transformation:
+
+```hocon
+ingestion_queue_table_mapping = [
+    {
+        ingestion_queue = "logs"
+        catalog = "my_catalog"
+        schema  = "main"
+        table   = "logs"
+        view        = "my_catalog.main.logs_transform"   # CREATE VIEW ... AS SELECT ... FROM my_catalog.main.raw_logs
+        input_table = "my_catalog.main.raw_logs"         # the table the view reads; becomes __this
+    }
+]
+```
+
+`view` and `input_table` must both be set (and are mutually exclusive with `transformation`);
+both must be fully qualified as `catalog.schema.name`. The resolution is validated at startup,
+so a missing or malformed view fails fast. Because queue state refreshes when the DuckLake
+catalog's schema version changes (which includes view DDL), altering the view updates the
+transformation at runtime — no config change or restart needed. The dynamic SQLite provider
+supports the same pair via its `view_name` / `input_table` registry columns.
 
 ### Watermarks
 

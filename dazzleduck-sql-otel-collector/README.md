@@ -306,7 +306,13 @@ otel_collector {
                 catalog = "my_catalog"
                 schema  = "main"
                 table   = "logs"
+                # Inline transformation (SELECT over the __this placeholder):
                 # transformation = "CAST(timestamp AS DATE) AS date, severity_text AS level"
+                # ... OR a view-based transformation — the view's definition is used, with
+                # input_table rewritten to __this. Mutually exclusive with transformation;
+                # editing the view updates the transformation at runtime, no restart:
+                # view        = "my_catalog.main.logs_transform"
+                # input_table = "my_catalog.main.raw_logs"
                 # additional_parameters {   # optional per-batch watermark row, committed
                 #     watermark_table                = "ingest_watermark"   # with the file registration
                 #     watermark_timestamp_column     = "timestamp"

@@ -108,6 +108,11 @@ The `ingestion/` package implements the server's write path:
   producer sequences on failed writes, and drains cleanly on shutdown
 - `ParquetIngestionQueue` — writes buckets with `COPY (...) TO` (Parquet, optional
   `PARTITION_BY`), applies per-queue SQL transformations via the `__this` placeholder
+- View-based transformations — a mapping may declare `view` + `input_table` (fully qualified,
+  mutually exclusive with `transformation`): `DuckLakeIngestionHandler` reads the view's
+  definition from `duckdb_views()` and rewrites the input-table reference to `__this`
+  (`Transformations.rewriteTableAsThis`), so the transformation is maintained as SQL DDL and
+  picked up on schema-version refresh without a restart
 - `WatermarkSpec` — per-group MIN timestamp, MAX timestamp, and row count computed per batch and
   inserted into a watermark table in the same transaction as the DuckLake file registration
 - `DuckLakeIngestionTaskFactoryProvider` — static queue-to-table mapping from config
