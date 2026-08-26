@@ -145,6 +145,9 @@ public class DuckLakeFlightViewTransformationTest {
     void teardown() throws Exception {
         if (client != null) client.close();
         if (server != null) server.close();
+        // Shuts down the producer's executor pools, drains ingestion queues,
+        // and removes its temp write directory (same order Runtime uses).
+        if (producer != null) producer.close();
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.execute(conn, "DETACH " + DUCKLAKE_CATALOG);
         }
