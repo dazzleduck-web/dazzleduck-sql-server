@@ -53,8 +53,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class DuckLakeFlightViewTransformationTest {
 
-    private static final String USER = "admin";
-    private static final String PASSWORD = "password";
+    private static final String USER = FlightTestUtils.USER;
+    private static final String PASSWORD = FlightTestUtils.PASSWORD;
     private static final String CATALOG_NAME = "memory";
     private static final String SCHEMA_NAME = "main";
 
@@ -107,14 +107,16 @@ public class DuckLakeFlightViewTransformationTest {
 
         Location serverLocation = FlightTestUtils.findNextLocation();
         String producerId = UUID.randomUUID().toString();
+        // Only two knobs differ from the defaults: flush every batch immediately, and
+        // refresh queue state on every request so a view change is picked up at once.
+        var defaults = DuckDBFlightSqlProducer.DEFAULT_INGESTION_CONFIG;
         var ingestionConfig = new IngestionConfig(
-                1,                       // minBucketSize: flush every batch immediately
-                1024 * 1024 * 1024L,     // maxBucketSize
-                2048,                    // maxBatches
-                256 * 1024 * 1024L,      // maxPendingWrite
-                Duration.ofSeconds(2),   // maxDelay
-                Duration.ZERO            // configRefreshDelay: refresh queue state per request
-        );
+                1,
+                defaults.maxBucketSize(),
+                defaults.maxBatches(),
+                defaults.maxPendingWrite(),
+                defaults.maxDelay(),
+                Duration.ZERO);
         producer = new DuckDBFlightSqlProducer(
                 serverLocation,
                 producerId,
