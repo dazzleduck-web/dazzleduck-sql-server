@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.otel.collector;
 
+import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.auth.Validator;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.otel.collector.auth.JwtServerInterceptor;
@@ -101,7 +102,13 @@ public class OtelCollectorServer implements Closeable {
                     .addService(traceService)
                     .addService(metricsService);
             builder.intercept(new JwtServerInterceptor(secretKey, userHashMap,
-                    props.getJwtExpiration(), props.getLoginUrl(), props.isVerifySignature()));
+                    props.getJwtExpiration(), props.getLoginUrl(), props.isVerifySignature(),
+                    props.getCluster()));
+
+            if (props.getCluster() != null) {
+                log.info("Cluster scoping enabled — tokens must carry {} = '{}'",
+                        Headers.CLAIM_CLUSTER, props.getCluster());
+            }
 
             if (props.getLoginUrl() != null) {
                 log.info("JWT authentication enabled with login delegation to {}", props.getLoginUrl());

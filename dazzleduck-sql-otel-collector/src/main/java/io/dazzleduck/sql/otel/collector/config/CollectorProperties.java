@@ -31,6 +31,8 @@ public class CollectorProperties {
     private String authentication = "jwt";
     private String secretKey = null;
     private String loginUrl = null;
+    // Cluster this collector serves; null disables the x-dd-cluster claim check.
+    private String cluster = null;
     private Map<String, String> users = new HashMap<>();
     private Duration jwtExpiration = Duration.ofHours(1);
     private MeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -106,6 +108,14 @@ public class CollectorProperties {
 
     public void setLoginUrl(String loginUrl) {
         this.loginUrl = loginUrl;
+    }
+
+    public String getCluster() {
+        return cluster;
+    }
+
+    public void setCluster(String cluster) {
+        this.cluster = cluster;
     }
 
     public Map<String, String> getUsers() {

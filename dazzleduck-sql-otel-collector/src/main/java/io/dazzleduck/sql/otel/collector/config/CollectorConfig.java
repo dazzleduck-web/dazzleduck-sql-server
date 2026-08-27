@@ -186,6 +186,14 @@ public class CollectorConfig {
         return getString("login_url", null);
     }
 
+    /**
+     * Cluster this collector serves. When set, every call must carry a matching
+     * {@code x-dd-cluster} JWT claim; when unset, the claim is ignored.
+     */
+    public String getCluster() {
+        return getString("cluster", null);
+    }
+
     public Map<String, String> getUsers() {
         String fullPath = CONFIG_PREFIX + ".users";
         var users = new HashMap<String, String>();
@@ -233,6 +241,7 @@ public class CollectorConfig {
         props.setAuthentication(getAuthentication());
         props.setSecretKey(getSecretKey());
         props.setLoginUrl(getLoginUrl());
+        props.setCluster(getCluster());
         props.setUsers(getUsers());
         props.setJwtExpiration(getJwtExpiration());
         props.setServiceName(getServiceName());

@@ -107,15 +107,23 @@ public class OtelCollectorCustomQueueTest {
 
     /** Generates a signed JWT embedding the given queue ID as a claim. */
     static String tokenWithQueueClaim(String queueId) {
+        return tokenWithQueueClaim(queueId, null);
+    }
+
+    /** Generates a signed JWT with the queue claim and, when non-null, a cluster claim. */
+    static String tokenWithQueueClaim(String queueId, String cluster) {
         SecretKey key = Validator.fromBase64String(SECRET_KEY_BASE64);
         Calendar exp = Calendar.getInstance();
         exp.add(Calendar.HOUR, 1);
-        return Jwts.builder()
+        var builder = Jwts.builder()
                 .subject("admin")
                 .claim(Headers.CLAIM_INGESTION_QUEUE, queueId)
                 .expiration(exp.getTime())
-                .signWith(key)
-                .compact();
+                .signWith(key);
+        if (cluster != null) {
+            builder.claim(Headers.CLAIM_CLUSTER, cluster);
+        }
+        return builder.compact();
     }
 
     static Metadata bearerMetadata(String token) {

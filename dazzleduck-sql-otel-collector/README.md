@@ -105,6 +105,27 @@ grpcurl -plaintext \
 
 **Login delegation:** Set `login_url` to forward Basic auth credentials to an external HTTP service (same pattern as the DazzleDuck Flight SQL server).
 
+### Cluster Scoping
+
+Optionally bind tokens to one cluster (an audience-style check). Configure the cluster this
+collector serves:
+
+```hocon
+otel_collector {
+    cluster = "prod-east"
+}
+```
+
+| Collector `cluster` config | JWT `x-dd-cluster` claim | Result |
+|---|---|---|
+| set | matching | allowed (queue check still applies) |
+| set | different or absent | rejected — `PERMISSION_DENIED` |
+| unset (default) | anything | check skipped — behavior unchanged |
+
+This stops a token minted for one cluster being replayed against another cluster's collector
+when the deployments share a `secret_key` or login service. Roll out by first adding the
+`x-dd-cluster` claim to issued tokens everywhere, then enabling `cluster` on each collector.
+
 ## Health Check
 
 The collector runs a small embedded HTTP server (plain JDK `HttpServer`, no extra dependency)

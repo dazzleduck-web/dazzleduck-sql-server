@@ -64,6 +64,10 @@ public class Headers {
     // JWT claim carrying the target ingestion queue ID; same wire value as HEADER_INGESTION_QUEUE.
     public static final String CLAIM_INGESTION_QUEUE = "x-dd-ingestion-queue";
 
+    // JWT claim binding a token to one cluster (audience-style check). A collector configured
+    // with a cluster name rejects tokens whose claim is absent or different.
+    public static final String CLAIM_CLUSTER = "x-dd-cluster";
+
     public static final Set<String> SUPPORTED_HEADERS = Set.of(HEADER_FETCH_SIZE, HEADER_DATABASE, HEADER_SCHEMA, HEADER_SPLIT_SIZE,
             HEADER_DATA_PARTITION, HEADER_DATA_FORMAT, HEADER_PRODUCER_ID, HEADER_PRODUCER_BATCH_ID, HEADER_SORT_ORDER,
             HEADER_APP_DATA_TRANSFORMATION, HEADER_PATH, HEADER_TABLE, HEADER_FUNCTION, HEADER_FILTER, HEADER_ACCESS,
