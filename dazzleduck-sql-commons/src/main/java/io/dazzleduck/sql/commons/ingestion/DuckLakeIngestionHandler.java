@@ -180,15 +180,25 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
 
     @Override
     public WatermarkSpec getWatermarkSpec(String queueId) {
-        QueueIdToTableMapping mapping = queueIdsToTableMappings.get(queueId);
-        if (mapping == null) mapping = queueIdsToTableMappings.get(extractSuffix(queueId));
+        QueueIdToTableMapping mapping = mappingFor(queueId);
         return mapping == null ? null : WatermarkSpec.fromParameters(queueId, mapping.additionalParameters());
     }
 
     @Override
+    public boolean extractClaims(String queueId) {
+        QueueIdToTableMapping mapping = mappingFor(queueId);
+        return mapping != null && mapping.extractClaims();
+    }
+
+    /** Mapping for {@code queueId}, resolved exact-first with the path-suffix fallback. */
+    private QueueIdToTableMapping mappingFor(String queueId) {
+        String key = resolveStateKey(queueId);
+        return key == null ? null : queueIdsToTableMappings.get(key);
+    }
+
+    @Override
     public PostIngestionTask createPostIngestionTask(IngestionResult result) {
-        QueueIdToTableMapping mapping = queueIdsToTableMappings.get(result.queueName());
-        if (mapping == null) mapping = queueIdsToTableMappings.get(extractSuffix(result.queueName()));
+        QueueIdToTableMapping mapping = mappingFor(result.queueName());
         if (mapping == null) {
             // No DuckLake mapping for this queue — write-only mode, no catalog registration.
             logger.atDebug().log("No DuckLake mapping for queue '{}', skipping catalog registration", result.queueName());
@@ -335,8 +345,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * partition columns.
      */
     private QueueState computeRefreshedState(String key, QueueState existing) {
-        QueueIdToTableMapping mapping = queueIdsToTableMappings.get(key);
-        if (mapping == null) mapping = queueIdsToTableMappings.get(extractSuffix(key));
+        QueueIdToTableMapping mapping = mappingFor(key);
         if (mapping == null) return existing; // unknown queue — leave unchanged
 
         long currentSchemaChangeId = fetchSchemaChangeId(mapping.catalog(), mapping.schema(), mapping.table());
@@ -358,6 +367,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     private static QueueState buildState(QueueIdToTableMapping mapping, long schemaChangeId, Instant refreshedAt) {
         String path           = fetchPath(mapping.catalog(), mapping.schema(), mapping.table());
         String transformation = resolveTransformation(mapping);
+        warnIfClaimsColumnMissing(mapping);
         List<ResolvedPartition> partitions = fetchPartitions(mapping.catalog(), mapping.schema(), mapping.table());
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
@@ -412,6 +422,26 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         } catch (SQLException e) {
             logger.atDebug().setCause(e).log("Failed to get schema_version for catalog {}", catalogName);
             return 0L;
+        }
+    }
+
+    /**
+     * DuckLake registration tolerates extra file columns, so with {@code extract_claims} on
+     * a target table missing the claims column silently drops the data — warn loudly instead.
+     */
+    private static void warnIfClaimsColumnMissing(QueueIdToTableMapping mapping) {
+        if (!mapping.extractClaims()) return;
+        try (var conn = ConnectionPool.getConnection()) {
+            if (!DuckLakeTableManager.currentColumnNames(conn, mapping).contains(CLAIMS_COLUMN)) {
+                logger.warn("Queue '{}' has extract_claims enabled but table {}.{}.{} has no '{}' column — "
+                                + "claims will be silently dropped at registration. "
+                                + "Run: ALTER TABLE {}.{}.{} ADD COLUMN {} MAP(VARCHAR, VARCHAR)",
+                        mapping.ingestionQueue(), mapping.catalog(), mapping.schema(), mapping.table(),
+                        CLAIMS_COLUMN, mapping.catalog(), mapping.schema(), mapping.table(), CLAIMS_COLUMN);
+            }
+        } catch (SQLException e) {
+            logger.atDebug().setCause(e).log("Could not verify '{}' column on {}.{}.{}",
+                    CLAIMS_COLUMN, mapping.catalog(), mapping.schema(), mapping.table());
         }
     }
 

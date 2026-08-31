@@ -107,15 +107,21 @@ public class OtelCollectorCustomQueueTest {
 
     /** Generates a signed JWT embedding the given queue ID as a claim. */
     static String tokenWithQueueClaim(String queueId) {
+        return tokenWithQueueClaim(queueId, java.util.Map.of());
+    }
+
+    /** Generates a signed JWT with the queue claim plus the given extra claims. */
+    static String tokenWithQueueClaim(String queueId, java.util.Map<String, String> extraClaims) {
         SecretKey key = Validator.fromBase64String(SECRET_KEY_BASE64);
         Calendar exp = Calendar.getInstance();
         exp.add(Calendar.HOUR, 1);
-        return Jwts.builder()
+        var builder = Jwts.builder()
                 .subject("admin")
                 .claim(Headers.CLAIM_INGESTION_QUEUE, queueId)
                 .expiration(exp.getTime())
-                .signWith(key)
-                .compact();
+                .signWith(key);
+        extraClaims.forEach(builder::claim);
+        return builder.compact();
     }
 
     static Metadata bearerMetadata(String token) {
@@ -125,6 +131,11 @@ public class OtelCollectorCustomQueueTest {
     }
 
     static io.dazzleduck.sql.commons.ingestion.IngestionHandler noopHandler(String outputPath, String... knownQueues) {
+        return noopHandler(id -> outputPath, false, knownQueues);
+    }
+
+    static io.dazzleduck.sql.commons.ingestion.IngestionHandler noopHandler(
+            java.util.function.Function<String, String> pathFor, boolean extractClaims, String... knownQueues) {
         java.util.Set<String> known = new java.util.LinkedHashSet<>(java.util.List.of(knownQueues));
         return new io.dazzleduck.sql.commons.ingestion.IngestionHandler() {
             @Override public io.dazzleduck.sql.commons.ingestion.PostIngestionTask
@@ -133,8 +144,9 @@ public class OtelCollectorCustomQueueTest {
             }
             @Override public java.util.Set<String> getKnownQueues() { return known; }
             // Mirror real handlers: a target path exists only for a known queue (null ⇒ unknown).
-            @Override public String getTargetPath(String id) { return known.contains(id) ? outputPath : null; }
+            @Override public String getTargetPath(String id) { return known.contains(id) ? pathFor.apply(id) : null; }
             @Override public String[] getPartitionBy(String id) { return new String[0]; }
+            @Override public boolean extractClaims(String id) { return extractClaims; }
         };
     }
 

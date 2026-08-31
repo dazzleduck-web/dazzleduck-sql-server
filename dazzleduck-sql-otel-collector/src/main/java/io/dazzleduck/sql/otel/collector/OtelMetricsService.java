@@ -59,7 +59,7 @@ public class OtelMetricsService extends MetricsServiceGrpc.MetricsServiceImplBas
         var sample = metrics.startSample();
 
         try {
-            Path arrowFile = base.writeArrowFile(entries, OtelMetricSchema.SCHEMA, MetricBatchWriter::write);
+            Path arrowFile = base.writeArrowFile(queueId, entries, OtelMetricSchema.SCHEMA, MetricBatchWriter::write);
             base.addBatch(queue, arrowFile).whenComplete(
                     OtelServiceBase.batchCompleteHandler(arrowFile, metricCount, queueId,
                             sample, metrics,

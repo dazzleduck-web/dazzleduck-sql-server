@@ -30,6 +30,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
@@ -141,15 +142,31 @@ class OtelServiceBase implements Closeable {
         return queue.add(batch).thenApply(ignored -> null);
     }
 
+    /** Verified JWT claims for the queue, or {@code null} when it does not extract claims. */
+    private Map<String, String> claimsFor(String queueId) {
+        if (!handler.extractClaims(queueId)) {
+            return null;
+        }
+        Map<String, String> claims = JwtServerInterceptor.CLAIMS_CONTEXT_KEY.get();
+        return claims != null ? claims : Map.of();
+    }
+
     /**
      * Serialises {@code entries} to a temporary Arrow IPC file using the provided schema
      * and batch writer. Deletes the partial file before rethrowing on any failure.
+     * Queues with {@code extract_claims} get the claims-column schema variant, filled from
+     * the caller's verified JWT claims after the batch writer runs.
      */
-    <E> Path writeArrowFile(List<E> entries, Schema schema,
+    <E> Path writeArrowFile(String queueId, List<E> entries, Schema schema,
                              BiConsumer<List<E>, VectorSchemaRoot> batchWriter) throws IOException {
+        Map<String, String> claims = claimsFor(queueId);
+        Schema effective = claims == null ? schema : OtelSchemaFields.withClaimsColumn(schema);
         Path tempFile = tempDir.resolve("batch_" + UUID.randomUUID() + ".arrow");
-        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(effective, allocator)) {
             batchWriter.accept(entries, root);
+            if (claims != null) {
+                ClaimsColumnWriter.write(root, claims);
+            }
             try (FileOutputStream fos = new FileOutputStream(tempFile.toFile());
                  ArrowStreamWriter writer = io.dazzleduck.sql.commons.io.ResultStreams.newArrowStreamWriter(
                          root, null, fos,

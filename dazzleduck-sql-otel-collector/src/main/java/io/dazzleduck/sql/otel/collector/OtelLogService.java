@@ -59,7 +59,7 @@ public class OtelLogService extends LogsServiceGrpc.LogsServiceImplBase implemen
         var sample = metrics.startSample();
 
         try {
-            Path arrowFile = base.writeArrowFile(entries, OtelLogSchema.SCHEMA, LogRecordBatchWriter::write);
+            Path arrowFile = base.writeArrowFile(queueId, entries, OtelLogSchema.SCHEMA, LogRecordBatchWriter::write);
             base.addBatch(queue, arrowFile).whenComplete(
                     OtelServiceBase.batchCompleteHandler(arrowFile, recordCount, queueId,
                             sample, metrics,

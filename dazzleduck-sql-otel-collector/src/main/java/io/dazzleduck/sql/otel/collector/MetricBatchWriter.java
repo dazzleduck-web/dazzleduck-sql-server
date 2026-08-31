@@ -251,15 +251,7 @@ public class MetricBatchWriter {
         writer.setPosition(index);
         writer.startMap();
         for (KeyValue kv : kvList) {
-            writer.startEntry();
-            ((BaseWriter.ListWriter) writer.key()).varChar().writeVarChar(kv.getKey());
-            String val = LogRecordConverter.anyValueToString(kv.getValue());
-            if (val != null) {
-                ((BaseWriter.ListWriter) writer.value()).varChar().writeVarChar(val);
-            } else {
-                ((BaseWriter.ListWriter) writer.value()).varChar().writeNull();
-            }
-            writer.endEntry();
+            OtelSchemaFields.writeEntry(writer, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
         }
         writer.endMap();
     }

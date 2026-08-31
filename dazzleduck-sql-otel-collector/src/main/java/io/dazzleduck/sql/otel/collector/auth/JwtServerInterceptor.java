@@ -6,6 +6,7 @@ import io.dazzleduck.sql.common.auth.JwtClaimsExtractor;
 import io.dazzleduck.sql.common.auth.LoginResponse;
 import io.dazzleduck.sql.commons.auth.Validator;
 import io.grpc.*;
+import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
 import org.slf4j.Logger;
@@ -21,7 +22,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Calendar;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 public class JwtServerInterceptor implements ServerInterceptor {
 
@@ -30,6 +33,19 @@ public class JwtServerInterceptor implements ServerInterceptor {
     /** gRPC context key populated from the {@value Headers#CLAIM_INGESTION_QUEUE} JWT claim. */
     public static final Context.Key<String> QUEUE_CONTEXT_KEY =
             Context.key(Headers.CLAIM_INGESTION_QUEUE);
+
+    /**
+     * gRPC context key carrying the caller's verified JWT claims minus the registered token
+     * claims ({@code exp}, {@code iat}, {@code nbf}, {@code iss}, {@code aud}, {@code jti}),
+     * values stringified. Consumed by signal services for queues with {@code extract_claims} on.
+     */
+    public static final Context.Key<Map<String, String>> CLAIMS_CONTEXT_KEY =
+            Context.key("verified-claims");
+
+    /** Token-plumbing claims that never reach the claims column. */
+    private static final Set<String> REGISTERED_CLAIMS = Set.of(
+            Claims.EXPIRATION, Claims.ISSUED_AT, Claims.NOT_BEFORE,
+            Claims.ISSUER, Claims.AUDIENCE, Claims.ID);
     private static final Metadata.Key<String> AUTHORIZATION_KEY =
             Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
     private static final String BEARER_PREFIX = "Bearer ";
@@ -111,7 +127,7 @@ public class JwtServerInterceptor implements ServerInterceptor {
             String bearerValue = token.startsWith(BEARER_PREFIX) ? token.substring(BEARER_PREFIX.length()) : token;
             try {
                 var claims = JwtClaimsExtractor.parseJwtClaims(bearerValue, jwtParser, verifySignature);
-                return startCallWithQueueContext(claims, wrappedCall, headers, next);
+                return startCallWithClaimContexts(claims, wrappedCall, headers, next);
             } catch (Exception ignored) {}
             return next.startCall(wrappedCall, headers);
         } catch (Exception e) {
@@ -151,7 +167,7 @@ public class JwtServerInterceptor implements ServerInterceptor {
             String token, ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         try {
             var claims = JwtClaimsExtractor.parseJwtClaims(token, jwtParser, verifySignature);
-            return startCallWithQueueContext(claims, call, headers, next);
+            return startCallWithClaimContexts(claims, call, headers, next);
         } catch (Exception e) {
             log.debug("JWT validation failed: {}", e.getMessage());
             call.close(Status.UNAUTHENTICATED.withDescription("Invalid or expired JWT token"), new Metadata());
@@ -159,17 +175,28 @@ public class JwtServerInterceptor implements ServerInterceptor {
         }
     }
 
-    private <ReqT, RespT> ServerCall.Listener<ReqT> startCallWithQueueContext(
-            io.jsonwebtoken.Claims claims,
+    private <ReqT, RespT> ServerCall.Listener<ReqT> startCallWithClaimContexts(
+            Claims claims,
             ServerCall<ReqT, RespT> call,
             Metadata headers,
             ServerCallHandler<ReqT, RespT> next) {
+        Context ctx = Context.current().withValue(CLAIMS_CONTEXT_KEY, filterClaims(claims));
         String queueId = claims.get(Headers.CLAIM_INGESTION_QUEUE, String.class);
         if (queueId != null) {
-            Context ctx = Context.current().withValue(QUEUE_CONTEXT_KEY, queueId);
-            return Contexts.interceptCall(ctx, call, headers, next);
+            ctx = ctx.withValue(QUEUE_CONTEXT_KEY, queueId);
         }
-        return next.startCall(call, headers);
+        return Contexts.interceptCall(ctx, call, headers, next);
+    }
+
+    /** Drops the registered token claims and stringifies the rest. */
+    static Map<String, String> filterClaims(Claims claims) {
+        Map<String, String> filtered = new LinkedHashMap<>();
+        claims.forEach((key, value) -> {
+            if (value != null && !REGISTERED_CLAIMS.contains(key)) {
+                filtered.put(key, String.valueOf(value));
+            }
+        });
+        return filtered;
     }
 
     private String generateToken(String subject) {

@@ -43,6 +43,7 @@ public class ConfigConstants {
     public static final String TRANSFORMATION_KEY = "transformation";
     public static final String VIEW_KEY           = "view";
     public static final String INPUT_TABLE_KEY    = "input_table";
+    public static final String EXTRACT_CLAIMS_KEY = "extract_claims";
 
     // Cursor / open-query protection keys
     public static final String CURSOR_TTL_MS_KEY              = "cursor_ttl_ms";

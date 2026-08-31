@@ -118,7 +118,7 @@ public final class DuckLakeTableManager {
         return mapping.transformation();
     }
 
-    private static List<String> currentColumnNames(DuckDBConnection conn, QueueIdToTableMapping mapping)
+    static List<String> currentColumnNames(DuckDBConnection conn, QueueIdToTableMapping mapping)
             throws SQLException {
         List<String> names = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(

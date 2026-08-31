@@ -2,6 +2,9 @@ package io.dazzleduck.sql.commons.ingestion;
 
 public interface IngestionHandler {
 
+    /** Name of the per-row JWT-claims MAP column stamped when {@link #extractClaims} is on. */
+    String CLAIMS_COLUMN = "claims";
+
     PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult);
 
     String getTargetPath(String queueId);
@@ -25,6 +28,9 @@ public interface IngestionHandler {
     default WatermarkSpec getWatermarkSpec(String queueId) { return null; }
 
     default boolean supportPartitionByHeader() { return true; }
+
+    /** Whether ingested rows carry a {@value #CLAIMS_COLUMN} MAP column from the caller's JWT. */
+    default boolean extractClaims(String queueId) { return false; }
 
     // -----------------------------------------------------------------------
     // Queue lifecycle

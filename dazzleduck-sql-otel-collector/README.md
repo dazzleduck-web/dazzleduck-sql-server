@@ -105,6 +105,44 @@ grpcurl -plaintext \
 
 **Login delegation:** Set `login_url` to forward Basic auth credentials to an external HTTP service (same pattern as the DazzleDuck Flight SQL server).
 
+### JWT Claims Column
+
+A queue mapping can opt into recording the caller's verified JWT claims on every ingested row:
+
+```hocon
+otel_collector.ingestion_task_factory_provider.ingestion_queue_table_mapping = [
+    { ingestion_queue = "logs", catalog = "my_catalog", schema = "main", table = "logs",
+      extract_claims = true }
+]
+```
+
+With `extract_claims = true`, each signal schema gains a trailing `claims` column of type
+`MAP(VARCHAR, VARCHAR)` — the same shape as `attributes` and `resource_attributes` — holding
+every claim from the token except the registered ones (`exp`, `iat`, `nbf`, `iss`, `aud`,
+`jti`). `sub` and custom claims are included, values stringified. The value is stamped per
+request at batch-write time, so it stays correct even when the ingestion queue combines
+batches from different tokens into one Parquet write.
+
+This makes per-request data available to transformations. For example, one shared view can
+derive a first-class column from any claim, ready for partitioning:
+
+```sql
+CREATE VIEW my_catalog.main.logs_transform AS
+SELECT *, claims['org_id'] AS org_id FROM my_catalog.main.raw_logs;
+
+ALTER TABLE my_catalog.main.logs SET PARTITIONED BY (org_id);
+```
+
+Notes:
+
+- DuckLake target tables need the column: `ALTER TABLE ... ADD COLUMN claims MAP(VARCHAR, VARCHAR)`.
+  A missing column is warned about at queue refresh — without it the claims are silently
+  dropped during file registration.
+- **Privacy**: enabling the flag persists token claims into the data. Make sure nothing
+  sensitive is minted into tokens before turning it on.
+- Changing the flag requires a restart (a bucket must not mix batches with and without the
+  column). Not available for queues registered via the dynamic SQLite provider.
+
 ## Health Check
 
 The collector runs a small embedded HTTP server (plain JDK `HttpServer`, no extra dependency)
@@ -147,7 +185,7 @@ and its export ack returned rather than the call being cut off mid-RPC.
 
 ## Arrow Schemas
 
-All schemas flatten the OTLP 3-level hierarchy (Resource → Scope → Record). Resource and scope fields are promoted to top-level columns.
+All schemas flatten the OTLP 3-level hierarchy (Resource → Scope → Record). Resource and scope fields are promoted to top-level columns. Queues with `extract_claims = true` additionally get a trailing `claims` map column (see [JWT Claims Column](#jwt-claims-column)); the tables below show the base schemas.
 
 ### Logs
 

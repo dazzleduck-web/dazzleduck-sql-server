@@ -22,6 +22,8 @@ import java.util.Map;
  *                    {@code "severity_number INTEGER, body VARCHAR"}), nullable; used only by
  *                    {@code manageTables} as the {@code __this} input over which the transformation
  *                    is described to derive the target table's columns
+ * @param extractClaims when true, ingested rows carry a {@code claims} MAP column from the
+ *                      caller's JWT (see {@code IngestionHandler#extractClaims})
  */
 public record QueueIdToTableMapping(
         String ingestionQueue,
@@ -33,7 +35,8 @@ public record QueueIdToTableMapping(
         String transformation,
         String view,
         String inputTable,
-        String inputSchema) {
+        String inputSchema,
+        boolean extractClaims) {
 
     /** Validates invariants on every construction path. */
     public QueueIdToTableMapping {
@@ -56,13 +59,13 @@ public record QueueIdToTableMapping(
     public QueueIdToTableMapping(String ingestionQueue, String catalog, String schema, String table,
                                  Map<String, String> additionalParameters, String transformation,
                                  String view, String inputTable) {
-        this(ingestionQueue, null, catalog, schema, table, additionalParameters, transformation, view, inputTable, null);
+        this(ingestionQueue, null, catalog, schema, table, additionalParameters, transformation, view, inputTable, null, false);
     }
 
     /** Convenience constructor for mappings that use an explicit transformation or none at all. */
     public QueueIdToTableMapping(String ingestionQueue, String catalog, String schema, String table,
                                  Map<String, String> additionalParameters, String transformation) {
-        this(ingestionQueue, null, catalog, schema, table, additionalParameters, transformation, null, null, null);
+        this(ingestionQueue, null, catalog, schema, table, additionalParameters, transformation, null, null, null, false);
     }
 
     public boolean hasViewTransformation() {
@@ -72,6 +75,12 @@ public record QueueIdToTableMapping(
     /** Returns a copy of this mapping with {@code inputSchema} set (registry-sourced field). */
     public QueueIdToTableMapping withInputSchema(String inputSchema) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
-                additionalParameters, transformation, view, inputTable, inputSchema);
+                additionalParameters, transformation, view, inputTable, inputSchema, extractClaims);
+    }
+
+    /** Returns a copy of this mapping with {@code extractClaims} set. */
+    public QueueIdToTableMapping withExtractClaims(boolean extractClaims) {
+        return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
+                additionalParameters, transformation, view, inputTable, inputSchema, extractClaims);
     }
 }

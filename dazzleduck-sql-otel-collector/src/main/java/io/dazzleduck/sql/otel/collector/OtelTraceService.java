@@ -59,7 +59,7 @@ public class OtelTraceService extends TraceServiceGrpc.TraceServiceImplBase impl
         var sample = metrics.startSample();
 
         try {
-            Path arrowFile = base.writeArrowFile(entries, OtelTraceSchema.SCHEMA, SpanBatchWriter::write);
+            Path arrowFile = base.writeArrowFile(queueId, entries, OtelTraceSchema.SCHEMA, SpanBatchWriter::write);
             base.addBatch(queue, arrowFile).whenComplete(
                     OtelServiceBase.batchCompleteHandler(arrowFile, spanCount, queueId,
                             sample, metrics,

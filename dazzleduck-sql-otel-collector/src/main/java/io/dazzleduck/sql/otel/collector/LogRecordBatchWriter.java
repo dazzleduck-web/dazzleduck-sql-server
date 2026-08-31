@@ -10,7 +10,6 @@ import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.impl.UnionMapWriter;
-import org.apache.arrow.vector.complex.writer.BaseWriter;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
@@ -101,15 +100,7 @@ public class LogRecordBatchWriter {
         writer.setPosition(index);
         writer.startMap();
         for (KeyValue kv : kvList) {
-            writer.startEntry();
-            ((BaseWriter.ListWriter) writer.key()).varChar().writeVarChar(kv.getKey());
-            String val = LogRecordConverter.anyValueToString(kv.getValue());
-            if (val != null) {
-                ((BaseWriter.ListWriter) writer.value()).varChar().writeVarChar(val);
-            } else {
-                ((BaseWriter.ListWriter) writer.value()).varChar().writeNull();
-            }
-            writer.endEntry();
+            OtelSchemaFields.writeEntry(writer, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
         }
         writer.endMap();
     }

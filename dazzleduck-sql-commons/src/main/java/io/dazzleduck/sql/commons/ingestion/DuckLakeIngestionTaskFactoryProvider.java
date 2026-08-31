@@ -42,9 +42,12 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             }
             String view       = c.hasPath(ConfigConstants.VIEW_KEY)        ? c.getString(ConfigConstants.VIEW_KEY)        : null;
             String inputTable = c.hasPath(ConfigConstants.INPUT_TABLE_KEY) ? c.getString(ConfigConstants.INPUT_TABLE_KEY) : null;
+            boolean extractClaims = c.hasPath(ConfigConstants.EXTRACT_CLAIMS_KEY)
+                    && c.getBoolean(ConfigConstants.EXTRACT_CLAIMS_KEY);
             QueueIdToTableMapping mapping = new QueueIdToTableMapping(
                     ingestionQueue, c.getString("catalog"), c.getString("schema"), c.getString("table"),
-                    additionalParameters, transformation, view, inputTable);
+                    additionalParameters, transformation, view, inputTable)
+                    .withExtractClaims(extractClaims);
             mappings.put(mapping.ingestionQueue(), mapping);
         });
         return mappings;
