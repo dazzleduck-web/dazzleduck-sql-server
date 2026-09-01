@@ -22,9 +22,15 @@ final class ClaimsColumnWriter {
         MapVector claimsVec = (MapVector) root.getVector(IngestionHandler.CLAIMS_COLUMN);
         UnionMapWriter writer = claimsVec.getWriter();
 
-        // Encode each key/value to UTF-8 once, not once per row.
-        Text[] keys = claims.keySet().stream().map(Text::new).toArray(Text[]::new);
-        Text[] values = claims.values().stream().map(Text::new).toArray(Text[]::new);
+        // Single entrySet pass: encodes once per batch and keeps key/value pairing guaranteed.
+        Text[] keys = new Text[claims.size()];
+        Text[] values = new Text[claims.size()];
+        int n = 0;
+        for (Map.Entry<String, String> claim : claims.entrySet()) {
+            keys[n] = new Text(claim.getKey());
+            values[n] = new Text(claim.getValue());
+            n++;
+        }
 
         for (int i = 0; i < rowCount; i++) {
             writer.setPosition(i);

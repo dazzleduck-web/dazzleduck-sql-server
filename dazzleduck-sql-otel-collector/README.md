@@ -136,8 +136,9 @@ ALTER TABLE my_catalog.main.logs SET PARTITIONED BY (org_id);
 Notes:
 
 - DuckLake target tables need the column: `ALTER TABLE ... ADD COLUMN claims MAP(VARCHAR, VARCHAR)`.
-  A missing column is warned about at queue refresh — without it the claims are silently
-  dropped during file registration.
+  For raw pass-through mappings, a missing column is warned about when the queue's state is
+  first built — without it the claims are silently dropped during file registration. Mappings
+  with a transformation/view control their own output shape and are not checked.
 - **Privacy**: enabling the flag persists token claims into the data. Make sure nothing
   sensitive is minted into tokens before turning it on.
 - Changing the flag requires a restart (a bucket must not mix batches with and without the

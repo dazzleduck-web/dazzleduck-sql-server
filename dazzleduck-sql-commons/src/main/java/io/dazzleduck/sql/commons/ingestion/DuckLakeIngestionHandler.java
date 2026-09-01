@@ -356,7 +356,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                     existing.partitionColumns(), existing.partitionProjections(),
                     existing.schemaChangeId(), clock.instant());
         }
-        return buildState(mapping, currentSchemaChangeId, clock.instant());
+        return buildState(mapping, currentSchemaChangeId, clock.instant(), existing == null);
     }
 
     /**
@@ -364,10 +364,13 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * Accepts a pre-fetched {@code schemaChangeId} to avoid a redundant round-trip when
      * called from {@link #getOrRefreshState}.
      */
-    private static QueueState buildState(QueueIdToTableMapping mapping, long schemaChangeId, Instant refreshedAt) {
+    private static QueueState buildState(QueueIdToTableMapping mapping, long schemaChangeId, Instant refreshedAt,
+                                         boolean firstBuild) {
         String path           = fetchPath(mapping.catalog(), mapping.schema(), mapping.table());
         String transformation = resolveTransformation(mapping);
-        warnIfClaimsColumnMissing(mapping);
+        if (firstBuild) {
+            warnIfClaimsColumnMissing(mapping, transformation);
+        }
         List<ResolvedPartition> partitions = fetchPartitions(mapping.catalog(), mapping.schema(), mapping.table());
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
@@ -378,7 +381,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
     private static QueueState buildState(QueueIdToTableMapping mapping, Instant refreshedAt) {
         long schemaChangeId = fetchSchemaChangeId(mapping.catalog(), mapping.schema(), mapping.table());
-        return buildState(mapping, schemaChangeId, refreshedAt);
+        return buildState(mapping, schemaChangeId, refreshedAt, true);
     }
 
     private static String resolveTransformation(QueueIdToTableMapping mapping) {
@@ -428,11 +431,14 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     /**
      * DuckLake registration tolerates extra file columns, so with {@code extract_claims} on
      * a target table missing the claims column silently drops the data — warn loudly instead.
+     * A transformation controls the output shape (it may consume claims without persisting
+     * them), so only raw pass-through mappings are checked, and only on the queue's first
+     * state build.
      */
-    private static void warnIfClaimsColumnMissing(QueueIdToTableMapping mapping) {
-        if (!mapping.extractClaims()) return;
+    private static void warnIfClaimsColumnMissing(QueueIdToTableMapping mapping, String transformation) {
+        if (!mapping.extractClaims() || transformation != null) return;
         try (var conn = ConnectionPool.getConnection()) {
-            if (!DuckLakeTableManager.currentColumnNames(conn, mapping).contains(CLAIMS_COLUMN)) {
+            if (!DuckLakeTableManager.hasColumn(conn, mapping, CLAIMS_COLUMN)) {
                 logger.warn("Queue '{}' has extract_claims enabled but table {}.{}.{} has no '{}' column — "
                                 + "claims will be silently dropped at registration. "
                                 + "Run: ALTER TABLE {}.{}.{} ADD COLUMN {} MAP(VARCHAR, VARCHAR)",

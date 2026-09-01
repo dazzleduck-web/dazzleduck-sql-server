@@ -1,4 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
+
+import io.dazzleduck.sql.common.ConfigConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +46,19 @@ public class DynamicDuckLakeIngestionTaskFactoryProvider extends AbstractIngesti
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to load ingestion queue mappings from: " + dbPath, e);
+        }
+    }
+
+    @Override
+    public void validate() {
+        super.validate();
+        if (config == null || !config.hasPath(ConfigConstants.INGESTION_QUEUE_TABLE_MAPPING_KEY)) return;
+        if (config.getConfigList(ConfigConstants.INGESTION_QUEUE_TABLE_MAPPING_KEY).stream()
+                .anyMatch(c -> c.hasPath(ConfigConstants.EXTRACT_CLAIMS_KEY)
+                        && c.getBoolean(ConfigConstants.EXTRACT_CLAIMS_KEY))) {
+            logger.warn("ingestion_queue_table_mapping is ignored by the dynamic provider — queue "
+                    + "configuration comes from the SQLite registry only; extract_claims will not take "
+                    + "effect and no claims column will be written");
         }
     }
 
