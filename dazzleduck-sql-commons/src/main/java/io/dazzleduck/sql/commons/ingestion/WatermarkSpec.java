@@ -27,7 +27,30 @@ import java.util.stream.Collectors;
  *       column the MAX lands in.</li>
  *   <li>{@code watermark_row_count_column} — required when the table is set; receives
  *       {@code COUNT(*)} for the group.</li>
+ *   <li>{@code watermark_snapshot_id_column} — OPTIONAL; receives the DuckLake snapshot the batch
+ *       committed at. Absent means the column is not written at all, which is the behaviour
+ *       every existing configuration keeps.</li>
  * </ul>
+
+ * <p><b>The snapshot id is stamped after the batch commits, not inside it.</b> A transaction
+ * cannot learn the snapshot it is about to create: {@code ducklake_current_snapshot()} returns the
+ * snapshot being READ, and the new id only exists once the commit completes. So when
+ * {@code watermark_snapshot_id_column} is configured, {@link DuckLakePostIngestionTask} follows the
+ * ingest transaction with a second statement on the SAME connection:
+ *
+ * <pre>{@code UPDATE <watermark table>
+ *      SET <snapshot column> = (SELECT * FROM ducklake_last_committed_snapshot('<catalog>'))
+ *    WHERE <snapshot column> IS NULL}</pre>
+ *
+ * {@code ducklake_last_committed_snapshot} is per-connection and the subquery is evaluated before
+ * the UPDATE's own commit, so the value recorded is the ingest batch's snapshot — the one that made
+ * both the data files and the watermark row visible — and never another writer's.
+ *
+ * <p>Two consequences worth knowing. The stamp is its own transaction, so it creates one extra
+ * snapshot per batch. And a crash between the two commits leaves the row with a NULL snapshot id;
+ * the {@code IS NULL} predicate makes the next batch sweep it up, and readers must tolerate NULL
+ * in the meantime. The predicate assumes a single writer per watermark table, which is the model
+ * already: one queue, one watermark table.
  *
  * <p>A group whose timestamps are all NULL still produces a row: NULL min and max, with the real
  * row count. Only a genuinely empty batch is skipped.
@@ -46,7 +69,14 @@ import java.util.stream.Collectors;
  * unknown {@code watermark_}-prefixed keys are rejected to surface typos.
  */
 public record WatermarkSpec(String table, String timestampColumn, List<String> groupColumns,
-                            String minTimestampColumn, String maxTimestampColumn, String rowCountColumn) {
+                            String minTimestampColumn, String maxTimestampColumn, String rowCountColumn,
+                            String snapshotIdColumn) {
+
+    /** Without a snapshot-id column — the shape every configuration had before that key existed. */
+    public WatermarkSpec(String table, String timestampColumn, List<String> groupColumns,
+                         String minTimestampColumn, String maxTimestampColumn, String rowCountColumn) {
+        this(table, timestampColumn, groupColumns, minTimestampColumn, maxTimestampColumn, rowCountColumn, null);
+    }
 
     public static final String TABLE_KEY = "watermark_table";
     public static final String TIMESTAMP_COLUMN_KEY = "watermark_timestamp_column";
@@ -54,9 +84,10 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
     public static final String MIN_TIMESTAMP_COLUMN_KEY = "watermark_min_timestamp_column";
     public static final String MAX_TIMESTAMP_COLUMN_KEY = "watermark_max_timestamp_column";
     public static final String ROW_COUNT_COLUMN_KEY = "watermark_row_count_column";
+    public static final String SNAPSHOT_ID_COLUMN_KEY = "watermark_snapshot_id_column";
 
     private static final List<String> KNOWN_KEYS = List.of(TABLE_KEY, TIMESTAMP_COLUMN_KEY, GROUP_COLUMNS_KEY,
-            MIN_TIMESTAMP_COLUMN_KEY, MAX_TIMESTAMP_COLUMN_KEY, ROW_COUNT_COLUMN_KEY);
+            MIN_TIMESTAMP_COLUMN_KEY, MAX_TIMESTAMP_COLUMN_KEY, ROW_COUNT_COLUMN_KEY, SNAPSHOT_ID_COLUMN_KEY);
 
     public WatermarkSpec {
         requireNonBlank(table, TABLE_KEY);
@@ -66,6 +97,10 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         requireNonBlank(minTimestampColumn, MIN_TIMESTAMP_COLUMN_KEY);
         requireNonBlank(maxTimestampColumn, MAX_TIMESTAMP_COLUMN_KEY);
         requireNonBlank(rowCountColumn, ROW_COUNT_COLUMN_KEY);
+        // Optional: null means "do not record it". Present-but-blank is a typo, not a choice.
+        if (snapshotIdColumn != null) {
+            requireNonBlank(snapshotIdColumn, SNAPSHOT_ID_COLUMN_KEY);
+        }
     }
 
     /**
@@ -90,6 +125,7 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         String minTimestampColumn = parameters.get(MIN_TIMESTAMP_COLUMN_KEY);
         String maxTimestampColumn = parameters.get(MAX_TIMESTAMP_COLUMN_KEY);
         String rowCountColumn = parameters.get(ROW_COUNT_COLUMN_KEY);
+        String snapshotIdColumn = parameters.get(SNAPSHOT_ID_COLUMN_KEY);
         if (isBlank(table) || isBlank(timestampColumn) || isBlank(minTimestampColumn)
                 || isBlank(maxTimestampColumn) || isBlank(rowCountColumn)) {
             throw new IllegalArgumentException(
@@ -100,7 +136,9 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         try {
             return new WatermarkSpec(table.trim(), timestampColumn.trim(),
                     parseGroupColumns(parameters.get(GROUP_COLUMNS_KEY)),
-                    minTimestampColumn.trim(), maxTimestampColumn.trim(), rowCountColumn.trim());
+                    minTimestampColumn.trim(), maxTimestampColumn.trim(), rowCountColumn.trim(),
+                    // Only absence means "unconfigured"; a blank value is rejected by the constructor.
+                    snapshotIdColumn == null ? null : snapshotIdColumn.trim());
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Queue '%s': %s".formatted(queueName, e.getMessage()), e);
         }
@@ -190,6 +228,24 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         return "INSERT INTO %s.%s.%s (%s) VALUES %s".formatted(
                 HeaderUtils.quoteIdentifier(catalog), HeaderUtils.quoteIdentifier(schema),
                 HeaderUtils.quoteIdentifier(table), columnList, values);
+    }
+
+    /**
+     * The statement that records the snapshot the batch committed at, or {@code null} when
+     * {@code watermark_snapshot_id_column} is unconfigured.
+     *
+     * <p>Runs AFTER the ingest transaction, on the same connection — see this class's header for
+     * why the id cannot be known inside it. {@code IS NULL} both scopes the update to rows this
+     * connection has just written and sweeps up any row a previous crash left unstamped.
+     */
+    public String snapshotStampSql(String catalog, String schema) {
+        if (snapshotIdColumn == null) {
+            return null;
+        }
+        String column = HeaderUtils.quoteIdentifier(snapshotIdColumn);
+        return "UPDATE %s.%s.%s SET %s = (SELECT * FROM ducklake_last_committed_snapshot('%s')) WHERE %s IS NULL"
+                .formatted(HeaderUtils.quoteIdentifier(catalog), HeaderUtils.quoteIdentifier(schema),
+                        HeaderUtils.quoteIdentifier(table), column, catalog.replace("'", "''"), column);
     }
 
     /** Group columns plus the three aggregates: MIN timestamp, MAX timestamp, row count. */

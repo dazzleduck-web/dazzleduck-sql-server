@@ -183,4 +183,68 @@ class WatermarkSpecTest {
                 "watermark_timestamp_column", "ts",
                 "watermark_max_timestamp_column", "max_ts")));
     }
+
+    @Test
+    void parsesTheOptionalSnapshotIdColumn() {
+        Map<String, String> params = new java.util.HashMap<>(Map.of(
+                WatermarkSpec.TABLE_KEY, "wm",
+                WatermarkSpec.TIMESTAMP_COLUMN_KEY, "ts",
+                WatermarkSpec.MIN_TIMESTAMP_COLUMN_KEY, "min_ts",
+                WatermarkSpec.MAX_TIMESTAMP_COLUMN_KEY, "max_ts",
+                WatermarkSpec.ROW_COUNT_COLUMN_KEY, "row_count"));
+        params.put(WatermarkSpec.SNAPSHOT_ID_COLUMN_KEY, " snapshot_id ");
+
+        assertEquals("snapshot_id", WatermarkSpec.fromParameters("q", params).snapshotIdColumn());
+    }
+
+    @Test
+    void snapshotIdColumnIsOptional() {
+        Map<String, String> params = Map.of(
+                WatermarkSpec.TABLE_KEY, "wm",
+                WatermarkSpec.TIMESTAMP_COLUMN_KEY, "ts",
+                WatermarkSpec.MIN_TIMESTAMP_COLUMN_KEY, "min_ts",
+                WatermarkSpec.MAX_TIMESTAMP_COLUMN_KEY, "max_ts",
+                WatermarkSpec.ROW_COUNT_COLUMN_KEY, "row_count");
+
+        WatermarkSpec spec = WatermarkSpec.fromParameters("q", params);
+
+        // Absent means the column is never written: every pre-existing configuration is unchanged.
+        assertNull(spec.snapshotIdColumn());
+        assertNull(spec.snapshotStampSql("cat", "main"));
+    }
+
+    @Test
+    void blankSnapshotIdColumnIsRejected() {
+        Map<String, String> params = new java.util.HashMap<>(Map.of(
+                WatermarkSpec.TABLE_KEY, "wm",
+                WatermarkSpec.TIMESTAMP_COLUMN_KEY, "ts",
+                WatermarkSpec.MIN_TIMESTAMP_COLUMN_KEY, "min_ts",
+                WatermarkSpec.MAX_TIMESTAMP_COLUMN_KEY, "max_ts",
+                WatermarkSpec.ROW_COUNT_COLUMN_KEY, "row_count"));
+        params.put(WatermarkSpec.SNAPSHOT_ID_COLUMN_KEY, "  ");
+
+        // Present-but-blank is a typo, not a way to disable it.
+        assertThrows(IllegalArgumentException.class, () -> WatermarkSpec.fromParameters("q", params));
+    }
+
+    @Test
+    void rendersTheSnapshotStamp() {
+        WatermarkSpec spec = new WatermarkSpec("wm", "ts", List.of(), "min_ts", "max_ts", "row_count", "snapshot_id");
+
+        // IS NULL scopes it to rows not yet stamped, which also sweeps up anything a crash between
+        // the two commits left behind. The catalog is a literal inside the function call.
+        assertEquals("UPDATE \"cat\".\"main\".\"wm\" SET \"snapshot_id\" = "
+                        + "(SELECT * FROM ducklake_last_committed_snapshot('cat')) WHERE \"snapshot_id\" IS NULL",
+                spec.snapshotStampSql("cat", "main"));
+    }
+
+    @Test
+    void snapshotIdColumnIsNotWrittenByTheInsert() {
+        WatermarkSpec spec = new WatermarkSpec("wm", "ts", List.of(), "min_ts", "max_ts", "row_count", "snapshot_id");
+
+        // The INSERT shape is unchanged: the id does not exist yet when this statement is built.
+        String sql = spec.insertSql("cat", "main", List.of(List.of("2026-08-01 00:00:00", "2026-08-01 00:05:00", "3")));
+
+        assertFalse(sql.contains("snapshot_id"), sql);
+    }
 }

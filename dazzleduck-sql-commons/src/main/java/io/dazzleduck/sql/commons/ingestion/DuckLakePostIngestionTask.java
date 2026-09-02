@@ -21,6 +21,13 @@ import java.util.Map;
  * registration and watermark commit or roll back together. This task never re-reads the written
  * files.
  *
+ * <p>When the spec also configures {@code watermark_snapshot_id_column}, a second statement runs
+ * on the SAME connection once that transaction has committed, recording the snapshot the batch
+ * committed at. It cannot be part of the transaction: a transaction cannot learn the snapshot it
+ * is about to create. See {@link WatermarkSpec} for the mechanism and its two consequences — one
+ * extra snapshot per batch, and a NULL that the next batch sweeps up if the process dies between
+ * the two commits.
+ *
  * <p>Limitation: queues registered through the dynamic SQLite registry
  * ({@link DynamicQueueRepository}) do not carry {@code additional_parameters}, so watermarks are
  * only available for statically configured queue mappings.
@@ -81,8 +88,14 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         if (watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty()) {
             queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows));
         }
+        String stampSql = watermarkSpec == null ? null : watermarkSpec.snapshotStampSql(catalogName, schemaName);
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.executeBatchInTxn(conn, queries.toArray(String[]::new));
+            if (stampSql != null) {
+                // Same connection, after the commit: ducklake_last_committed_snapshot() is
+                // per-connection and now names the transaction above.
+                ConnectionPool.execute(conn, stampSql);
+            }
         }
     }
 

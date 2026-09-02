@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -177,5 +178,69 @@ class DuckLakeWatermarkPostIngestionTest {
         List<String> rows = new ArrayList<>();
         ConnectionPool.collectAll(conn, sql, rs -> rs.getString("r")).forEach(rows::add);
         return rows;
+    }
+
+    /**
+     * With {@code watermark_snapshot_id_column} configured, the row records the snapshot the batch
+     * committed at — the same one that made the data files visible. The value cannot come from
+     * inside the ingest transaction (a transaction cannot learn the snapshot it is creating), so
+     * the task stamps it immediately afterwards on the same connection.
+     */
+    @Test
+    void recordsTheSnapshotTheBatchCommittedAt() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "ALTER TABLE %s.main.ingest_watermark ADD COLUMN snapshot_id BIGINT".formatted(CATALOG));
+        }
+        List<String> files = writeBatchFiles();
+
+        Map<String, String> params = new java.util.HashMap<>(watermarkParams("ingest_watermark"));
+        params.put(WatermarkSpec.SNAPSHOT_ID_COLUMN_KEY, "snapshot_id");
+        new DuckLakePostIngestionTask(result(files, computeRows(files)), CATALOG, "facts", "main", params).execute();
+
+        try (Connection conn = ConnectionPool.getConnection();
+             var st = conn.createStatement()) {
+            // Every watermark row carries an id, and they all carry the SAME one: a batch is one
+            // transaction, so one snapshot.
+            try (var rs = st.executeQuery(
+                    "SELECT count(*), count(snapshot_id), count(DISTINCT snapshot_id) FROM %s.main.ingest_watermark".formatted(CATALOG))) {
+                assertTrue(rs.next());
+                assertEquals(3, rs.getInt(1), "three groups in the batch");
+                assertEquals(3, rs.getInt(2), "none left NULL");
+                assertEquals(1, rs.getInt(3), "one batch, one snapshot");
+            }
+            // And it is the snapshot the DATA landed in, not a later one: reading the facts table
+            // at that version must already show the batch's rows. AT (VERSION => ...) takes no
+            // subquery, so the id is read out first.
+            long stamped;
+            try (var rs = st.executeQuery("SELECT max(snapshot_id) FROM %s.main.ingest_watermark".formatted(CATALOG))) {
+                assertTrue(rs.next());
+                stamped = rs.getLong(1);
+            }
+            try (var rs = st.executeQuery(
+                    "SELECT count(*) FROM %s.main.facts AT (VERSION => %d)".formatted(CATALOG, stamped))) {
+                assertTrue(rs.next());
+                assertEquals(4, rs.getInt(1), "the stamped snapshot already contains the batch's rows");
+            }
+        }
+    }
+
+    /** Without the key, the column is never touched — the shape every existing queue keeps. */
+    @Test
+    void leavesTheSnapshotColumnAloneWhenUnconfigured() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "ALTER TABLE %s.main.ingest_watermark ADD COLUMN snapshot_id BIGINT".formatted(CATALOG));
+        }
+        List<String> files = writeBatchFiles();
+
+        new DuckLakePostIngestionTask(result(files, computeRows(files)), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark")).execute();
+
+        try (Connection conn = ConnectionPool.getConnection();
+             var st = conn.createStatement();
+             var rs = st.executeQuery("SELECT count(*), count(snapshot_id) FROM %s.main.ingest_watermark".formatted(CATALOG))) {
+            assertTrue(rs.next());
+            assertEquals(3, rs.getInt(1));
+            assertEquals(0, rs.getInt(2), "unconfigured: the column stays NULL");
+        }
     }
 }
