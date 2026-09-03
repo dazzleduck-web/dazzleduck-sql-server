@@ -79,7 +79,8 @@ Image build instructions (base image, Jib, multi-arch manifests) live in
 [`dazzleduck-sql-runtime/docker/README.md`](dazzleduck-sql-runtime/docker/README.md).
 Release publishing is scripted in `scripts/docker-publish.sh`, which also builds the
 `dazzleduck/dazzleduck-otel-collector`, `dazzleduck/ducklake-compactor`, and
-`dazzleduck/dazzleduck-sql-scrapper` images.
+`dazzleduck/dazzleduck-sql-scrapper` images. The full release process — version bump, tests,
+tag, images, GitHub release — is documented in [`RELEASE.md`](RELEASE.md).
 
 ## HTTP API
 
