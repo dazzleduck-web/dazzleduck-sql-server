@@ -313,6 +313,74 @@ class DuckLakeWatermarkPostIngestionTest {
                 "the error should name the missing key, got: " + e.getMessage());
     }
 
+    /**
+     * The repair path, which only runs when a concurrent writer takes the predicted id. Every other
+     * test here commits unopposed, so the prediction is exact, {@code verifySnapshotId} returns
+     * early and {@link WatermarkSpec#updateSnapshotIdSql} never executes — leaving the subtlest
+     * query in the feature unexercised, and silently so, since the verify step logs its failures
+     * rather than throwing.
+     *
+     * <p>The lost race is reproduced by inserting a batch with a deliberately stale predicted id
+     * (the value an earlier batch legitimately holds) and then running the repair, which is the
+     * state a losing transaction actually commits in. The three rows discriminate between the
+     * rowid scoping and both simpler predicates that look adequate:
+     * <ul>
+     *   <li>{@code WHERE min_commit_snapshot_id IS NULL} would sweep up the stray row belonging to
+     *       a concurrent queue's in-flight batch on the same table.</li>
+     *   <li>{@code WHERE min_commit_snapshot_id = predicted} would clobber the earlier batch's
+     *       rows, which correctly hold exactly that id.</li>
+     * </ul>
+     */
+    @Test
+    void repairStampsOnlyTheRowsOfTheBatchThatLostTheRace() throws Exception {
+        // An earlier batch commits unopposed: its rows hold the exact snapshot it committed as.
+        List<String> first = writeSingleFile("r1.parquet", "king");
+        new DuckLakePostIngestionTask(result(first, computeRowsFor(first)), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark")).execute();
+        long firstSnapshot = maxSnapshot();
+
+        // A concurrent queue's in-flight batch on the shared watermark table: inserted, unstamped.
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, ("INSERT INTO %s.main.ingest_watermark "
+                    + "(county, state, min_ts, max_ts, row_count, min_commit_snapshot_id) VALUES "
+                    + "('stray', 'zz', TIMESTAMP '2026-01-01 00:00', TIMESTAMP '2026-01-01 00:00', 7, NULL)")
+                    .formatted(CATALOG));
+        }
+
+        // The losing batch: it predicted firstSnapshot, which was already taken by the time it
+        // committed, so its rows land carrying an id that belongs to someone else.
+        List<String> second = writeSingleFile("r2.parquet", "pierce");
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    SPEC.insertSql(CATALOG, "main", computeRowsFor(second), firstSnapshot)});
+        }
+        long secondSnapshot = maxSnapshot();
+        assertTrue(secondSnapshot > firstSnapshot,
+                "the losing batch must commit after the id it predicted, got " + secondSnapshot + " <= " + firstSnapshot);
+
+        // The repair, as DuckLakePostIngestionTask's verify step issues it.
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, SPEC.updateSnapshotIdSql(CATALOG, "main", secondSnapshot));
+        }
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(
+                    List.of("king=" + firstSnapshot, "pierce=" + secondSnapshot, "stray=null"),
+                    collect(conn, ("""
+                            SELECT county || '=' || coalesce(min_commit_snapshot_id::VARCHAR, 'null') AS r
+                            FROM %s.main.ingest_watermark ORDER BY county""").formatted(CATALOG)),
+                    "the repair must tighten only the losing batch's rows");
+        }
+    }
+
+    private long maxSnapshot() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            return Long.parseLong(collect(conn,
+                    "SELECT max(snapshot_id)::VARCHAR AS r FROM __ducklake_metadata_%s.ducklake_snapshot"
+                            .formatted(CATALOG)).get(0));
+        }
+    }
+
     private static List<String> collect(Connection conn, String sql) throws Exception {
         List<String> rows = new ArrayList<>();
         ConnectionPool.collectAll(conn, sql, rs -> rs.getString("r")).forEach(rows::add);
