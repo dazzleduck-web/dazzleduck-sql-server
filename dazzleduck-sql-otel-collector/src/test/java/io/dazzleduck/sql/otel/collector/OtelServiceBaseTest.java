@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -150,12 +151,26 @@ class OtelServiceBaseTest {
     }
 
     @Test
-    void genericFailure_mapsToInternalWithMessage() {
+    void writeFailure_mapsToUnavailableWithMessage() {
         var ex = new java.util.concurrent.CompletionException(
                 new java.io.IOException("disk full"));
         var sre = OtelServiceBase.toStatusError(ex);
-        assertEquals(Status.Code.INTERNAL, sre.getStatus().getCode());
+        // UNAVAILABLE, not INTERNAL: a batch that failed after being accepted is dropped by the
+        // write loop, and the OTel C++ exporter only retries the SDK's fixed status set — INTERNAL
+        // would have the producer discard the batch without retrying once.
+        assertEquals(Status.Code.UNAVAILABLE, sre.getStatus().getCode());
         assertEquals("disk full", sre.getStatus().getDescription());
+    }
+
+    @Test
+    void backpressure_isNotMappedToARetryableCode() {
+        var ex = new java.util.concurrent.CompletionException(
+                new PendingWriteExceededException(100, 50, 7));
+        var code = OtelServiceBase.toStatusError(ex).getStatus().getCode();
+        // Overload must not come back as a code gRPC retries on: clients would re-send at once and
+        // amplify the overload. RetryInfo (asserted above) is the throttling signal instead.
+        assertNotEquals(Status.Code.UNAVAILABLE, code);
+        assertEquals(Status.Code.RESOURCE_EXHAUSTED, code);
     }
 
     @Test

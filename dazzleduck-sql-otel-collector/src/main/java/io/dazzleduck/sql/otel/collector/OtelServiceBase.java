@@ -213,12 +213,29 @@ class OtelServiceBase implements Closeable {
     /**
      * Maps an ingestion failure to a meaningful gRPC status. Forwarding the raw exception would
      * make gRPC surface it as {@code UNKNOWN} with an empty message, so clients could not tell
-     * overload from a server bug. Backpressure ({@link PendingWriteExceededException} anywhere in
-     * the cause chain — it arrives wrapped in {@code CompletionException}) becomes
-     * {@code RESOURCE_EXHAUSTED} with {@code RetryInfo} carrying the queue's suggested retry
-     * delay, which OTLP exporters honor for throttling; an already-built {@code
-     * StatusRuntimeException} passes through; anything else becomes {@code INTERNAL} with the
-     * root cause's message.
+     * overload from a server bug.
+     *
+     * <p>Backpressure ({@link PendingWriteExceededException} anywhere in the cause chain — it
+     * arrives wrapped in {@code CompletionException}) becomes {@code RESOURCE_EXHAUSTED} with
+     * {@code RetryInfo} carrying the queue's suggested retry delay. Deliberately NOT a
+     * gRPC-retryable code: the Go and Java OTLP exporters honor the delay and back off, and
+     * turning overload into a retryable status would have every client re-send immediately and
+     * amplify the overload we are signalling. (The C++ exporter honors neither — see below — so a
+     * C++ producer drops the batch on backpressure until it grows its own retry layer.)
+     *
+     * <p>An already-built {@code StatusRuntimeException} passes through, which is how the
+     * permanent, caller-fault conditions keep their codes: {@code INVALID_ARGUMENT} for an
+     * unknown/absent queue claim, {@code FAILED_PRECONDITION} for a queue that is not ready.
+     *
+     * <p>Anything else is a write that failed after the batch was accepted — the bucket is dropped
+     * ({@code BulkIngestQueue}'s write loop) and the data is gone unless the producer sends it
+     * again. It becomes {@code UNAVAILABLE}, not {@code INTERNAL}, because the OTel C++ exporter's
+     * retryable set is fixed by the SDK at {@code CANCELLED, DEADLINE_EXCEEDED, ABORTED,
+     * OUT_OF_RANGE, DATA_LOSS, UNAVAILABLE} and is not configurable — {@code INTERNAL} means the
+     * producer discards the batch without a single retry. The trade-off is that a genuinely
+     * permanent failure (a malformed batch, a server bug) is now retried up to the client's
+     * attempt limit before being lost anyway; the collector's own {@code log.error} in
+     * {@link #batchCompleteHandler} remains the accurate diagnosis either way.
      */
     static StatusRuntimeException toStatusError(Throwable t) {
         Throwable root = t;
@@ -241,7 +258,7 @@ class OtelServiceBase implements Closeable {
             }
             root = current;
         }
-        return Status.INTERNAL
+        return Status.UNAVAILABLE
                 .withDescription(root.getMessage() != null ? root.getMessage() : root.getClass().getName())
                 .withCause(root)
                 .asRuntimeException();
