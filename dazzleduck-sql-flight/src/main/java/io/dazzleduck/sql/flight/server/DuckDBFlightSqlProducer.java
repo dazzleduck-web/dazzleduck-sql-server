@@ -919,6 +919,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                 bulkIngestionConfig.maxBatches(),
                 bulkIngestionConfig.maxPendingWrite(),
                 bulkIngestionConfig.maxDelay(),
+                bulkIngestionConfig.parquetCompression(),
                 ingestionHandler,
                 Executors.newSingleThreadScheduledExecutor(),
                 Clock.systemDefaultZone());

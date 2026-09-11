@@ -8,6 +8,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -592,6 +594,30 @@ public class ParquetIngestionQueueTest {
             TestUtils.isEqual(
                 sourceData(100),
                 "SELECT * FROM read_parquet('%s')".formatted(outputFile));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"zstd, ZSTD", "gzip, GZIP", "null, SNAPPY"}, nullValues = "null")
+    public void shouldWriteConfiguredCompressionCodec(String configured, String expected) throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        Path target = Files.createDirectories(tempDir.resolve("codec-" + expected));
+
+        try (var queue = new ParquetIngestionQueue(
+                TEST_APP_ID, INPUT_FORMAT, target.toString(), "codec-queue",
+                DEFAULT_MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
+                DEFAULT_MAX_DELAY, configured, createPostTaskFactory(new AtomicBoolean(), false),
+                service, clock)) {
+
+            var future = queue.add(createBatch(sourceFile1.toString(), "producer1", 0, DEFAULT_MIN_BATCH_SIZE + 1));
+            service.tick(1, TimeUnit.MILLISECONDS);
+            var result = future.get(2, SECONDS);
+
+            String outputFile = result.filesCreated().get(0);
+            assertEquals(expected, ConnectionPool.collectFirst(
+                    "SELECT string_agg(DISTINCT compression, ',') FROM parquet_metadata('%s')".formatted(outputFile),
+                    String.class));
         }
     }
 

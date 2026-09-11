@@ -18,8 +18,12 @@ public final class IngestionConfig {
 
     public IngestionConfig(long minBucketSize, long maxBucketSize, int maxBatches,
                            long maxPendingWrite, Duration maxDelay, Duration configRefreshDelay) {
-        this.delegate = new io.dazzleduck.sql.commons.ingestion.IngestionConfig(
-                minBucketSize, maxBucketSize, maxBatches, maxPendingWrite, maxDelay, configRefreshDelay);
+        this(new io.dazzleduck.sql.commons.ingestion.IngestionConfig(
+                minBucketSize, maxBucketSize, maxBatches, maxPendingWrite, maxDelay, configRefreshDelay));
+    }
+
+    private IngestionConfig(io.dazzleduck.sql.commons.ingestion.IngestionConfig delegate) {
+        this.delegate = delegate;
     }
 
     public long     minBucketSize()    { return delegate.minBucketSize(); }
@@ -28,11 +32,10 @@ public final class IngestionConfig {
     public long     maxPendingWrite()  { return delegate.maxPendingWrite(); }
     public Duration maxDelay()         { return delegate.maxDelay(); }
     public Duration configRefreshDelay(){ return delegate.configRefreshDelay(); }
+    public String   parquetCompression(){ return delegate.parquetCompression(); }
 
     public static IngestionConfig fromConfig(Config config) {
-        var b = io.dazzleduck.sql.commons.ingestion.IngestionConfig.fromConfig(config);
-        return new IngestionConfig(b.minBucketSize(), b.maxBucketSize(), b.maxBatches(),
-                b.maxPendingWrite(), b.maxDelay(), b.configRefreshDelay());
+        return new IngestionConfig(io.dazzleduck.sql.commons.ingestion.IngestionConfig.fromConfig(config));
     }
 
     /** Converts to the canonical commons type. */

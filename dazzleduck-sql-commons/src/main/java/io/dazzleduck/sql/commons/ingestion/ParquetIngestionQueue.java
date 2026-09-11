@@ -30,6 +30,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     private final IngestionHandler postIngestionHandler;
     private final String applicationId;
     private final String inputFormat;
+    private final String parquetCompression;
 
     /**
      * Per-phase commit timings. The write is two phases with different parallelism potential:
@@ -71,12 +72,34 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                                  IngestionHandler postIngestionHandler,
                                  ScheduledExecutorService executorService,
                                  Clock clock) {
+        this(applicationId, inputFormat, outputPath, ingestionQueue, minBucketSize, maxBucketSize,
+                maxBatches, maxPendingWrite, maxDelay, null, postIngestionHandler, executorService, clock);
+    }
+
+    /**
+     * @param parquetCompression codec for written Parquet files, or {@code null} for DuckDB's
+     *                           default; see {@link IngestionConfig#parquetCompression()}
+     */
+    public ParquetIngestionQueue(String applicationId,
+                                 String inputFormat,
+                                 String outputPath,
+                                 String ingestionQueue,
+                                 long minBucketSize,
+                                 long maxBucketSize,
+                                 int maxBatches,
+                                 long maxPendingWrite,
+                                 Duration maxDelay,
+                                 String parquetCompression,
+                                 IngestionHandler postIngestionHandler,
+                                 ScheduledExecutorService executorService,
+                                 Clock clock) {
         super(ingestionQueue, minBucketSize, maxBucketSize, maxBatches, maxPendingWrite, maxDelay, executorService, clock);
         this.outputPath = outputPath;
         this.queueId = ingestionQueue;
         this.postIngestionHandler = postIngestionHandler;
         this.applicationId = applicationId;
         this.inputFormat = inputFormat;
+        this.parquetCompression = parquetCompression;
         // The output path (local or object store) is expected to already exist — provisioning it is
         // the operator's responsibility, outside the scope of this project. We never create it here.
     }
@@ -212,14 +235,17 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
         var querySql = constructSourceRelation(writeTask);
 
+        String compressionClause = parquetCompression != null && "parquet".equalsIgnoreCase(outputFormat)
+                ? ", COMPRESSION %s".formatted(parquetCompression) : "";
+
         // Build SQL
         // https://duckdb.org/docs/stable/sql/statements/copy
         var sql = """
                 COPY
                     (%s)
                     TO '%s'
-                    (FORMAT %s %s, RETURN_FILES, APPEND);
-                """.formatted(querySql, fullFilePath, outputFormat, partitionByClause);
+                    (FORMAT %s%s %s, RETURN_FILES, APPEND);
+                """.formatted(querySql, fullFilePath, outputFormat, compressionClause, partitionByClause);
         return sql;
     }
 

@@ -108,6 +108,14 @@ The `ingestion/` package implements the server's write path:
   producer sequences on failed writes, and drains cleanly on shutdown
 - `ParquetIngestionQueue` — writes buckets with `COPY (...) TO` (Parquet, optional
   `PARTITION_BY`), applies per-queue SQL transformations via the `__this` placeholder
+- Output codec — `ingestion.parquet_compression` sets the codec for written Parquet files
+  (`uncompressed`, `snappy`, `gzip`, `zstd`, `brotli`, `lz4`, `lz4_raw`); it defaults to `snappy`
+  in `reference.conf`, and an unsupported value fails at startup. This covers ingestion only.
+  Compaction rewrites are configured on the DuckLake catalog itself:
+
+  ```sql
+  CALL my_catalog.set_option('parquet_compression', 'zstd');
+  ```
 - View-based transformations — a mapping may declare `view` + `input_table` (fully qualified,
   mutually exclusive with `transformation`): `DuckLakeIngestionHandler` reads the view's
   definition from `duckdb_views()` and rewrites the input-table reference to `__this`
