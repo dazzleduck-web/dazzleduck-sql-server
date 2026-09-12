@@ -18,9 +18,24 @@
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <exec.mainClass>io.dazzleduck.sql.compaction.Main</exec.mainClass>
+        <!-- Pinned pair: instrumentation 2.16.0-alpha targets OpenTelemetry API 1.50.0. -->
+        <otel.version>1.50.0</otel.version>
+        <otel.instrumentation.version>2.16.0-alpha</otel.instrumentation.version>
         <!-- Override with -Djib.architecture=arm64 on Apple Silicon -->
         <jib.architecture>amd64</jib.architecture>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>${otel.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- ConnectionPool + CommandLineConfigUtil; brings dazzleduck-sql-common transitively. -->
@@ -40,6 +55,24 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
             <version>1.12.7</version>
+        </dependency>
+
+        <!-- OTLP metric export to the collector's gRPC receiver. The gRPC framing comes from the
+             OkHttp sender pulled in by exporter-otlp, so no grpc-java dependency is needed. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+        <!-- Bridges the existing Micrometer meters onto OpenTelemetry instruments, so
+             CompactionState keeps using Micrometer. -->
+        <dependency>
+            <groupId>io.opentelemetry.instrumentation</groupId>
+            <artifactId>opentelemetry-micrometer-1.5</artifactId>
+            <version>${otel.instrumentation.version}</version>
         </dependency>
     </dependencies>
 
@@ -76,6 +109,10 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
                                     <resource>reference.conf</resource>
                                 </transformer>
+                                <!-- The OTLP exporter resolves its gRPC sender through
+                                     ServiceLoader; without merging META-INF/services the shaded
+                                     jar starts and then fails on the first export. -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
                         </configuration>
                     </execution>

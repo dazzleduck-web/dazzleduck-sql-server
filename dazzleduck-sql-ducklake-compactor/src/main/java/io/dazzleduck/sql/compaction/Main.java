@@ -4,8 +4,6 @@ import com.typesafe.config.Config;
 import io.dazzleduck.sql.commons.TableConfigProvider;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.common.StartupScriptProvider;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,8 +20,8 @@ public class Main {
 
         CompactionConfig config = CompactionConfig.from(withOverrides(rawConfig));
 
-        MeterRegistry registry = new LoggingMeterRegistry();
-        CompactionState state = new CompactionState(registry, config.databases());
+        CompactionMetrics metrics = CompactionMetrics.create(rawConfig.getConfig("metrics"));
+        CompactionState state = new CompactionState(metrics.registry(), config.databases());
         MajorCompactor majorCompactor = new DuckDbMajorCompactor(
                 config.majorCompactionMaxSize(), config.snapshotRetention(), state);
         CompactionService service = new CompactionService(config, majorCompactor, state);
@@ -33,6 +31,7 @@ public class Main {
             logger.info("Shutdown signal received");
             service.close();
             healthServer.close();
+            metrics.close();
         }, "shutdown-hook"));
 
         healthServer.start();
