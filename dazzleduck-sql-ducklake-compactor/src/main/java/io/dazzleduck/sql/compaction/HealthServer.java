@@ -64,8 +64,9 @@ public class HealthServer implements Closeable {
             sb.append("\n    \"").append(entry.getKey()).append("\": {\n");
             sb.append("      \"totalMinorCompactions\": ").append(ds.totalMinorCompactions()).append(",\n");
             sb.append("      \"totalMajorCompactions\": ").append(ds.totalMajorCompactions()).append(",\n");
+            sb.append("      \"totalFailedCycles\": ").append(ds.totalFailedCycles()).append(",\n");
             sb.append("      \"totalFilesCompacted\": ").append(ds.totalFilesCompacted()).append(",\n");
-            sb.append("      \"lastExecutionTime\": ").append(instant(ds.lastExecutionTime())).append(",\n");
+            sb.append("      \"lastSuccessTime\": ").append(instant(ds.lastSuccessTime())).append(",\n");
             sb.append("      \"nextExecutionTime\": ").append(instant(ds.nextExecutionTime())).append(",\n");
             sb.append("      \"currentSmallFiles\": ").append(ds.currentSmallFiles()).append(",\n");
             sb.append("      \"currentMediumFiles\": ").append(ds.currentMediumFiles()).append(",\n");

@@ -5,7 +5,9 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,6 +20,8 @@ public class CompactionState {
     private static final String DURATION_METRIC    = "ducklake.compaction.duration";
     private static final String MINOR_COUNT_METRIC = "ducklake.compaction.minor";
     private static final String MAJOR_COUNT_METRIC = "ducklake.compaction.major";
+    private static final String FAILURE_COUNT_METRIC = "ducklake.compaction.failures";
+    private static final String LAST_SUCCESS_AGE_METRIC = "ducklake.compaction.last_success_age";
     private static final String FILES_COMPACTED_METRIC = "ducklake.files.compacted";
     private static final String SMALL_FILES_METRIC  = "ducklake.files.small";
     private static final String MEDIUM_FILES_METRIC = "ducklake.files.medium";
@@ -31,13 +35,17 @@ public class CompactionState {
     private final ConcurrentHashMap<String, AtomicLong> majorCounts    = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> filesCompacted = new ConcurrentHashMap<>();
 
+    // Failures are attributable to the cycle kind that threw. Each inner map is fully populated on
+    // creation, so only the counters are ever mutated — never the map structure.
+    private final ConcurrentHashMap<String, Map<CycleKind, AtomicLong>> failureCounts = new ConcurrentHashMap<>();
+
     // Per-database gauges
     private final ConcurrentHashMap<String, AtomicLong> smallFiles  = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> mediumFiles = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> totalFiles  = new ConcurrentHashMap<>();
 
-    // Per-database execution times (health endpoint only)
-    private final ConcurrentHashMap<String, AtomicReference<Instant>> lastExecutionTimes = new ConcurrentHashMap<>();
+    // Set only when a cycle completes without throwing
+    private final ConcurrentHashMap<String, AtomicReference<Instant>> lastSuccessTimes = new ConcurrentHashMap<>();
 
     public CompactionState(MeterRegistry registry, List<String> databases) {
         this.registry = registry;
@@ -51,15 +59,35 @@ public class CompactionState {
         AtomicLong small  = smallFiles.computeIfAbsent(db, k -> new AtomicLong(0));
         AtomicLong medium = mediumFiles.computeIfAbsent(db, k -> new AtomicLong(0));
         AtomicLong total  = totalFiles.computeIfAbsent(db, k -> new AtomicLong(0));
-        lastExecutionTimes.computeIfAbsent(db, k -> new AtomicReference<>());
+        AtomicReference<Instant> lastSuccess =
+                lastSuccessTimes.computeIfAbsent(db, k -> new AtomicReference<>());
 
         FunctionCounter.builder(MINOR_COUNT_METRIC, minor, AtomicLong::doubleValue)
-                .description("Total minor compaction cycles")
+                .description("Successful minor compaction cycles")
                 .tag("database", db)
                 .register(registry);
 
         FunctionCounter.builder(MAJOR_COUNT_METRIC, major, AtomicLong::doubleValue)
-                .description("Total major compaction cycles")
+                .description("Successful major compaction cycles")
+                .tag("database", db)
+                .register(registry);
+
+        // Every kind is registered up front so a zero is visible rather than a missing series.
+        failureCounters(db).forEach((kind, failures) ->
+                FunctionCounter.builder(FAILURE_COUNT_METRIC, failures, AtomicLong::doubleValue)
+                        .description("Cycles that ended in an exception")
+                        .tag("database", db)
+                        .tag("type", kind.tag())
+                        .register(registry));
+
+        // Falls back to service start so a compactor that has never succeeded reports a climbing
+        // age rather than a healthy-looking zero — this gauge is what an alert should watch.
+        Gauge.builder(LAST_SUCCESS_AGE_METRIC, lastSuccess, ref -> {
+                    Instant last = ref.get();
+                    return Duration.between(last != null ? last : serviceStart, Instant.now()).toSeconds();
+                })
+                .description("Seconds since the last successful compaction cycle")
+                .baseUnit("seconds")
                 .tag("database", db)
                 .register(registry);
 
@@ -84,6 +112,16 @@ public class CompactionState {
                 .register(registry);
     }
 
+    private Map<CycleKind, AtomicLong> failureCounters(String db) {
+        return failureCounts.computeIfAbsent(db, k -> {
+            Map<CycleKind, AtomicLong> counters = new EnumMap<>(CycleKind.class);
+            for (CycleKind kind : CycleKind.values()) {
+                counters.put(kind, new AtomicLong(0));
+            }
+            return counters;
+        });
+    }
+
     // ── Update methods ────────────────────────────────────────────────────────
 
     public void incrementMinor(String db) {
@@ -104,8 +142,13 @@ public class CompactionState {
         totalFiles.computeIfAbsent(db, k -> new AtomicLong(0)).set(total);
     }
 
-    public void recordLastExecution(String db) {
-        lastExecutionTimes.computeIfAbsent(db, k -> new AtomicReference<>()).set(Instant.now());
+    /** Call only when the whole cycle completed without throwing. */
+    public void recordSuccess(String db) {
+        lastSuccessTimes.computeIfAbsent(db, k -> new AtomicReference<>()).set(Instant.now());
+    }
+
+    public void recordFailure(String db, CycleKind kind) {
+        failureCounters(db).get(kind).incrementAndGet();
     }
 
     // ── Timer helpers ─────────────────────────────────────────────────────────
@@ -128,13 +171,12 @@ public class CompactionState {
     public CompactionStats getSnapshot(List<String> databases) {
         Map<String, CompactionStats.DatabaseStats> dbStats = new HashMap<>();
         for (String db : databases) {
-            AtomicReference<Instant> lastRef = lastExecutionTimes.get(db);
-            Instant last = lastRef != null ? lastRef.get() : null;
             dbStats.put(db, new CompactionStats.DatabaseStats(
                     minorCounts.getOrDefault(db, new AtomicLong(0)).get(),
                     majorCounts.getOrDefault(db, new AtomicLong(0)).get(),
+                    getFailureCount(db),
                     filesCompacted.getOrDefault(db, new AtomicLong(0)).get(),
-                    last,
+                    getLastSuccessTime(db),
                     null, // nextExecutionTime injected by CompactionService
                     smallFiles.getOrDefault(db, new AtomicLong(0)).get(),
                     mediumFiles.getOrDefault(db, new AtomicLong(0)).get(),
@@ -143,8 +185,16 @@ public class CompactionState {
         return new CompactionStats(serviceStart, dbStats);
     }
 
-    public Instant getLastExecutionTime(String db) {
-        AtomicReference<Instant> ref = lastExecutionTimes.get(db);
+    public Instant getLastSuccessTime(String db) {
+        AtomicReference<Instant> ref = lastSuccessTimes.get(db);
         return ref != null ? ref.get() : null;
+    }
+
+    public long getFailureCount(String db) {
+        long total = 0;
+        for (AtomicLong count : failureCounts.getOrDefault(db, Map.of()).values()) {
+            total += count.get();
+        }
+        return total;
     }
 }

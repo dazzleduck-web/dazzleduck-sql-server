@@ -28,8 +28,8 @@ public class CompactionService implements Closeable {
     private final ScheduledExecutorService compactionScheduler;
     private final ScheduledExecutorService housekeepingScheduler;
 
-    // Tracks when major compaction last ran per database
-    private final ConcurrentHashMap<String, AtomicLong> lastMajorRun = new ConcurrentHashMap<>();
+    // Tracks when major compaction was last attempted per database
+    private final ConcurrentHashMap<String, AtomicLong> lastMajorAttempt = new ConcurrentHashMap<>();
 
     public CompactionService(CompactionConfig config, MajorCompactor majorCompactor, CompactionState state) {
         this.config = config;
@@ -46,7 +46,7 @@ public class CompactionService implements Closeable {
             t.setDaemon(false);
             return t;
         });
-        config.databases().forEach(db -> lastMajorRun.put(db, new AtomicLong(System.currentTimeMillis())));
+        config.databases().forEach(db -> lastMajorAttempt.put(db, new AtomicLong(System.currentTimeMillis())));
     }
 
     public void start() {
@@ -71,44 +71,42 @@ public class CompactionService implements Closeable {
     public CompactionStats getStats() {
         Map<String, CompactionStats.DatabaseStats> dbStats = new HashMap<>();
         CompactionStats base = state.getSnapshot(config.databases());
-        for (Map.Entry<String, CompactionStats.DatabaseStats> entry : base.databases().entrySet()) {
-            String db = entry.getKey();
-            CompactionStats.DatabaseStats ds = entry.getValue();
-            Instant last = state.getLastExecutionTime(db);
-            Instant next = last != null ? last.plus(config.minorCompactionFrequency()) : null;
-            dbStats.put(db, new CompactionStats.DatabaseStats(
-                    ds.totalMinorCompactions(),
-                    ds.totalMajorCompactions(),
-                    ds.totalFilesCompacted(),
-                    last,
-                    next,
-                    ds.currentSmallFiles(),
-                    ds.currentMediumFiles(),
-                    ds.currentTotalFiles()));
-        }
+        base.databases().forEach((db, ds) -> {
+            Instant last = ds.lastSuccessTime();
+            dbStats.put(db, ds.withNextExecutionTime(
+                    last != null ? last.plus(config.minorCompactionFrequency()) : null));
+        });
         return new CompactionStats(base.serviceStart(), dbStats);
     }
 
     void runCompaction(String database) {
-        try {
-            boolean runMajor = System.currentTimeMillis() - lastMajorRun.get(database).get()
-                    >= config.majorCompactionFrequency().toMillis();
+        boolean major = System.currentTimeMillis() - lastMajorAttempt.get(database).get()
+                >= config.majorCompactionFrequency().toMillis();
+        CycleKind kind = major ? CycleKind.MAJOR : CycleKind.MINOR;
 
+        // Stamp the attempt before running it: a major that throws must not become eligible again
+        // on the next minor tick, or a persistent failure turns into a retry storm.
+        if (major) {
+            lastMajorAttempt.get(database).set(System.currentTimeMillis());
+        }
+
+        try {
             long filesBefore = queryTotalFiles(database);
-            if (runMajor) {
-                runMajor(database);
+            if (major) {
+                majorCompactor.compact(database);
+                logger.info("Major compaction completed for {}", database);
                 state.incrementMajor(database);
-                lastMajorRun.get(database).set(System.currentTimeMillis());
             } else {
                 runMinor(database);
                 state.incrementMinor(database);
             }
-            updateFileCounts(database);
-            long filesAfter = queryTotalFiles(database);
+            long filesAfter = updateFileCounts(database);
             state.addFilesCompacted(database, filesBefore - filesAfter);
-            state.recordLastExecution(database);
+            state.recordSuccess(database);
         } catch (Throwable t) {
-            logger.error("Unexpected error in compaction cycle for {} — scheduler will continue", database, t);
+            state.recordFailure(database, kind);
+            logger.error("{} compaction cycle failed for {} — scheduler will continue",
+                    kind.tag(), database, t);
         }
     }
 
@@ -117,30 +115,20 @@ public class CompactionService implements Closeable {
             majorCompactor.housekeep(database);
             logger.info("Housekeeping completed for {}", database);
         } catch (Throwable t) {
+            state.recordFailure(database, CycleKind.HOUSEKEEPING);
             logger.error("Unexpected error in housekeeping cycle for {} — scheduler will continue", database, t);
         }
     }
 
-    private void runMinor(String database) {
+    private void runMinor(String database) throws Exception {
         Timer.Sample sample = state.startTimer();
         try (var connection = ConnectionPool.getConnection()) {
             String sql = "CALL ducklake_merge_adjacent_files('%s', max_file_size := %d)"
                     .formatted(database, config.minorCompactionMaxSize());
             ConnectionPool.execute(connection, sql);
             logger.info("Minor compaction completed for {}", database);
-        } catch (Exception e) {
-            logger.error("Minor compaction failed for {}", database, e);
         } finally {
             state.stopTimer(sample, "minor", "merge", database);
-        }
-    }
-
-    private void runMajor(String database) {
-        try {
-            majorCompactor.compact(database);
-            logger.info("Major compaction completed for {}", database);
-        } catch (Exception e) {
-            logger.error("Major compaction failed for {}", database, e);
         }
     }
 
@@ -160,7 +148,12 @@ public class CompactionService implements Closeable {
         }
     }
 
-    private void updateFileCounts(String database) {
+    /**
+     * Refreshes the file-count gauges and returns the current active file total, which is the same
+     * number a separate count would report — so this doubles as the post-cycle measurement.
+     * Returns 0 when the metadata cannot be read, matching {@link #queryTotalFiles}.
+     */
+    private long updateFileCounts(String database) {
         String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
         String sql = """
                 SELECT
@@ -180,15 +173,18 @@ public class CompactionService implements Closeable {
             statement.execute(sql);
             try (ResultSet rs = statement.getResultSet()) {
                 if (rs.next()) {
+                    long total = rs.getLong("total_files");
                     state.updateFileCounts(database,
                             rs.getLong("small_files"),
                             rs.getLong("medium_files"),
-                            rs.getLong("total_files"));
+                            total);
+                    return total;
                 }
             }
         } catch (Exception e) {
             logger.error("Failed to update file counts for {}", database, e);
         }
+        return 0L;
     }
 
     @Override
