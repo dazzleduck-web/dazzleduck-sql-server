@@ -10,6 +10,7 @@ import java.sql.ResultSet;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -80,18 +81,23 @@ public class CompactionService implements Closeable {
     }
 
     void runCompaction(String database) {
-        boolean major = System.currentTimeMillis() - lastMajorAttempt.get(database).get()
-                >= config.majorCompactionFrequency().toMillis();
-        CycleKind kind = major ? CycleKind.MAJOR : CycleKind.MINOR;
-
-        // Stamp the attempt before running it: a major that throws must not become eligible again
-        // on the next minor tick, or a persistent failure turns into a retry storm.
-        if (major) {
-            lastMajorAttempt.get(database).set(System.currentTimeMillis());
-        }
-
+        // Default so the catch below can always attribute a failure to a kind, even if determining
+        // eligibility itself throws. Keeping the whole body inside the try is what prevents a stray
+        // throwable from escaping the scheduled task — scheduleWithFixedDelay silently cancels a task
+        // whose Runnable throws, which would stop this database's compaction forever.
+        CycleKind kind = CycleKind.MINOR;
         try {
-            long filesBefore = queryTotalFiles(database);
+            boolean major = System.currentTimeMillis() - lastMajorAttempt.get(database).get()
+                    >= config.majorCompactionFrequency().toMillis();
+            kind = major ? CycleKind.MAJOR : CycleKind.MINOR;
+
+            // Stamp the attempt before running it: a major that throws must not become eligible again
+            // on the next minor tick, or a persistent failure turns into a retry storm.
+            if (major) {
+                lastMajorAttempt.get(database).set(System.currentTimeMillis());
+            }
+
+            OptionalLong filesBefore = queryTotalFiles(database);
             if (major) {
                 majorCompactor.compact(database);
                 logger.info("Major compaction completed for {}", database);
@@ -100,8 +106,12 @@ public class CompactionService implements Closeable {
                 runMinor(database);
                 state.incrementMinor(database);
             }
-            long filesAfter = updateFileCounts(database);
-            state.addFilesCompacted(database, filesBefore - filesAfter);
+            OptionalLong filesAfter = updateFileCounts(database);
+            // Only record a delta when both reads succeeded; a failed metadata read must not be
+            // treated as "zero files" or the cumulative counter is permanently inflated.
+            if (filesBefore.isPresent() && filesAfter.isPresent()) {
+                state.addFilesCompacted(database, filesBefore.getAsLong() - filesAfter.getAsLong());
+            }
             state.recordSuccess(database);
         } catch (Throwable t) {
             state.recordFailure(database, kind);
@@ -132,7 +142,7 @@ public class CompactionService implements Closeable {
         }
     }
 
-    private long queryTotalFiles(String database) {
+    private OptionalLong queryTotalFiles(String database) {
         String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
         String sql = "SELECT COUNT(*) AS total FROM %s.ducklake_data_file WHERE end_snapshot IS NULL"
                 .formatted(mdDatabase);
@@ -140,20 +150,21 @@ public class CompactionService implements Closeable {
              var statement = connection.createStatement()) {
             statement.execute(sql);
             try (ResultSet rs = statement.getResultSet()) {
-                return rs.next() ? rs.getLong("total") : 0L;
+                return rs.next() ? OptionalLong.of(rs.getLong("total")) : OptionalLong.empty();
             }
         } catch (Exception e) {
             logger.warn("Could not query file count for {}", database, e);
-            return 0L;
+            return OptionalLong.empty();
         }
     }
 
     /**
      * Refreshes the file-count gauges and returns the current active file total, which is the same
      * number a separate count would report — so this doubles as the post-cycle measurement.
-     * Returns 0 when the metadata cannot be read, matching {@link #queryTotalFiles}.
+     * Returns an empty {@link OptionalLong} when the metadata cannot be read, so a failed read is
+     * never mistaken for a genuine zero, matching {@link #queryTotalFiles}.
      */
-    private long updateFileCounts(String database) {
+    private OptionalLong updateFileCounts(String database) {
         String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
         String sql = """
                 SELECT
@@ -178,13 +189,13 @@ public class CompactionService implements Closeable {
                             rs.getLong("small_files"),
                             rs.getLong("medium_files"),
                             total);
-                    return total;
+                    return OptionalLong.of(total);
                 }
             }
         } catch (Exception e) {
             logger.error("Failed to update file counts for {}", database, e);
         }
-        return 0L;
+        return OptionalLong.empty();
     }
 
     @Override
