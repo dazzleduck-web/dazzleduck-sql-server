@@ -172,12 +172,18 @@ public class CollectorConfig {
 
     /**
      * Directory under which each signal service creates its scratch directory for temporary Arrow
-     * batch files. Declared in reference.conf as {@code ${java.io.tmpdir}}, so the key is always
-     * present; the explicit fallback here covers a caller that supplies its own Config without the
-     * bundled reference.conf.
+     * batch files — the same {@code temp_write_location} key the flight module uses for the same
+     * purpose, via {@link ConfigConstants#TEMP_WRITE_LOCATION_KEY}.
+     *
+     * <p>Declared in reference.conf as {@code ${java.io.tmpdir}}, so the key is always present;
+     * the explicit fallback here covers a caller supplying its own Config without the bundled
+     * reference.conf. The collector deliberately does not inherit the flight module's
+     * {@code /tmp/dazzleduck-writes} default — it has no warehouse to sit beside, and that path
+     * has the same small-tmpfs problem.
      */
-    public String getTempPath() {
-        return getString("temp_path", System.getProperty("java.io.tmpdir"));
+    public String getTempWriteLocation() {
+        return getString(ConfigConstants.TEMP_WRITE_LOCATION_KEY,
+                System.getProperty("java.io.tmpdir"));
     }
 
     public String getServiceName() {
@@ -249,7 +255,7 @@ public class CollectorConfig {
         props.setIngestionHandler(getIngestionHandler());
         props.setIngestionConfig(getIngestionConfig());
         props.setVerifySignature(getVerifySignature());
-        props.setTempPath(getTempPath());
+        props.setTempWriteLocation(getTempWriteLocation());
         return props;
     }
 

@@ -22,11 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@code otel_collector.temp_path} — the parent directory for each signal service's Arrow scratch
+ * {@code otel_collector.temp_write_location} — the parent directory for each signal service's Arrow scratch
  * directory. Declared in reference.conf with a {@code ${java.io.tmpdir}} default, so it is always
  * present but never has to be set.
  */
-class CollectorTempPathTest {
+class CollectorTempWriteLocationTest {
 
     private static final IngestionConfig CONFIG = new IngestionConfig(
             1024L, IngestionConfig.DEFAULT_MAX_BUCKET_SIZE, IngestionConfig.DEFAULT_MAX_BATCHES,
@@ -42,17 +42,17 @@ class CollectorTempPathTest {
 
     @Test
     void defaultsToJavaIoTmpdir() {
-        // reference.conf resolves ${java.io.tmpdir}, so an unset temp_path still yields a usable
+        // reference.conf resolves ${java.io.tmpdir}, so an unset temp_write_location still yields a usable
         // directory rather than a missing-key failure.
-        assertEquals(System.getProperty("java.io.tmpdir"), new CollectorConfig().getTempPath());
+        assertEquals(System.getProperty("java.io.tmpdir"), new CollectorConfig().getTempWriteLocation());
     }
 
     @Test
     void explicitValueOverridesTheDefault(@TempDir Path dir) {
         var config = ConfigFactory.parseString(
-                "otel_collector.temp_path = \"" + dir.toString().replace("\\", "\\\\") + "\"")
+                "otel_collector.temp_write_location = \"" + dir.toString().replace("\\", "\\\\") + "\"")
                 .withFallback(ConfigFactory.load()).resolve();
-        assertEquals(dir.toString(), new CollectorConfig(config).getTempPath());
+        assertEquals(dir.toString(), new CollectorConfig(config).getTempWriteLocation());
     }
 
     @Test
@@ -88,16 +88,31 @@ class CollectorTempPathTest {
     }
 
     @Test
-    void missingDirectoryFailsAtStartup(@TempDir Path dir) {
-        // A typo'd path must fail while the collector is starting, not on the first export RPC
-        // once telemetry is already flowing.
+    void missingDirectoryIsCreated(@TempDir Path dir) throws IOException {
+        // Matches ConfigConstants.getTempWriteDir on the flight side: an operator who names a
+        // directory gets it, rather than having the process refuse to start.
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
+        Path nested = dir.resolve("does-not-exist").resolve("nested");
+        try (var base = new OtelServiceBase(nested.toString(), "otel-logs-arrow-",
+                NOOP_HANDLER, CONFIG, scheduler, metrics)) {
+            assertTrue(Files.isDirectory(nested), "temp_write_location must be created: " + nested);
+        } finally {
+            scheduler.shutdownNow();
+            metrics.close();
+        }
+    }
+
+    @Test
+    void aFileWhereTheDirectoryShouldBeIsRejected(@TempDir Path dir) throws IOException {
+        // Cannot be created round it, so this still fails at startup rather than per batch.
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
+        Path file = Files.createFile(dir.resolve("not-a-directory"));
         try {
-            Path missing = dir.resolve("does-not-exist");
             IOException e = assertThrows(IOException.class, () -> new OtelServiceBase(
-                    missing.toString(), "otel-logs-arrow-", NOOP_HANDLER, CONFIG, scheduler, metrics));
-            assertTrue(e.getMessage().contains("not an existing directory"), e.getMessage());
+                    file.toString(), "otel-logs-arrow-", NOOP_HANDLER, CONFIG, scheduler, metrics));
+            assertTrue(e.getMessage().contains("is not a directory"), e.getMessage());
         } finally {
             scheduler.shutdownNow();
             metrics.close();

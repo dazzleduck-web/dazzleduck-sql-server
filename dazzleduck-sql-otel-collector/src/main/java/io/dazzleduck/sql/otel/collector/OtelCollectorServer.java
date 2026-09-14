@@ -80,10 +80,10 @@ public class OtelCollectorServer implements Closeable {
                 return t;
             });
 
-            String tempPath = props.getTempPath();
-            logService     = new OtelLogService(tempPath, handler, ingestionConfig, flushScheduler, collectorMetrics);
-            traceService   = new OtelTraceService(tempPath, handler, ingestionConfig, flushScheduler, collectorMetrics);
-            metricsService = new OtelMetricsService(tempPath, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            String tempWriteLocation = props.getTempWriteLocation();
+            logService     = new OtelLogService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            traceService   = new OtelTraceService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            metricsService = new OtelMetricsService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
 
             if (!"jwt".equals(props.getAuthentication())) {
                 throw new IllegalStateException(

@@ -59,18 +59,19 @@ class OtelServiceBase implements Closeable {
     private final IngestionHandler.QueueEventListener listener;
 
     /**
-     * @param tempPath parent directory for this service's scratch directory, from
-     *                 {@code otel_collector.temp_path}. Must exist and be writable: a bad value
-     *                 fails here, at startup, rather than on the first export RPC.
+     * @param tempWriteLocation parent directory for this service's scratch directory, from
+     *                          {@code otel_collector.temp_write_location}. Created if absent;
+     *                          an unusable value fails here, at startup, rather than on the
+     *                          first export RPC.
      */
-    OtelServiceBase(String tempPath,
+    OtelServiceBase(String tempWriteLocation,
                     String tempDirPrefix,
                     IngestionHandler handler,
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
                     OtelCollectorMetrics metrics) throws IOException {
         this.allocator = new RootAllocator();
-        this.tempDir = Files.createTempDirectory(resolveTempParent(tempPath), tempDirPrefix);
+        this.tempDir = Files.createTempDirectory(resolveTempParent(tempWriteLocation), tempDirPrefix);
         log.info("Arrow scratch directory for '{}': {}", tempDirPrefix, tempDir);
         this.handler = handler;
         this.metrics = metrics;
@@ -165,20 +166,26 @@ class OtelServiceBase implements Closeable {
      * the caller's verified JWT claims after the batch writer runs.
      */
     /**
-     * Validates {@code otel_collector.temp_path} and returns it. Checked eagerly so a missing or
-     * read-only directory is a startup failure with a clear message, not a per-batch IOException
-     * once telemetry is already flowing.
+     * Resolves {@code otel_collector.temp_write_location}, creating it if absent — matching
+     * {@link io.dazzleduck.sql.common.ConfigConstants#getTempWriteDir}, so an operator who names a
+     * directory gets it in both the flight server and the collector.
+     *
+     * <p>What cannot be made usable still fails here, at startup, with a message naming the key,
+     * rather than as a per-batch IOException once telemetry is already flowing.
      */
-    private static Path resolveTempParent(String tempPath) throws IOException {
-        if (tempPath == null || tempPath.isBlank()) {
-            throw new IOException("otel_collector.temp_path must not be blank");
+    private static Path resolveTempParent(String tempWriteLocation) throws IOException {
+        if (tempWriteLocation == null || tempWriteLocation.isBlank()) {
+            throw new IOException("otel_collector.temp_write_location must not be blank");
         }
-        Path parent = Path.of(tempPath);
-        if (!Files.isDirectory(parent)) {
-            throw new IOException("otel_collector.temp_path is not an existing directory: " + parent);
+        Path parent = Path.of(tempWriteLocation);
+        if (!Files.exists(parent)) {
+            Files.createDirectories(parent);
+        } else if (!Files.isDirectory(parent)) {
+            throw new IOException(
+                    "otel_collector.temp_write_location exists but is not a directory: " + parent);
         }
         if (!Files.isWritable(parent)) {
-            throw new IOException("otel_collector.temp_path is not writable: " + parent);
+            throw new IOException("otel_collector.temp_write_location is not writable: " + parent);
         }
         return parent;
     }
