@@ -60,23 +60,18 @@ class OtelServiceBase implements Closeable {
     private final IngestionHandler.QueueEventListener listener;
 
     /**
-     * @param tempWriteDir parent for this service's scratch directory — already created and
-     *                     validated by {@link ConfigConstants#getTempWriteDir(String)} in
-     *                     {@link OtelCollectorServer#start()}. Passing a resolved {@code Path}
-     *                     rather than the raw config string keeps operator-config validation at
-     *                     startup, done once, instead of repeated in each of the three services.
+     * @param scratchDir this service's private directory for staged Arrow batch files, created
+     *                   and owned by {@link OtelCollectorServer}. The constructor deliberately
+     *                   performs no I/O: doing so forced every caller to handle an
+     *                   {@link IOException} and created a window in which the allocator was
+     *                   already constructed but could never be closed.
      */
-    OtelServiceBase(Path tempWriteDir,
-                    String tempDirPrefix,
+    OtelServiceBase(Path scratchDir,
                     IngestionHandler handler,
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
-                    OtelCollectorMetrics metrics) throws IOException {
-        // Create the scratch directory BEFORE allocating: createTempDirectory can still fail
-        // (the volume filling, a race removing the parent), and an allocator created first
-        // would never be closed.
-        this.tempDir = Files.createTempDirectory(tempWriteDir, tempDirPrefix);
-        log.info("Arrow scratch directory for '{}': {}", tempDirPrefix, tempDir);
+                    OtelCollectorMetrics metrics) {
+        this.tempDir = scratchDir;
         this.allocator = new RootAllocator();
         this.handler = handler;
         this.metrics = metrics;
@@ -260,16 +255,17 @@ class OtelServiceBase implements Closeable {
                 .asRuntimeException();
     }
 
+    /**
+     * Closes the allocator. The scratch directory is <b>not</b> removed here — it is created and
+     * deleted by {@link OtelCollectorServer}, which also has to clean up directories belonging to
+     * services that were never constructed when startup fails partway through.
+     */
     @Override
     public void close() {
         try {
             allocator.close();
         } catch (Exception e) {
-            log.warn("Error closing Arrow allocator (prefix={})", tempDir.getFileName(), e);
+            log.warn("Error closing Arrow allocator ({})", tempDir.getFileName(), e);
         }
-        try (var stream = Files.walk(tempDir)) {
-            stream.sorted(Comparator.reverseOrder())
-                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
-        } catch (IOException ignored) {}
     }
 }

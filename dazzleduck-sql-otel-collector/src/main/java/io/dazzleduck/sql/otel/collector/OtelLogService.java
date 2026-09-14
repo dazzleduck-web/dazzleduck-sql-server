@@ -26,15 +26,18 @@ import java.util.concurrent.ScheduledExecutorService;
  */
 public class OtelLogService extends LogsServiceGrpc.LogsServiceImplBase implements Closeable {
 
+    /** Prefix for this service's scratch directory, created by {@link OtelCollectorServer}. */
+    static final String SCRATCH_PREFIX = "otel-logs-arrow-";
+
     private static final Logger log = LoggerFactory.getLogger(OtelLogService.class);
 
     private final OtelCollectorMetrics metrics;
     private final OtelServiceBase base;
 
-    public OtelLogService(Path tempWriteDir, IngestionHandler handler, IngestionConfig ingestionConfig,
-                          ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics) throws IOException {
+    public OtelLogService(Path scratchDir, IngestionHandler handler, IngestionConfig ingestionConfig,
+                          ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics) {
         this.metrics = metrics;
-        this.base = new OtelServiceBase(tempWriteDir, "otel-logs-arrow-", handler, ingestionConfig, flushScheduler, metrics);
+        this.base = new OtelServiceBase(scratchDir, handler, ingestionConfig, flushScheduler, metrics);
     }
 
     @Override

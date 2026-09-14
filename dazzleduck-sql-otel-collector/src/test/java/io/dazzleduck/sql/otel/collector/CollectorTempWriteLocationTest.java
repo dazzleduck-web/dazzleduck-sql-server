@@ -6,6 +6,7 @@ import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.IngestionResult;
 import io.dazzleduck.sql.commons.ingestion.PostIngestionTask;
 import io.dazzleduck.sql.otel.collector.config.CollectorConfig;
+import io.dazzleduck.sql.otel.collector.config.CollectorProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -64,37 +65,38 @@ class CollectorTempWriteLocationTest {
     }
 
     @Test
-    void scratchDirectoryIsCreatedUnderTheConfiguredPath(@TempDir Path dir) throws IOException {
+    void serverCreatesOneScratchDirectoryPerSignalUnderTheConfiguredPath(@TempDir Path dir)
+            throws IOException {
+        // Creation is the server's job, not a service constructor's, so it is exercised here.
+        var server = new OtelCollectorServer(new CollectorProperties());
+        Path logs    = server.createScratchDir(dir, OtelLogService.SCRATCH_PREFIX);
+        Path traces  = server.createScratchDir(dir, OtelTraceService.SCRATCH_PREFIX);
+        Path metrics = server.createScratchDir(dir, OtelMetricsService.SCRATCH_PREFIX);
+
+        for (Path p : new Path[]{logs, traces, metrics}) {
+            assertTrue(Files.isDirectory(p), "not created: " + p);
+            assertEquals(dir, p.getParent(), "must sit under temp_write_location: " + p);
+        }
+        assertTrue(logs.getFileName().toString().startsWith("otel-logs-arrow-"), logs.toString());
+        assertTrue(traces.getFileName().toString().startsWith("otel-traces-arrow-"), traces.toString());
+        assertTrue(metrics.getFileName().toString().startsWith("otel-metrics-arrow-"), metrics.toString());
+        assertEquals(3L, Files.list(dir).count(), "one directory per signal");
+    }
+
+    @Test
+    void serviceConstructionDoesNoIo(@TempDir Path dir) {
+        // The point of moving creation out: constructing a service must not touch the filesystem,
+        // so it cannot fail partway and strand an allocator. The directory need not even exist.
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        try (var base = new OtelServiceBase(dir, "otel-logs-arrow-",
-                NOOP_HANDLER, CONFIG, scheduler, metrics)) {
-            try (var children = Files.list(dir)) {
-                Path created = children.findFirst().orElseThrow(
-                        () -> new AssertionError("no scratch directory created under " + dir));
-                assertTrue(created.getFileName().toString().startsWith("otel-logs-arrow-"),
-                        "unexpected scratch directory name: " + created);
-            }
+        Path neverCreated = dir.resolve("not-created");
+        try {
+            var service = new OtelLogService(neverCreated, NOOP_HANDLER, CONFIG, scheduler, metrics);
+            service.close();
+            assertTrue(Files.notExists(neverCreated), "the constructor must not create anything");
         } finally {
             scheduler.shutdownNow();
             metrics.close();
         }
     }
-
-    @Test
-    void scratchDirectoryIsRemovedOnClose(@TempDir Path dir) throws IOException {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        var base = new OtelServiceBase(dir, "otel-traces-arrow-",
-                NOOP_HANDLER, CONFIG, scheduler, metrics);
-        base.close();
-        scheduler.shutdownNow();
-        metrics.close();
-        try (var children = Files.list(dir)) {
-            assertEquals(0L, children.count(), "close() must remove its scratch directory");
-        }
-    }
-
-
-
 }

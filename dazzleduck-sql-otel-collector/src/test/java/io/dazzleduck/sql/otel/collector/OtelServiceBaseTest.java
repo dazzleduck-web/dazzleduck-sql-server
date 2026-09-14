@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
@@ -63,7 +64,8 @@ class OtelServiceBaseTest {
     void setUp() throws Exception {
         scheduler = Executors.newSingleThreadScheduledExecutor();
         handler = new FakeHandler(tempDir);
-        base = new OtelServiceBase(tempDir, "otel-base-test-", handler, CONFIG, scheduler, metrics);
+        base = new OtelServiceBase(Files.createDirectories(tempDir.resolve("scratch")),
+                handler, CONFIG, scheduler, metrics);
     }
 
     @AfterEach
