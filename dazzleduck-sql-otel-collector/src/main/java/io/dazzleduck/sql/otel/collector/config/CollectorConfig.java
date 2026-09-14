@@ -170,6 +170,16 @@ public class CollectorConfig {
         }
     }
 
+    /**
+     * Directory under which each signal service creates its scratch directory for temporary Arrow
+     * batch files. Declared in reference.conf as {@code ${java.io.tmpdir}}, so the key is always
+     * present; the explicit fallback here covers a caller that supplies its own Config without the
+     * bundled reference.conf.
+     */
+    public String getTempPath() {
+        return getString("temp_path", System.getProperty("java.io.tmpdir"));
+    }
+
     public String getServiceName() {
         return getString("service_name", "open-telemetry-collector");
     }
@@ -239,6 +249,7 @@ public class CollectorConfig {
         props.setIngestionHandler(getIngestionHandler());
         props.setIngestionConfig(getIngestionConfig());
         props.setVerifySignature(getVerifySignature());
+        props.setTempPath(getTempPath());
         return props;
     }
 

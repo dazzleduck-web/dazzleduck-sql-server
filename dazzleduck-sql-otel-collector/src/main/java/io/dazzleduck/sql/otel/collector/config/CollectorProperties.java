@@ -35,6 +35,16 @@ public class CollectorProperties {
     private Duration jwtExpiration = Duration.ofHours(1);
     private MeterRegistry meterRegistry = new SimpleMeterRegistry();
     private boolean verifySignature = true;
+    // Parent directory for each signal service's temporary Arrow scratch directory.
+    private String tempPath = System.getProperty("java.io.tmpdir");
+
+    public String getTempPath() {
+        return tempPath;
+    }
+
+    public void setTempPath(String tempPath) {
+        this.tempPath = tempPath;
+    }
 
     public int getGrpcPort() {
         return grpcPort;

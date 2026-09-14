@@ -45,6 +45,9 @@ Configuration is loaded from HOCON (`application.conf`) with environment variabl
 otel_collector {
     grpc_port = 4317
 
+    # Parent directory for the per-signal Arrow scratch directories (see "Temporary Arrow files")
+    temp_path = ${java.io.tmpdir}
+
     # health { port, shutdown_grace_period_ms } — see the Health Check section below
 
     # Startup SQL run before any queue is created (load extensions, ATTACH DuckLake catalogs)
@@ -161,6 +164,34 @@ Notes:
   sensitive is minted into tokens before turning it on.
 - Changing the flag requires a restart (a bucket must not mix batches with and without the
   column). Not available for queues registered via the dynamic SQLite provider.
+
+## Temporary Arrow files
+
+Each incoming OTLP batch is staged as an **uncompressed** Arrow file on local disk before the
+Parquet `COPY` reads it. The three signal services each create their own scratch directory under
+`otel_collector.temp_path`:
+
+| Service | Directory prefix |
+|---------|------------------|
+| logs | `otel-logs-arrow-` |
+| traces | `otel-traces-arrow-` |
+| metrics | `otel-metrics-arrow-` |
+
+`temp_path` defaults to `${java.io.tmpdir}` (`/tmp` on Linux), so it never has to be set — but the
+staging files are uncompressed and therefore larger than the Parquet they become, so point it at a
+real data volume when the default is a small `tmpfs`:
+
+```hocon
+otel_collector.temp_path = "/var/data/otel-tmp"
+```
+
+The directory must exist and be writable at startup; a missing or read-only path fails fast with a
+clear message rather than erroring on the first export RPC. Individual files are deleted as soon as
+their batch is written, and each scratch directory is removed on shutdown, so steady-state usage is
+roughly `ingestion.min_bucket_size` per active queue plus in-flight batches.
+
+This is distinct from where the **output** Parquet is written — that is `output_path` per queue in
+`ingestion_queue_table_mapping`, or, under the DuckLake providers, the catalog's own `DATA_PATH`.
 
 ## Health Check
 

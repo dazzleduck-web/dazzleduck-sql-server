@@ -31,10 +31,10 @@ public class OtelLogService extends LogsServiceGrpc.LogsServiceImplBase implemen
     private final OtelCollectorMetrics metrics;
     private final OtelServiceBase base;
 
-    public OtelLogService(IngestionHandler handler, IngestionConfig ingestionConfig,
+    public OtelLogService(String tempPath, IngestionHandler handler, IngestionConfig ingestionConfig,
                           ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics) throws IOException {
         this.metrics = metrics;
-        this.base = new OtelServiceBase("otel-logs-arrow-", handler, ingestionConfig, flushScheduler, metrics);
+        this.base = new OtelServiceBase(tempPath, "otel-logs-arrow-", handler, ingestionConfig, flushScheduler, metrics);
     }
 
     @Override

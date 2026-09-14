@@ -58,13 +58,20 @@ class OtelServiceBase implements Closeable {
     private final IngestionHandler.QueueCreator creator;
     private final IngestionHandler.QueueEventListener listener;
 
-    OtelServiceBase(String tempDirPrefix,
+    /**
+     * @param tempPath parent directory for this service's scratch directory, from
+     *                 {@code otel_collector.temp_path}. Must exist and be writable: a bad value
+     *                 fails here, at startup, rather than on the first export RPC.
+     */
+    OtelServiceBase(String tempPath,
+                    String tempDirPrefix,
                     IngestionHandler handler,
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
                     OtelCollectorMetrics metrics) throws IOException {
         this.allocator = new RootAllocator();
-        this.tempDir = Files.createTempDirectory(tempDirPrefix);
+        this.tempDir = Files.createTempDirectory(resolveTempParent(tempPath), tempDirPrefix);
+        log.info("Arrow scratch directory for '{}': {}", tempDirPrefix, tempDir);
         this.handler = handler;
         this.metrics = metrics;
         // Build the queue (sharing the collector-wide flush scheduler) and register its metrics.
@@ -157,6 +164,25 @@ class OtelServiceBase implements Closeable {
      * Queues with {@code extract_claims} get the claims-column schema variant, filled from
      * the caller's verified JWT claims after the batch writer runs.
      */
+    /**
+     * Validates {@code otel_collector.temp_path} and returns it. Checked eagerly so a missing or
+     * read-only directory is a startup failure with a clear message, not a per-batch IOException
+     * once telemetry is already flowing.
+     */
+    private static Path resolveTempParent(String tempPath) throws IOException {
+        if (tempPath == null || tempPath.isBlank()) {
+            throw new IOException("otel_collector.temp_path must not be blank");
+        }
+        Path parent = Path.of(tempPath);
+        if (!Files.isDirectory(parent)) {
+            throw new IOException("otel_collector.temp_path is not an existing directory: " + parent);
+        }
+        if (!Files.isWritable(parent)) {
+            throw new IOException("otel_collector.temp_path is not writable: " + parent);
+        }
+        return parent;
+    }
+
     <E> Path writeArrowFile(String queueId, List<E> entries, Schema schema,
                              BiConsumer<List<E>, VectorSchemaRoot> batchWriter) throws IOException {
         Map<String, String> claims = claimsFor(queueId);
