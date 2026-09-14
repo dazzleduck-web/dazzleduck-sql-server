@@ -73,9 +73,13 @@ public class CompactionService implements Closeable {
         Map<String, CompactionStats.DatabaseStats> dbStats = new HashMap<>();
         CompactionStats base = state.getSnapshot(config.databases());
         base.databases().forEach((db, ds) -> {
-            Instant last = ds.lastSuccessTime();
+            // The fixed-delay scheduler re-arms from the end of the last cycle, so the next run is
+            // due one minor interval after the last completion — regardless of its outcome. Deriving
+            // this from the last success would wrongly report null for a database that keeps failing
+            // even though it is still scheduled.
+            Instant lastRun = state.getLastRunTime(db);
             dbStats.put(db, ds.withNextExecutionTime(
-                    last != null ? last.plus(config.minorCompactionFrequency()) : null));
+                    lastRun != null ? lastRun.plus(config.minorCompactionFrequency()) : null));
         });
         return new CompactionStats(base.serviceStart(), dbStats);
     }
@@ -117,6 +121,10 @@ public class CompactionService implements Closeable {
             state.recordFailure(database, kind);
             logger.error("{} compaction cycle failed for {} — scheduler will continue",
                     kind.tag(), database, t);
+        } finally {
+            // Stamp every cycle's completion, success or failure, so /health can report when the
+            // fixed-delay scheduler will run this database again.
+            state.recordRunCompleted(database);
         }
     }
 

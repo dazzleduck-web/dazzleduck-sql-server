@@ -47,6 +47,11 @@ public class CompactionState {
     // Set only when a cycle completes without throwing
     private final ConcurrentHashMap<String, AtomicReference<Instant>> lastSuccessTimes = new ConcurrentHashMap<>();
 
+    // Set at the end of every cycle regardless of outcome. The fixed-delay scheduler re-arms from
+    // completion, so this — not the last success — is what predicts the next scheduled run: a
+    // database that keeps failing is still due again one interval after its last attempt.
+    private final ConcurrentHashMap<String, AtomicReference<Instant>> lastRunTimes = new ConcurrentHashMap<>();
+
     public CompactionState(MeterRegistry registry, List<String> databases) {
         this.registry = registry;
         databases.forEach(this::registerDatabase);
@@ -61,6 +66,7 @@ public class CompactionState {
         AtomicLong total  = totalFiles.computeIfAbsent(db, k -> new AtomicLong(0));
         AtomicReference<Instant> lastSuccess =
                 lastSuccessTimes.computeIfAbsent(db, k -> new AtomicReference<>());
+        lastRunTimes.computeIfAbsent(db, k -> new AtomicReference<>());
 
         FunctionCounter.builder(MINOR_COUNT_METRIC, minor, AtomicLong::doubleValue)
                 .description("Successful minor compaction cycles")
@@ -151,6 +157,11 @@ public class CompactionState {
         failureCounters(db).get(kind).incrementAndGet();
     }
 
+    /** Call at the end of every cycle, success or failure — it drives the next-run estimate. */
+    public void recordRunCompleted(String db) {
+        lastRunTimes.computeIfAbsent(db, k -> new AtomicReference<>()).set(Instant.now());
+    }
+
     // ── Timer helpers ─────────────────────────────────────────────────────────
 
     public Timer.Sample startTimer() {
@@ -187,6 +198,11 @@ public class CompactionState {
 
     public Instant getLastSuccessTime(String db) {
         AtomicReference<Instant> ref = lastSuccessTimes.get(db);
+        return ref != null ? ref.get() : null;
+    }
+
+    public Instant getLastRunTime(String db) {
+        AtomicReference<Instant> ref = lastRunTimes.get(db);
         return ref != null ? ref.get() : null;
     }
 

@@ -98,6 +98,22 @@ class CompactionOutcomeTest {
     }
 
     @Test
+    void nextExecutionTimeIsReportedAfterAFailedCycle() {
+        // A database whose cycles fail is still scheduled to run again, so /health must report a
+        // next-execution time rather than null just because there has been no success.
+        try (CompactionService service = new CompactionService(CONFIG, compactor(true), state)) {
+            service.runCompaction(DB);
+
+            assertNull(state.getLastSuccessTime(DB), "the failed cycle leaves last success unset");
+            assertNotNull(state.getLastRunTime(DB), "every cycle stamps its completion time");
+
+            CompactionStats.DatabaseStats ds = service.getStats().databases().get(DB);
+            assertNotNull(ds.nextExecutionTime(),
+                    "a failing database is still scheduled, so next execution must not be null");
+        }
+    }
+
+    @Test
     void lastSuccessAgeIsRegisteredBeforeAnySuccessHasHappened() {
         // Registered up front rather than on first success, so a compactor that has never
         // succeeded still reports an age instead of no series at all.
