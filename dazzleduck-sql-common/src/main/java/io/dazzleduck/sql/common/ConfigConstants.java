@@ -124,9 +124,33 @@ public class ConfigConstants {
     }
 
     public static Path getTempWriteDir(Config config) throws IOException {
-        var tempWriteDir = Path.of(config.getString(TEMP_WRITE_LOCATION_KEY));
+        return getTempWriteDir(config.getString(TEMP_WRITE_LOCATION_KEY));
+    }
+
+    /**
+     * Resolves a {@code temp_write_location} value to a usable directory, creating it if absent.
+     *
+     * <p>Validated eagerly so a bad location fails while the server is starting, with a message
+     * naming the key, rather than as a per-write IOException once traffic is already flowing.
+     * Both the flight server and the OTel collector stage Arrow files here before the Parquet
+     * COPY, so both get the same checks.
+     *
+     * @throws IOException if the value is blank, names an existing non-directory, or names a
+     *                     directory that cannot be written to
+     */
+    public static Path getTempWriteDir(String tempWriteLocation) throws IOException {
+        if (tempWriteLocation == null || tempWriteLocation.trim().isEmpty()) {
+            throw new IOException(TEMP_WRITE_LOCATION_KEY + " must not be blank");
+        }
+        Path tempWriteDir = Path.of(tempWriteLocation);
         if (!Files.exists(tempWriteDir)) {
             Files.createDirectories(tempWriteDir);
+        } else if (!Files.isDirectory(tempWriteDir)) {
+            throw new IOException(
+                    TEMP_WRITE_LOCATION_KEY + " exists but is not a directory: " + tempWriteDir);
+        }
+        if (!Files.isWritable(tempWriteDir)) {
+            throw new IOException(TEMP_WRITE_LOCATION_KEY + " is not writable: " + tempWriteDir);
         }
         return tempWriteDir;
     }

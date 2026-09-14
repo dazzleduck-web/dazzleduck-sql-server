@@ -92,8 +92,8 @@ class CollectorTempWriteLocationTest {
 
     @Test
     void missingDirectoryIsCreated(@TempDir Path dir) throws IOException {
-        // Matches ConfigConstants.getTempWriteDir on the flight side: an operator who names a
-        // directory gets it, rather than having the process refuse to start.
+        // Delegates to ConfigConstants.getTempWriteDir, so an operator who names a directory
+        // gets it here exactly as on the flight side, rather than the process refusing to start.
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
         Path nested = dir.resolve("does-not-exist").resolve("nested");
@@ -109,6 +109,7 @@ class CollectorTempWriteLocationTest {
     @Test
     void aFileWhereTheDirectoryShouldBeIsRejected(@TempDir Path dir) throws IOException {
         // Cannot be created round it, so this still fails at startup rather than per batch.
+        // The message comes from the shared helper, so it names the key both modules share.
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
         Path file = Files.createFile(dir.resolve("not-a-directory"));

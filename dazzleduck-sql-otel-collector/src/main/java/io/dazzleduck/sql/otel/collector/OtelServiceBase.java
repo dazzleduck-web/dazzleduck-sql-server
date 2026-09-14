@@ -4,6 +4,7 @@ import com.google.protobuf.Any;
 import com.google.rpc.RetryInfo;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.ingestion.Batch;
+import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.ingestion.IngestionConfig;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.ParquetIngestionQueue;
@@ -60,9 +61,10 @@ class OtelServiceBase implements Closeable {
 
     /**
      * @param tempWriteLocation parent directory for this service's scratch directory, from
-     *                          {@code otel_collector.temp_write_location}. Created if absent;
-     *                          an unusable value fails here, at startup, rather than on the
-     *                          first export RPC.
+     *                          {@code otel_collector.temp_write_location}. Resolved by the shared
+     *                          {@link ConfigConstants#getTempWriteDir(String)}, so it is created
+     *                          if absent and an unusable value fails here, at startup, rather
+     *                          than on the first export RPC — identically to the flight server.
      */
     OtelServiceBase(String tempWriteLocation,
                     String tempDirPrefix,
@@ -70,9 +72,12 @@ class OtelServiceBase implements Closeable {
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
                     OtelCollectorMetrics metrics) throws IOException {
-        this.allocator = new RootAllocator();
-        this.tempDir = Files.createTempDirectory(resolveTempParent(tempWriteLocation), tempDirPrefix);
+        // Resolve the scratch directory BEFORE allocating: the validation below throws on a bad
+        // temp_write_location, and an allocator created first would never be closed.
+        this.tempDir = Files.createTempDirectory(
+                ConfigConstants.getTempWriteDir(tempWriteLocation), tempDirPrefix);
         log.info("Arrow scratch directory for '{}': {}", tempDirPrefix, tempDir);
+        this.allocator = new RootAllocator();
         this.handler = handler;
         this.metrics = metrics;
         // Build the queue (sharing the collector-wide flush scheduler) and register its metrics.
@@ -165,31 +170,6 @@ class OtelServiceBase implements Closeable {
      * Queues with {@code extract_claims} get the claims-column schema variant, filled from
      * the caller's verified JWT claims after the batch writer runs.
      */
-    /**
-     * Resolves {@code otel_collector.temp_write_location}, creating it if absent — matching
-     * {@link io.dazzleduck.sql.common.ConfigConstants#getTempWriteDir}, so an operator who names a
-     * directory gets it in both the flight server and the collector.
-     *
-     * <p>What cannot be made usable still fails here, at startup, with a message naming the key,
-     * rather than as a per-batch IOException once telemetry is already flowing.
-     */
-    private static Path resolveTempParent(String tempWriteLocation) throws IOException {
-        if (tempWriteLocation == null || tempWriteLocation.isBlank()) {
-            throw new IOException("otel_collector.temp_write_location must not be blank");
-        }
-        Path parent = Path.of(tempWriteLocation);
-        if (!Files.exists(parent)) {
-            Files.createDirectories(parent);
-        } else if (!Files.isDirectory(parent)) {
-            throw new IOException(
-                    "otel_collector.temp_write_location exists but is not a directory: " + parent);
-        }
-        if (!Files.isWritable(parent)) {
-            throw new IOException("otel_collector.temp_write_location is not writable: " + parent);
-        }
-        return parent;
-    }
-
     <E> Path writeArrowFile(String queueId, List<E> entries, Schema schema,
                              BiConsumer<List<E>, VectorSchemaRoot> batchWriter) throws IOException {
         Map<String, String> claims = claimsFor(queueId);

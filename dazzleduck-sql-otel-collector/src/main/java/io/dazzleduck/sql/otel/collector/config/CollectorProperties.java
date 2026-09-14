@@ -36,7 +36,8 @@ public class CollectorProperties {
     private MeterRegistry meterRegistry = new SimpleMeterRegistry();
     private boolean verifySignature = true;
     // Parent directory for each signal service's temporary Arrow scratch directory.
-    private String tempWriteLocation = System.getProperty("java.io.tmpdir");
+    private String tempWriteLocation =
+            java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "dazzleduck-writes").toString();
 
     public String getTempWriteLocation() {
         return tempWriteLocation;
