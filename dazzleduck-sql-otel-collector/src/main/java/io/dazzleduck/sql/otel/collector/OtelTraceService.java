@@ -31,10 +31,10 @@ public class OtelTraceService extends TraceServiceGrpc.TraceServiceImplBase impl
     private final OtelCollectorMetrics metrics;
     private final OtelServiceBase base;
 
-    public OtelTraceService(String tempWriteLocation, IngestionHandler handler, IngestionConfig ingestionConfig,
+    public OtelTraceService(Path tempWriteDir, IngestionHandler handler, IngestionConfig ingestionConfig,
                             ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics) throws IOException {
         this.metrics = metrics;
-        this.base = new OtelServiceBase(tempWriteLocation, "otel-traces-arrow-", handler, ingestionConfig, flushScheduler, metrics);
+        this.base = new OtelServiceBase(tempWriteDir, "otel-traces-arrow-", handler, ingestionConfig, flushScheduler, metrics);
     }
 
     @Override

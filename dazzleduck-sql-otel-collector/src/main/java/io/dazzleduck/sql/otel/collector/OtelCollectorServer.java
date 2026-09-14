@@ -15,6 +15,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Path;
+import io.dazzleduck.sql.common.ConfigConstants;
 import java.net.InetAddress;
 import java.time.Duration;
 import java.util.concurrent.Executors;
@@ -57,6 +59,13 @@ public class OtelCollectorServer implements Closeable {
 
     public void start() throws IOException {
         try {
+            // Resolved once, before anything is allocated: this validates and creates operator
+            // config, which is a startup concern rather than a per-service one. Doing it here
+            // means a bad temp_write_location fails before the meter registry, health reporter
+            // and flush scheduler are built, and the three services share one checked directory
+            // instead of each re-creating and re-validating it.
+            Path tempWriteDir = ConfigConstants.getTempWriteDir(props.getTempWriteLocation());
+
             handler = props.getIngestionHandler();
             var ingestionConfig = props.getIngestionConfig();
 
@@ -80,10 +89,9 @@ public class OtelCollectorServer implements Closeable {
                 return t;
             });
 
-            String tempWriteLocation = props.getTempWriteLocation();
-            logService     = new OtelLogService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
-            traceService   = new OtelTraceService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
-            metricsService = new OtelMetricsService(tempWriteLocation, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            logService     = new OtelLogService(tempWriteDir, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            traceService   = new OtelTraceService(tempWriteDir, handler, ingestionConfig, flushScheduler, collectorMetrics);
+            metricsService = new OtelMetricsService(tempWriteDir, handler, ingestionConfig, flushScheduler, collectorMetrics);
 
             if (!"jwt".equals(props.getAuthentication())) {
                 throw new IllegalStateException(

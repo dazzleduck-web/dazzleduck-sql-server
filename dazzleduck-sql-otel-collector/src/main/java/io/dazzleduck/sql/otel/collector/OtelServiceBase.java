@@ -60,22 +60,22 @@ class OtelServiceBase implements Closeable {
     private final IngestionHandler.QueueEventListener listener;
 
     /**
-     * @param tempWriteLocation parent directory for this service's scratch directory, from
-     *                          {@code otel_collector.temp_write_location}. Resolved by the shared
-     *                          {@link ConfigConstants#getTempWriteDir(String)}, so it is created
-     *                          if absent and an unusable value fails here, at startup, rather
-     *                          than on the first export RPC — identically to the flight server.
+     * @param tempWriteDir parent for this service's scratch directory — already created and
+     *                     validated by {@link ConfigConstants#getTempWriteDir(String)} in
+     *                     {@link OtelCollectorServer#start()}. Passing a resolved {@code Path}
+     *                     rather than the raw config string keeps operator-config validation at
+     *                     startup, done once, instead of repeated in each of the three services.
      */
-    OtelServiceBase(String tempWriteLocation,
+    OtelServiceBase(Path tempWriteDir,
                     String tempDirPrefix,
                     IngestionHandler handler,
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
                     OtelCollectorMetrics metrics) throws IOException {
-        // Resolve the scratch directory BEFORE allocating: the validation below throws on a bad
-        // temp_write_location, and an allocator created first would never be closed.
-        this.tempDir = Files.createTempDirectory(
-                ConfigConstants.getTempWriteDir(tempWriteLocation), tempDirPrefix);
+        // Create the scratch directory BEFORE allocating: createTempDirectory can still fail
+        // (the volume filling, a race removing the parent), and an allocator created first
+        // would never be closed.
+        this.tempDir = Files.createTempDirectory(tempWriteDir, tempDirPrefix);
         log.info("Arrow scratch directory for '{}': {}", tempDirPrefix, tempDir);
         this.allocator = new RootAllocator();
         this.handler = handler;

@@ -63,7 +63,7 @@ class OtelServiceBaseTest {
     void setUp() throws Exception {
         scheduler = Executors.newSingleThreadScheduledExecutor();
         handler = new FakeHandler(tempDir);
-        base = new OtelServiceBase(tempDir.toString(), "otel-base-test-", handler, CONFIG, scheduler, metrics);
+        base = new OtelServiceBase(tempDir, "otel-base-test-", handler, CONFIG, scheduler, metrics);
     }
 
     @AfterEach

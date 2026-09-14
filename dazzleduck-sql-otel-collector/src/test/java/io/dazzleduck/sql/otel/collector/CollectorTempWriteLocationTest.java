@@ -22,9 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@code otel_collector.temp_write_location} — the parent directory for each signal service's Arrow scratch
- * directory. Declared in reference.conf with a {@code ${java.io.tmpdir}} default, so it is always
- * present but never has to be set.
+ * {@code otel_collector.temp_write_location} — the parent directory for each signal service's Arrow
+ * scratch directory. Declared in reference.conf with a {@code ${java.io.tmpdir}"/dazzleduck-writes"}
+ * default, so it is always present but never has to be set.
+ *
+ * <p>Validating and creating that directory is {@link OtelCollectorServer}'s job, done once at
+ * startup via {@code ConfigConstants.getTempWriteDir}; those checks are covered by
+ * {@code ConfigConstantsTempWriteDirTest} in dazzleduck-sql-common. What is tested here is the
+ * config value itself and the per-service scratch directory created beneath it.
  */
 class CollectorTempWriteLocationTest {
 
@@ -62,7 +67,7 @@ class CollectorTempWriteLocationTest {
     void scratchDirectoryIsCreatedUnderTheConfiguredPath(@TempDir Path dir) throws IOException {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        try (var base = new OtelServiceBase(dir.toString(), "otel-logs-arrow-",
+        try (var base = new OtelServiceBase(dir, "otel-logs-arrow-",
                 NOOP_HANDLER, CONFIG, scheduler, metrics)) {
             try (var children = Files.list(dir)) {
                 Path created = children.findFirst().orElseThrow(
@@ -80,7 +85,7 @@ class CollectorTempWriteLocationTest {
     void scratchDirectoryIsRemovedOnClose(@TempDir Path dir) throws IOException {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        var base = new OtelServiceBase(dir.toString(), "otel-traces-arrow-",
+        var base = new OtelServiceBase(dir, "otel-traces-arrow-",
                 NOOP_HANDLER, CONFIG, scheduler, metrics);
         base.close();
         scheduler.shutdownNow();
@@ -90,50 +95,6 @@ class CollectorTempWriteLocationTest {
         }
     }
 
-    @Test
-    void missingDirectoryIsCreated(@TempDir Path dir) throws IOException {
-        // Delegates to ConfigConstants.getTempWriteDir, so an operator who names a directory
-        // gets it here exactly as on the flight side, rather than the process refusing to start.
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        Path nested = dir.resolve("does-not-exist").resolve("nested");
-        try (var base = new OtelServiceBase(nested.toString(), "otel-logs-arrow-",
-                NOOP_HANDLER, CONFIG, scheduler, metrics)) {
-            assertTrue(Files.isDirectory(nested), "temp_write_location must be created: " + nested);
-        } finally {
-            scheduler.shutdownNow();
-            metrics.close();
-        }
-    }
 
-    @Test
-    void aFileWhereTheDirectoryShouldBeIsRejected(@TempDir Path dir) throws IOException {
-        // Cannot be created round it, so this still fails at startup rather than per batch.
-        // The message comes from the shared helper, so it names the key both modules share.
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        Path file = Files.createFile(dir.resolve("not-a-directory"));
-        try {
-            IOException e = assertThrows(IOException.class, () -> new OtelServiceBase(
-                    file.toString(), "otel-logs-arrow-", NOOP_HANDLER, CONFIG, scheduler, metrics));
-            assertTrue(e.getMessage().contains("is not a directory"), e.getMessage());
-        } finally {
-            scheduler.shutdownNow();
-            metrics.close();
-        }
-    }
 
-    @Test
-    void blankValueIsRejected() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        var metrics = new OtelCollectorMetrics(new SimpleMeterRegistry());
-        try {
-            IOException e = assertThrows(IOException.class, () -> new OtelServiceBase(
-                    "  ", "otel-logs-arrow-", NOOP_HANDLER, CONFIG, scheduler, metrics));
-            assertTrue(e.getMessage().contains("must not be blank"), e.getMessage());
-        } finally {
-            scheduler.shutdownNow();
-            metrics.close();
-        }
-    }
 }
