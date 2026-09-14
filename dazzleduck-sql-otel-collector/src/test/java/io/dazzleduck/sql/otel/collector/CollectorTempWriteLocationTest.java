@@ -65,6 +65,20 @@ class CollectorTempWriteLocationTest {
     }
 
     @Test
+    void programmaticDefaultsAgreeWithTheDeclaredDefault() {
+        // The same default is spelled in reference.conf, CollectorConfig.DEFAULT_TEMP_SUBDIRECTORY
+        // and the CollectorProperties field initialiser. Only reference.conf drives production, so
+        // the other two could drift silently — every collector test builds CollectorProperties
+        // directly and would quietly stage batches somewhere else.
+        // Compared as Paths, not strings: HOCON concatenation leaves a redundant separator when
+        // java.io.tmpdir ends in one (macOS), which Path.of normalises away. The directory is
+        // what has to match, not the spelling.
+        assertEquals(Path.of(new CollectorConfig().getTempWriteLocation()),
+                Path.of(new CollectorProperties().getTempWriteLocation()),
+                "CollectorProperties must default to the same directory as the declared config");
+    }
+
+    @Test
     void serverCreatesOneScratchDirectoryPerSignalUnderTheConfiguredPath(@TempDir Path dir)
             throws IOException {
         // Creation is the server's job, not a service constructor's, so it is exercised here.
@@ -80,7 +94,9 @@ class CollectorTempWriteLocationTest {
         assertTrue(logs.getFileName().toString().startsWith("otel-logs-arrow-"), logs.toString());
         assertTrue(traces.getFileName().toString().startsWith("otel-traces-arrow-"), traces.toString());
         assertTrue(metrics.getFileName().toString().startsWith("otel-metrics-arrow-"), metrics.toString());
-        assertEquals(3L, Files.list(dir).count(), "one directory per signal");
+        try (var entries = Files.list(dir)) {
+            assertEquals(3L, entries.count(), "one directory per signal");
+        }
     }
 
     @Test

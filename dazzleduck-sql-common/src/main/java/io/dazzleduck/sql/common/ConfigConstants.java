@@ -142,7 +142,10 @@ public class ConfigConstants {
         if (tempWriteLocation == null || tempWriteLocation.trim().isEmpty()) {
             throw new IOException(TEMP_WRITE_LOCATION_KEY + " must not be blank");
         }
-        Path tempWriteDir = Path.of(tempWriteLocation);
+        // Trim once and use the trimmed value: HOCON preserves spaces inside quotes, and a
+        // leading space would otherwise make this a relative path whose first element is " ",
+        // silently staging batches under the working directory instead of where it says.
+        Path tempWriteDir = Path.of(tempWriteLocation.trim());
         if (!Files.exists(tempWriteDir)) {
             Files.createDirectories(tempWriteDir);
         } else if (!Files.isDirectory(tempWriteDir)) {
