@@ -52,14 +52,16 @@ record CompactionMetrics(MeterRegistry registry, OpenTelemetrySdk sdk) implement
 
         String token = config.hasPath("token") ? config.getString("token").trim() : "";
         if (token.isEmpty()) {
-            // Loud on startup rather than a per-export gRPC error nobody reads.
-            logger.warn("No OTLP token configured — the collector rejects exports that carry no "
-                    + "signed token with an x-dd-ingestion-queue claim");
-        } else {
-            // The header value is sent verbatim, so a raw token would be rejected on every export.
-            exporter.addHeader("Authorization",
-                    token.startsWith(BEARER_PREFIX) ? token : BEARER_PREFIX + token);
+            // Fail fast: an enabled exporter with no token has every RPC rejected by the collector
+            // (INVALID_ARGUMENT — it requires a signed token with an x-dd-ingestion-queue claim),
+            // so metrics would silently never land. Refuse to start rather than export into a void.
+            throw new IllegalStateException("Metric export is enabled but no OTLP token is configured"
+                    + " — set metrics.token (DD_METRICS_OTLP_TOKEN) to a signed token carrying an"
+                    + " x-dd-ingestion-queue claim, or set metrics.enabled=false");
         }
+        // The header value is sent verbatim, so a raw token would be rejected on every export.
+        exporter.addHeader("Authorization",
+                token.startsWith(BEARER_PREFIX) ? token : BEARER_PREFIX + token);
 
         SdkMeterProvider meterProvider = SdkMeterProvider.builder()
                 .setResource(Resource.getDefault().toBuilder()
@@ -79,6 +81,7 @@ record CompactionMetrics(MeterRegistry registry, OpenTelemetrySdk sdk) implement
 
     @Override
     public void close() {
+        registry.close(); // stops the registry's own publishing/step thread (logging or OTel bridge)
         if (sdk != null) {
             sdk.close(); // flushes whatever the last interval buffered
         }
