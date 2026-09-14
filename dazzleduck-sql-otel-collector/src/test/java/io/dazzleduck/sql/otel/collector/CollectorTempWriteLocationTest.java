@@ -41,11 +41,14 @@ class CollectorTempWriteLocationTest {
     };
 
     @Test
-    void defaultsToJavaIoTmpdir() {
-        // reference.conf resolves ${java.io.tmpdir}, so an unset temp_write_location still yields a usable
-        // directory rather than a missing-key failure.
-        assertEquals(System.getProperty("java.io.tmpdir"), new CollectorConfig().getTempWriteLocation());
+    void defaultMatchesTheFlightModule() {
+        // reference.conf resolves ${java.io.tmpdir}"/dazzleduck-writes", so an unset key still
+        // yields a usable directory rather than a missing-key failure -- and the same directory
+        // the flight module defaults to (/tmp/dazzleduck-writes on Linux).
+        Path expected = Path.of(System.getProperty("java.io.tmpdir"), "dazzleduck-writes");
+        assertEquals(expected, Path.of(new CollectorConfig().getTempWriteLocation()));
     }
+
 
     @Test
     void explicitValueOverridesTheDefault(@TempDir Path dir) {

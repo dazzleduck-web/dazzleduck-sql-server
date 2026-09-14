@@ -46,7 +46,7 @@ otel_collector {
     grpc_port = 4317
 
     # Parent directory for the per-signal Arrow scratch directories (see "Temporary Arrow files")
-    temp_write_location = ${java.io.tmpdir}
+    temp_write_location = ${java.io.tmpdir}"/dazzleduck-writes"
 
     # health { port, shutdown_grace_period_ms } — see the Health Check section below
 
@@ -177,8 +177,9 @@ Parquet `COPY` reads it. The three signal services each create their own scratch
 | traces | `otel-traces-arrow-` |
 | metrics | `otel-metrics-arrow-` |
 
-`temp_write_location` — the same key the flight module uses for the same purpose — defaults to
-`${java.io.tmpdir}` (`/tmp` on Linux), so it never has to be set. But the
+`temp_write_location` — the same key, and the same default, as the flight module — resolves to
+`${java.io.tmpdir}/dazzleduck-writes` (`/tmp/dazzleduck-writes` on Linux), so it never has to be
+set. But the
 staging files are uncompressed and therefore larger than the Parquet they become, so point it at a
 real data volume when the default is a small `tmpfs`:
 
