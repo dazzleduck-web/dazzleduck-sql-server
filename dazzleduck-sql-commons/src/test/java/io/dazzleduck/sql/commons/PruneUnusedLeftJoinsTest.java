@@ -568,6 +568,52 @@ public class PruneUnusedLeftJoinsTest {
         assertEquivalentToView(pruned, outer);
     }
 
+    /**
+     * The shared filter-CTE's only consumer is a sibling CTE, not the enclosing statement (the
+     * outer query selects from `page`, never from `___fv`), and `a_name` is read only inside that
+     * sibling. The single-consumer path must read usage from the sibling — reading it from the
+     * top-level scope instead never sees `a_name`, prunes join `a` out from under `page`, and
+     * `page`'s `SELECT a_name` no longer binds.
+     */
+    @Test
+    void sharedFilterCte_soleConsumerIsSiblingCte_keepsItsColumns() throws Exception {
+        String outer =
+                "WITH ___fv AS (SELECT * FROM fv WHERE f_col > 0), " +
+                "     page AS (SELECT a_name, f_id FROM ___fv) " +
+                "SELECT p.f_id FROM page p ORDER BY p.f_id";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(1, joinsInCte(pruned, "___fv"),
+                "join a is read only by the sibling CTE and must survive its pruning");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    /**
+     * Two star-filter CTEs over the same view. Splitting the first grows the cte_map, so visiting
+     * the references low-index-first would leave the second CTE's precomputed index pointing at a
+     * freshly-inserted clone — `w2` would never be pruned. Visiting high-index-first keeps every
+     * unvisited index valid, so `w2` is still narrowed to its lone consumer's `a_name`: join `b`
+     * eliminated, join `a` kept (one join in the inlined body).
+     */
+    @Test
+    void twoFilterCtesOverSameView_secondStillPrunedAfterFirstSplits() throws Exception {
+        String outer =
+                "WITH w1 AS (SELECT * FROM fv WHERE f_col > 0), " +
+                "     w2 AS (SELECT * FROM fv WHERE f_col > 5), " +
+                "     page AS (SELECT f_id FROM w1), " +
+                "     side AS (SELECT f_id, a_name FROM w2) " +
+                "SELECT x.b_name, p.f_id, s.a_name " +
+                "FROM w1 x JOIN page p ON p.f_id = x.f_id " +
+                "          JOIN side s ON s.f_id = x.f_id " +
+                "ORDER BY p.f_id";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(1, joinsInCte(pruned, "w2"),
+                "w2 must be pruned to its consumer's a_name — reached only if splitting w1 did not "
+                        + "shift w2 out from under its index");
+        assertEquivalentToView(pruned, outer);
+    }
+
     /** JOIN nodes inside the CTE declared under {@code key}; -1 when no such CTE exists. */
     private int joinsInCte(JsonNode pruned, String key) {
         JsonNode map = pruned.path("statements").path(0).path("node").path("cte_map").path("map");

@@ -1027,7 +1027,12 @@ public class Transformations {
             ObjectNode rootCopy = (ObjectNode) outerSqlAst.deepCopy();
             ObjectNode outerCopy = (ObjectNode) getFirstStatementNode(rootCopy);
             boolean changed = false;
-            for (int idx : cteRefs) {
+            // Visit the references high-index-first: pruneStarFilterCteForConsumers can split a CTE,
+            // which grows the cte_map (one entry removed, N clones inserted) and shifts every index
+            // above the split point. Descending order guarantees a split only ever moves entries we
+            // have already processed, so an index we still hold stays valid.
+            for (int i = cteRefs.size() - 1; i >= 0; i--) {
+                int idx = cteRefs.get(i);
                 ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
                         .get(idx).get("value").get("query").get("node");
                 if (isStarFilterCteBody(cteBody)) {
@@ -1142,7 +1147,7 @@ public class Transformations {
                                                           String cteName, ObjectNode cteBody,
                                                           JsonNode viewBodyAst) {
         if (cteName == null || cteName.isEmpty()) {
-            return pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+            return pruneStarFilterCte(outerCopy, true, cteBody, viewBodyAst);
         }
         // The filter's own columns are needed by every clone: the wrapper still applies the WHERE
         // over the inlined subquery, so they must survive pruning in each.
@@ -1150,10 +1155,16 @@ public class Transformations {
         collectUsage(cteBody.get(FIELD_WHERE_CLAUSE), filterUse);
 
         List<ObjectNode> consumers = findCteConsumers(outerCopy, cteIndex, cteName);
-        if (consumers.size() <= 1) {
-            // Single consumer: nothing to specialize, and the enclosing-scope usage is the whole
-            // story. Delegate so that path's behaviour is bit-for-bit unchanged.
-            return pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+        if (consumers.isEmpty()) {
+            // An unreferenced filter CTE: no scope enumerates its columns, so nothing to narrow to.
+            return false;
+        }
+        if (consumers.size() == 1) {
+            // Single consumer: nothing to specialize. Prune in place against exactly that scope's
+            // usage — which may be a sibling CTE, not the enclosing statement, so read it from the
+            // consumer itself. (For an outer-scope consumer this is the pre-split path unchanged.)
+            ObjectNode only = consumers.get(0);
+            return pruneStarFilterCte(only, only == outerCopy, cteBody, viewBodyAst);
         }
 
         List<Set<String>> perConsumer = new ArrayList<>();
@@ -1192,11 +1203,19 @@ public class Transformations {
                                               List<Set<String>> perConsumer) {
         ArrayNode map = (ArrayNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP);
         JsonNode original = map.get(cteIndex);
-        List<JsonNode> clones = new ArrayList<>();
-        boolean anyPruned = false;
 
+        // Phase 1 — build and prune the clones off to the side, mutating nothing shared. Every
+        // consumer is known to reference cteName (findCteConsumers selected them by the same
+        // predicate renameTableRefs uses), so the rename below cannot come up empty; assert it
+        // rather than half-rewrite the tree and bail.
+        List<JsonNode> clones = new ArrayList<>();
+        List<String> cloneNames = new ArrayList<>();
+        boolean anyPruned = false;
         for (int i = 0; i < consumers.size(); i++) {
-            String cloneName = cteName + "__c" + i;
+            if (!referencesTable(consumers.get(i), cteName, consumers.get(i) == outerCopy)) {
+                return false;   // a consumer we cannot rewrite → abandon before touching anything
+            }
+            String cloneName = uniqueCteKey(map, cteName + "__c" + i);
             ObjectNode cloneEntry = (ObjectNode) original.deepCopy();
             cloneEntry.put(FIELD_KEY, cloneName);
             ObjectNode cloneBody = (ObjectNode) cloneEntry.path("value").path("query").path("node");
@@ -1205,19 +1224,37 @@ public class Transformations {
                 anyPruned |= pruneViewBodyInto(cloneBody, cloneBody.get(FIELD_FROM_TABLE),
                         viewBodyAst, cols);
             }
-            if (!renameTableRefs(consumers.get(i), cteName, cloneName,
-                    consumers.get(i) == outerCopy)) {
-                return false;   // a consumer we cannot rewrite → abandon the split entirely
-            }
             clones.add(cloneEntry);
+            cloneNames.add(cloneName);
         }
-        if (!anyPruned) return false;   // nothing gained; leave the AST alone
+        if (!anyPruned) return false;   // nothing gained; the shared tree is still untouched
 
+        // Phase 2 — commit: point each consumer at its clone, then swap the map entries. From here
+        // on the tree is mutated, but only once the split is guaranteed to complete.
+        for (int i = 0; i < consumers.size(); i++) {
+            renameTableRefs(consumers.get(i), cteName, cloneNames.get(i),
+                    consumers.get(i) == outerCopy);
+        }
         map.remove(cteIndex);
         for (int i = 0; i < clones.size(); i++) {
             map.insert(cteIndex + i, clones.get(i));
         }
         return true;
+    }
+
+    /** {@code base}, or {@code base + "_" + n} for the first n that no existing cte_map key uses. */
+    private static String uniqueCteKey(ArrayNode map, String base) {
+        String candidate = base;
+        int suffix = 0;
+        while (cteKeyExists(map, candidate)) candidate = base + "_" + (++suffix);
+        return candidate;
+    }
+
+    private static boolean cteKeyExists(ArrayNode map, String name) {
+        for (JsonNode entry : map) {
+            if (name.equalsIgnoreCase(asText(entry, FIELD_KEY))) return true;
+        }
+        return false;
     }
 
     /**
@@ -1282,9 +1319,9 @@ public class Transformations {
         return n;
     }
 
-    private static boolean pruneStarFilterCte(ObjectNode consumerScope, ObjectNode cteBody,
-                                              JsonNode viewBodyAst) {
-        UsedColumns consumer = collectScopedUsage(consumerScope, true);
+    private static boolean pruneStarFilterCte(ObjectNode consumerScope, boolean excludeCteMap,
+                                              ObjectNode cteBody, JsonNode viewBodyAst) {
+        UsedColumns consumer = collectScopedUsage(consumerScope, excludeCteMap);
         if (consumer.hasStar || consumer.hasQualifiedStar) return false;
         Set<String> usedViewCols = new HashSet<>(consumer.columnNames);
         UsedColumns filterUse = new UsedColumns();
