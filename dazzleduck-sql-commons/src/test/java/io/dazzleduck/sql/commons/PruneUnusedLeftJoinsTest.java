@@ -516,6 +516,69 @@ public class PruneUnusedLeftJoinsTest {
         assertEquivalentToView(pruned, outer);
     }
 
+    // ---- shared RLS filter-CTE with several consumers ----
+
+    /**
+     * The RLS authorizer emits ONE filter CTE per table, so a query referencing the view twice has
+     * both references rewritten to the same `___fv`. Here `a_name` is used only inside the sibling
+     * CTE and the outer scope needs only `b_name` — collecting consumer usage from the outer scope
+     * alone prunes join `a` out from under the sibling, and the query no longer binds.
+     */
+    @Test
+    void sharedFilterCte_columnUsedOnlyInSiblingCte_stillBinds() throws Exception {
+        String outer =
+                "WITH ___fv AS (SELECT * FROM fv WHERE f_col > 0), " +
+                "     page AS (SELECT f_id FROM ___fv WHERE a_name = 'a10') " +
+                "SELECT x.b_name FROM ___fv x JOIN page p ON p.f_id = x.f_id";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquivalentToView(pruned, outer);
+    }
+
+    /** The two-phase page shape: a narrow CTE picks the page, the outer dresses it. */
+    @Test
+    void sharedFilterCte_narrowSiblingAndWideOuter_bothCorrect() throws Exception {
+        String outer =
+                "WITH ___fv AS (SELECT * FROM fv WHERE f_col > 0), " +
+                "     page AS (SELECT f_id FROM ___fv ORDER BY f_id LIMIT 2) " +
+                "SELECT x.f_id, x.a_name, x.b_name FROM ___fv x JOIN page p ON p.f_id = x.f_id " +
+                "ORDER BY x.f_id";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquivalentToView(pruned, outer);
+    }
+
+    /**
+     * The point of the split: a narrow consumer must not inherit a wide one's joins. `page` needs
+     * only f_id and the outer only b_name — so page's clone should carry zero joins while the
+     * outer's carries exactly one. Pruned against the union (the pre-split behaviour) both scopes
+     * would pay for join b.
+     */
+    @Test
+    void sharedFilterCte_narrowConsumerGetsItsOwnJoinFreeClone() throws Exception {
+        String outer =
+                "WITH ___fv AS (SELECT * FROM fv WHERE f_col > 0), " +
+                "     page AS (SELECT f_id FROM ___fv ORDER BY f_id LIMIT 2) " +
+                "SELECT x.f_id, x.b_name FROM ___fv x JOIN page p ON p.f_id = x.f_id " +
+                "ORDER BY x.f_id";
+        JsonNode pruned = prune(outer, "fv", VIEW_BODY);
+
+        assertEquals(0, joinsInCte(pruned, "___fv__c0"), "page's clone needs no dimension join");
+        assertEquals(1, joinsInCte(pruned, "___fv__c1"), "the outer's clone needs only join b");
+        assertEquivalentToView(pruned, outer);
+    }
+
+    /** JOIN nodes inside the CTE declared under {@code key}; -1 when no such CTE exists. */
+    private int joinsInCte(JsonNode pruned, String key) {
+        JsonNode map = pruned.path("statements").path(0).path("node").path("cte_map").path("map");
+        for (JsonNode entry : map) {
+            if (key.equalsIgnoreCase(entry.path("key").asText())) {
+                return countJoins(entry.path("value").path("query").path("node"));
+            }
+        }
+        return -1;
+    }
+
     // ---- review probes: edge cases ----
 
     @Test

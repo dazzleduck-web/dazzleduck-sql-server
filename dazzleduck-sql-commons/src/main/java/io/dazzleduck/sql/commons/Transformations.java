@@ -1034,7 +1034,10 @@ public class Transformations {
                     // Row-filter wrapper `SELECT * FROM <view> WHERE <filter>` (the RLS authorizer's
                     // output): its own STAR hides the real column usage, which lives in the CTE's
                     // consumers. Recover it from there rather than bailing on the STAR.
-                    changed |= pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+                    String cteName = asText(outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
+                            .get(idx), FIELD_KEY);
+                    changed |= pruneStarFilterCteForConsumers(outerCopy, idx, cteName, cteBody,
+                            viewBodyAst);
                 } else {
                     changed |= pruneScope(cteBody, viewBodyAst, collectScopedUsage(cteBody, false));
                 }
@@ -1113,6 +1116,172 @@ public class Transformations {
      * (keeps extra columns → fewer joins dropped, never a wrong result), and the projection-only
      * change is fail-safe: a missed column yields a bind error, never an unfiltered row.
      */
+    /**
+     * Prune a star-filter CTE against <b>every</b> scope that consumes it, specializing per consumer
+     * where their column usage differs.
+     *
+     * <p>The RLS authorizer emits <b>one</b> filter CTE per table ({@code injectFilterCtes} keys
+     * {@code tablesToWrap} by qualified table name), so a query naming the same view twice — the
+     * two-phase page shape {@code WITH page AS (SELECT rowid, ts FROM v) SELECT … FROM v JOIN page}
+     * — has both references rewritten to a single {@code ___v}. That makes the CTE's consumers a
+     * <b>set</b>, not one scope, with two consequences:
+     * <ul>
+     *   <li><b>Correctness.</b> Pruning against the enclosing scope alone drops columns a sibling
+     *       CTE still reads, and the query no longer binds.</li>
+     *   <li><b>Specialization.</b> Pruning against the union keeps every join any consumer needs,
+     *       so a narrow consumer inherits a wide one's joins. Splitting the CTE — one pruned clone
+     *       per consumer — is what lets the narrow scope actually skip them.</li>
+     * </ul>
+     *
+     * <p>Splitting duplicates the filter expression, never the rows: each clone is the identical
+     * {@code SELECT * FROM <view> WHERE <filter>} with a different subset of the view's joins, so
+     * every consumer still reads exactly the rows the grant allows. A consumer whose columns cannot
+     * be enumerated (a STAR in that scope) keeps an unpruned clone rather than blocking the others.
+     */
+    private static boolean pruneStarFilterCteForConsumers(ObjectNode outerCopy, int cteIndex,
+                                                          String cteName, ObjectNode cteBody,
+                                                          JsonNode viewBodyAst) {
+        if (cteName == null || cteName.isEmpty()) {
+            return pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+        }
+        // The filter's own columns are needed by every clone: the wrapper still applies the WHERE
+        // over the inlined subquery, so they must survive pruning in each.
+        UsedColumns filterUse = new UsedColumns();
+        collectUsage(cteBody.get(FIELD_WHERE_CLAUSE), filterUse);
+
+        List<ObjectNode> consumers = findCteConsumers(outerCopy, cteIndex, cteName);
+        if (consumers.size() <= 1) {
+            // Single consumer: nothing to specialize, and the enclosing-scope usage is the whole
+            // story. Delegate so that path's behaviour is bit-for-bit unchanged.
+            return pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+        }
+
+        List<Set<String>> perConsumer = new ArrayList<>();
+        for (ObjectNode scope : consumers) {
+            UsedColumns use = collectScopedUsage(scope, scope == outerCopy);
+            if (use.hasStar || use.hasQualifiedStar) {
+                perConsumer.add(null);            // not enumerable → unpruned clone
+            } else {
+                Set<String> cols = new HashSet<>(use.columnNames);
+                cols.addAll(filterUse.columnNames);
+                perConsumer.add(cols);
+            }
+        }
+        boolean diverges = false;
+        for (int i = 1; i < perConsumer.size(); i++) {
+            if (!Objects.equals(perConsumer.get(0), perConsumer.get(i))) { diverges = true; break; }
+        }
+        if (!diverges) {
+            // Every consumer wants the same columns — prune once, in place, no split.
+            Set<String> cols = perConsumer.get(0);
+            return cols != null
+                    && pruneViewBodyInto(cteBody, cteBody.get(FIELD_FROM_TABLE), viewBodyAst, cols);
+        }
+        return splitStarFilterCte(outerCopy, cteIndex, cteName, cteBody, viewBodyAst,
+                consumers, perConsumer);
+    }
+
+    /**
+     * Replace one star-filter CTE with a pruned clone per consumer, rewriting each consumer's
+     * references to its own clone. Clones are inserted at the original's index so they stay
+     * declared ahead of every scope that reads them, and the original entry is removed.
+     */
+    private static boolean splitStarFilterCte(ObjectNode outerCopy, int cteIndex, String cteName,
+                                              ObjectNode cteBody, JsonNode viewBodyAst,
+                                              List<ObjectNode> consumers,
+                                              List<Set<String>> perConsumer) {
+        ArrayNode map = (ArrayNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP);
+        JsonNode original = map.get(cteIndex);
+        List<JsonNode> clones = new ArrayList<>();
+        boolean anyPruned = false;
+
+        for (int i = 0; i < consumers.size(); i++) {
+            String cloneName = cteName + "__c" + i;
+            ObjectNode cloneEntry = (ObjectNode) original.deepCopy();
+            cloneEntry.put(FIELD_KEY, cloneName);
+            ObjectNode cloneBody = (ObjectNode) cloneEntry.path("value").path("query").path("node");
+            Set<String> cols = perConsumer.get(i);
+            if (cols != null) {
+                anyPruned |= pruneViewBodyInto(cloneBody, cloneBody.get(FIELD_FROM_TABLE),
+                        viewBodyAst, cols);
+            }
+            if (!renameTableRefs(consumers.get(i), cteName, cloneName,
+                    consumers.get(i) == outerCopy)) {
+                return false;   // a consumer we cannot rewrite → abandon the split entirely
+            }
+            clones.add(cloneEntry);
+        }
+        if (!anyPruned) return false;   // nothing gained; leave the AST alone
+
+        map.remove(cteIndex);
+        for (int i = 0; i < clones.size(); i++) {
+            map.insert(cteIndex + i, clones.get(i));
+        }
+        return true;
+    }
+
+    /**
+     * Every scope that reads {@code cteName}: each <em>other</em> CTE body that names it, then the
+     * enclosing statement itself. CTE bodies come first so a clone is never inserted after one of
+     * its readers.
+     */
+    private static List<ObjectNode> findCteConsumers(ObjectNode outerCopy, int selfIndex,
+                                                     String cteName) {
+        List<ObjectNode> consumers = new ArrayList<>();
+        JsonNode map = outerCopy.path(FIELD_CTE_MAP).path(FIELD_MAP);
+        if (map.isArray()) {
+            for (int i = 0; i < map.size(); i++) {
+                if (i == selfIndex) continue;
+                JsonNode body = map.get(i).path("value").path("query").path("node");
+                if (body.isObject() && referencesTable((ObjectNode) body, cteName, false)) {
+                    consumers.add((ObjectNode) body);
+                }
+            }
+        }
+        if (referencesTable(outerCopy, cteName, true)) consumers.add(outerCopy);
+        return consumers;
+    }
+
+    /** Whether {@code scope} contains a BASE_TABLE reference named {@code table}. */
+    private static boolean referencesTable(ObjectNode scope, String table, boolean excludeCteMap) {
+        return countTableRefs(scope, table, excludeCteMap, null) > 0;
+    }
+
+    /** Rewrite every BASE_TABLE reference to {@code from} into {@code to} within {@code scope}. */
+    private static boolean renameTableRefs(ObjectNode scope, String from, String to,
+                                           boolean excludeCteMap) {
+        return countTableRefs(scope, from, excludeCteMap, to) > 0;
+    }
+
+    /**
+     * Shared walk for {@link #referencesTable} and {@link #renameTableRefs} — counts BASE_TABLE
+     * nodes named {@code table}, renaming each to {@code rename} when that is non-null. The
+     * {@code cte_map} subtree is skipped for the enclosing scope, whose sibling CTEs are their own
+     * consumers and are visited separately; nested scopes are always walked in full.
+     */
+    private static int countTableRefs(JsonNode node, String table, boolean excludeCteMap,
+                                      String rename) {
+        if (node == null) return 0;
+        int n = 0;
+        if (node.isObject()) {
+            ObjectNode obj = (ObjectNode) node;
+            if (NODE_TYPE_BASE_TABLE.equals(asText(obj, FIELD_TYPE))
+                    && table.equalsIgnoreCase(asText(obj, FIELD_TABLE_NAME))) {
+                n++;
+                if (rename != null) obj.put(FIELD_TABLE_NAME, rename);
+            }
+            var it = obj.fields();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (excludeCteMap && FIELD_CTE_MAP.equals(e.getKey())) continue;
+                n += countTableRefs(e.getValue(), table, false, rename);
+            }
+        } else if (node.isArray()) {
+            for (JsonNode child : node) n += countTableRefs(child, table, false, rename);
+        }
+        return n;
+    }
+
     private static boolean pruneStarFilterCte(ObjectNode consumerScope, ObjectNode cteBody,
                                               JsonNode viewBodyAst) {
         UsedColumns consumer = collectScopedUsage(consumerScope, true);
