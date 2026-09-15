@@ -35,6 +35,17 @@ public class CollectorProperties {
     private Duration jwtExpiration = Duration.ofHours(1);
     private MeterRegistry meterRegistry = new SimpleMeterRegistry();
     private boolean verifySignature = true;
+    // Parent directory for each signal service's temporary Arrow scratch directory.
+    private String tempWriteLocation =
+            java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "dazzleduck-writes").toString();
+
+    public String getTempWriteLocation() {
+        return tempWriteLocation;
+    }
+
+    public void setTempWriteLocation(String tempWriteLocation) {
+        this.tempWriteLocation = tempWriteLocation;
+    }
 
     public int getGrpcPort() {
         return grpcPort;

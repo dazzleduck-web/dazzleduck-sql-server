@@ -241,6 +241,7 @@ public class ExpressionFactory {
      * @param offset the number of rows to skip (can be negative to disable)
      * @return JsonNode representing the LIMIT clause
      */
+    @Deprecated(since = "0.2.18", forRemoval = true)
     public static JsonNode limitModifier(long limit, long offset) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
         result.put(FIELD_TYPE, LIMIT_MODIFIER_TYPE);

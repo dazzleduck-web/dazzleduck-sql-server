@@ -59,7 +59,8 @@ public interface PartitionPrunerV2 {
      */
     List<FileStatus> pruneFiles(JsonNode tree,
                                 long maxSplitSize,
-                                Map<String, String> properties) throws SQLException, IOException;
+                                Map<String, String> properties,
+                                List<String> sessionSetupSqls) throws SQLException, IOException;
 
 
     static String getPath(JsonNode tree) {
@@ -74,21 +75,31 @@ public interface PartitionPrunerV2 {
 class HiveSplitPlanner implements PartitionPrunerV2 {
 
     @Override
-    public List<FileStatus> pruneFiles(JsonNode tree, long maxSplitSize, Map<String, String> properties) throws SQLException, IOException {
+    public List<FileStatus> pruneFiles(JsonNode tree, long maxSplitSize, Map<String, String> properties,
+                                       List<String> sessionSetupSqls) throws SQLException, IOException {
         var partitionDataTypes  = Transformations.getHivePartition(tree);
         var path  = PartitionPrunerV2.getPath(tree);
         return HivePartitionPruning.pruneFiles(path,
-                tree, partitionDataTypes);
+                tree, partitionDataTypes, sessionSetupSqls);
     }
 }
 
 class DeltaLakeSplitPlanner implements PartitionPrunerV2 {
 
     @Override
-    public List<FileStatus> pruneFiles(JsonNode tree, long maxSplitSize, Map<String, String> properties) throws SQLException, IOException {
+    public List<FileStatus> pruneFiles(JsonNode tree, long maxSplitSize, Map<String, String> properties,
+                                       List<String> sessionSetupSqls) throws SQLException, IOException {
         var statement = Transformations.getFirstStatementNode(tree);
         var path  = PartitionPrunerV2.getPath(tree);
         var filterExpression = Transformations.getWhereClauseForTableFunction(statement);
+        // The Delta path converts the filter to a Delta Kernel Predicate, which has no notion of
+        // DuckDB session variables — there is nowhere to apply sessionSetupSqls. Fail loudly rather
+        // than hand the Kernel an expression it will mis-evaluate.
+        if (filterExpression != null
+                && !Transformations.collectFunction(filterExpression, "getvariable").isEmpty()) {
+            throw new SQLException("getvariable() is not supported in a filter over read_delta; "
+                    + "split planning for Delta cannot evaluate session variables");
+        }
         return PartitionPruning.pruneFiles(path, filterExpression);
     }
 }
@@ -97,7 +108,8 @@ class DucklakeSplitPlanner implements PartitionPrunerV2 {
 
     private Map<String, DucklakePartitionPruning> cache = new ConcurrentHashMap<>();
     @Override
-    public List<FileStatus> pruneFiles( JsonNode tree, long maxSplitSize, Map<String, String> properties) throws SQLException, IOException {
+    public List<FileStatus> pruneFiles( JsonNode tree, long maxSplitSize, Map<String, String> properties,
+                                        List<String> sessionSetupSqls) throws SQLException, IOException {
         var catalogSchemaAndTables =
                 Transformations.getAllTablesOrPathsFromSelect(Transformations.getFirstStatementNode(tree), null, null);
         var first = catalogSchemaAndTables.get(0);
@@ -110,7 +122,7 @@ class DucklakeSplitPlanner implements PartitionPrunerV2 {
                 return oldValue;
             }
         });
-       return pruner.pruneFiles(first.schema(), first.tableOrPath(), tree);
+       return pruner.pruneFiles(first.schema(), first.tableOrPath(), tree, sessionSetupSqls);
 
     }
 }

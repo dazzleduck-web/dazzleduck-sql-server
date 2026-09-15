@@ -15,6 +15,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Comparator;
+import java.util.ArrayList;
+import java.nio.file.Files;
+import io.dazzleduck.sql.common.ConfigConstants;
 import java.net.InetAddress;
 import java.time.Duration;
 import java.util.concurrent.Executors;
@@ -48,6 +54,9 @@ public class OtelCollectorServer implements Closeable {
     private OtelCollectorMetrics collectorMetrics;
     private CollectorHealth health;
     private HealthServer healthServer;
+    // Scratch directories created by start(); tracked so close() can remove them even when
+    // startup fails after creating some but before the corresponding service exists.
+    private final List<Path> scratchDirs = new ArrayList<>();
     private boolean started = false;
     private boolean closed = false;
 
@@ -57,6 +66,13 @@ public class OtelCollectorServer implements Closeable {
 
     public void start() throws IOException {
         try {
+            // Resolved once, before anything is allocated: this validates and creates operator
+            // config, which is a startup concern rather than a per-service one. Doing it here
+            // means a bad temp_write_location fails before the meter registry, health reporter
+            // and flush scheduler are built, and the three services share one checked directory
+            // instead of each re-creating and re-validating it.
+            Path tempWriteDir = ConfigConstants.getTempWriteDir(props.getTempWriteLocation());
+
             handler = props.getIngestionHandler();
             var ingestionConfig = props.getIngestionConfig();
 
@@ -80,9 +96,18 @@ public class OtelCollectorServer implements Closeable {
                 return t;
             });
 
-            logService     = new OtelLogService(handler, ingestionConfig, flushScheduler, collectorMetrics);
-            traceService   = new OtelTraceService(handler, ingestionConfig, flushScheduler, collectorMetrics);
-            metricsService = new OtelMetricsService(handler, ingestionConfig, flushScheduler, collectorMetrics);
+            // Directories are created here rather than in the service constructors: constructor
+            // I/O forced an IOException on every caller and left a window where the allocator
+            // existed but could never be closed if creation failed.
+            logService     = new OtelLogService(
+                    createScratchDir(tempWriteDir, OtelLogService.SCRATCH_PREFIX),
+                    handler, ingestionConfig, flushScheduler, collectorMetrics);
+            traceService   = new OtelTraceService(
+                    createScratchDir(tempWriteDir, OtelTraceService.SCRATCH_PREFIX),
+                    handler, ingestionConfig, flushScheduler, collectorMetrics);
+            metricsService = new OtelMetricsService(
+                    createScratchDir(tempWriteDir, OtelMetricsService.SCRATCH_PREFIX),
+                    handler, ingestionConfig, flushScheduler, collectorMetrics);
 
             if (!"jwt".equals(props.getAuthentication())) {
                 throw new IllegalStateException(
@@ -123,6 +148,28 @@ public class OtelCollectorServer implements Closeable {
             if (e instanceof IOException ioe) throw ioe;
             if (e instanceof RuntimeException re) throw re;
             throw new IOException("Server startup failed", e);
+        }
+    }
+
+    /**
+     * Creates one service's private scratch directory under the validated {@code tempWriteDir} and
+     * records it for cleanup. Package-private so the naming can be tested without a running
+     * server.
+     */
+    Path createScratchDir(Path tempWriteDir, String prefix) throws IOException {
+        Path dir = Files.createTempDirectory(tempWriteDir, prefix);
+        scratchDirs.add(dir);
+        log.info("Arrow scratch directory: {}", dir);
+        return dir;
+    }
+
+    /** Removes a scratch directory and anything still staged in it. Best-effort, never throws. */
+    private static void deleteScratchDir(Path dir) {
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder())
+                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
+        } catch (IOException e) {
+            log.warn("Could not remove scratch directory {}", dir, e);
         }
     }
 
@@ -194,6 +241,9 @@ public class OtelCollectorServer implements Closeable {
         closeQuietly("logService",       logService);
         closeQuietly("traceService",     traceService);
         closeQuietly("metricsService",   metricsService);
+        // After the services are closed, so nothing is still staging batches into them.
+        scratchDirs.forEach(OtelCollectorServer::deleteScratchDir);
+        scratchDirs.clear();
         closeQuietly("collectorMetrics", collectorMetrics);
         if (started) {
             health.transitionTo(CollectorHealthStatus.DOWN);

@@ -28,7 +28,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -58,13 +57,20 @@ class OtelServiceBase implements Closeable {
     private final IngestionHandler.QueueCreator creator;
     private final IngestionHandler.QueueEventListener listener;
 
-    OtelServiceBase(String tempDirPrefix,
+    /**
+     * @param scratchDir this service's private directory for staged Arrow batch files, created
+     *                   and owned by {@link OtelCollectorServer}. The constructor deliberately
+     *                   performs no I/O: doing so forced every caller to handle an
+     *                   {@link IOException} and created a window in which the allocator was
+     *                   already constructed but could never be closed.
+     */
+    OtelServiceBase(Path scratchDir,
                     IngestionHandler handler,
                     IngestionConfig ingestionConfig,
                     ScheduledExecutorService flushScheduler,
-                    OtelCollectorMetrics metrics) throws IOException {
+                    OtelCollectorMetrics metrics) {
+        this.tempDir = scratchDir;
         this.allocator = new RootAllocator();
-        this.tempDir = Files.createTempDirectory(tempDirPrefix);
         this.handler = handler;
         this.metrics = metrics;
         // Build the queue (sharing the collector-wide flush scheduler) and register its metrics.
@@ -247,16 +253,17 @@ class OtelServiceBase implements Closeable {
                 .asRuntimeException();
     }
 
+    /**
+     * Closes the allocator. The scratch directory is <b>not</b> removed here — it is created and
+     * deleted by {@link OtelCollectorServer}, which also has to clean up directories belonging to
+     * services that were never constructed when startup fails partway through.
+     */
     @Override
     public void close() {
         try {
             allocator.close();
         } catch (Exception e) {
-            log.warn("Error closing Arrow allocator (prefix={})", tempDir.getFileName(), e);
+            log.warn("Error closing Arrow allocator ({})", tempDir.getFileName(), e);
         }
-        try (var stream = Files.walk(tempDir)) {
-            stream.sorted(Comparator.reverseOrder())
-                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
-        } catch (IOException ignored) {}
     }
 }

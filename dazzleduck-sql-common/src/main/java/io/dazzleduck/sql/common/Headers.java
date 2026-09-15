@@ -35,6 +35,19 @@ public class Headers {
     // columns, "true" for no row filter. Takes precedence over HEADER_FILTER when present.
     public static final String HEADER_ACCESS = "x-dd-access";
     public static final String HEADER_ACCESS_TYPE = "x-dd-access-type";
+    // Session variables applied to the DuckDB connection as SET VARIABLE, referenceable in SQL
+    // and RLS filters via getvariable('name'). The claim value is the JSON *text* of an object of
+    // string key/values, e.g. the string {"tenant_id":"acme"}.
+    //
+    // Read from the verified JWT claim only: a query request cannot change it, because the query
+    // path resolves it from the signed claims (see DuckDBFlightSqlProducer.sessionSetupSqls) and
+    // never from the request headers. Note this is NOT enforced by SUPPORTED_HEADERS, which is
+    // referenced nowhere.
+    //
+    // The value is chosen at token issuance, not by this server: HttpCredentialValidator forwards
+    // every claims.generate.headers entry to the configured login service, which decides what to
+    // sign. Deciding which variables a given identity may set is that service's job.
+    public static final String CLAIM_SESSION_VARIABLES = "x-dd-variables";
     public static final String HEADER_SPLIT_SIZE = "x-dd-split-size";
     public static final String HEADER_DATA_PARTITION = "x-dd-partition";
     public static final String HEADER_DATA_FORMAT = "x-dd-format";

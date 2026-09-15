@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -43,6 +44,8 @@ public class CollectorConfig {
 
     private static final Logger log = LoggerFactory.getLogger(CollectorConfig.class);
     private static final String CONFIG_PREFIX = "otel_collector";
+    /** Matches the {@code temp_write_location} default declared in reference.conf. */
+    private static final String DEFAULT_TEMP_SUBDIRECTORY = "dazzleduck-writes";
 
     private final Config config;
 
@@ -170,6 +173,21 @@ public class CollectorConfig {
         }
     }
 
+    /**
+     * Directory under which each signal service creates its scratch directory for temporary Arrow
+     * batch files — the same {@code temp_write_location} key the flight module uses for the same
+     * purpose, via {@link ConfigConstants#TEMP_WRITE_LOCATION_KEY}.
+     *
+     * <p>Declared in reference.conf as {@code ${java.io.tmpdir}"/dazzleduck-writes"} — the same
+     * default as the flight module, which resolves to {@code /tmp/dazzleduck-writes} on Linux. The
+     * explicit fallback here covers a caller supplying its own Config without the bundled
+     * reference.conf, and must stay in step with that declared default.
+     */
+    public String getTempWriteLocation() {
+        return getString(ConfigConstants.TEMP_WRITE_LOCATION_KEY,
+                Path.of(System.getProperty("java.io.tmpdir"), DEFAULT_TEMP_SUBDIRECTORY).toString());
+    }
+
     public String getServiceName() {
         return getString("service_name", "open-telemetry-collector");
     }
@@ -239,6 +257,7 @@ public class CollectorConfig {
         props.setIngestionHandler(getIngestionHandler());
         props.setIngestionConfig(getIngestionConfig());
         props.setVerifySignature(getVerifySignature());
+        props.setTempWriteLocation(getTempWriteLocation());
         return props;
     }
 

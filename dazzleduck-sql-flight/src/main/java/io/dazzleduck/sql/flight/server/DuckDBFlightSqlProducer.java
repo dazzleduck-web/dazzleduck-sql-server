@@ -11,6 +11,7 @@ import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
+import io.dazzleduck.sql.commons.authorization.SessionVariables;
 import io.dazzleduck.sql.commons.authorization.SqlAuthorizer;
 import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
 import io.dazzleduck.sql.commons.ingestion.*;
@@ -1398,12 +1399,35 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
     protected static DuckDBConnection getConnection(final CallContext context, AccessMode accessMode) throws NoSuchCatalogSchemaError {
         var databaseSchema = getDatabaseSchema(context, accessMode);
         String dbSchema = format("%s.%s", databaseSchema.database, databaseSchema.schema);
-        String[] sqls = {format("USE %s", dbSchema)};
+        List<String> sqls = new ArrayList<>();
+        sqls.add(format("USE %s", dbSchema));
+        // Session variables are read only from the verified (signed) claims, never from client
+        // headers, so they cannot be overridden per-request. Applied as SET VARIABLE so queries and
+        // injected RLS filters can read them via getvariable('name'). A malformed claim throws here
+        // (before the connection is built) rather than failing silently.
+        sqls.addAll(sessionSetupSqls(context));
         try {
-            return ConnectionPool.getConnection(sqls);
+            return ConnectionPool.getConnection(sqls.toArray(new String[0]));
         } catch (Exception e ){
-            throw new NoSuchCatalogSchemaError(dbSchema);
+            // Only the USE can mean "no such catalog/schema". The batch also carries the session
+            // variables now, and reporting a failed SET VARIABLE as a missing schema sends the
+            // caller looking in the wrong place.
+            throw new NoSuchCatalogSchemaError(dbSchema, e);
         }
+    }
+
+    /**
+     * The {@code SET VARIABLE} statements for this request's session variables.
+     *
+     * <p>{@link #getConnection} is not the only connection that evaluates the request's query: split
+     * planning prunes partitions on its own connections, and the tree it prunes with already has the
+     * row-level-security filter injected. A filter referencing {@code getvariable('x')} evaluates
+     * against NULL on a connection that has not run these — pruning away every file and returning an
+     * empty result — so every such connection must apply them too.
+     */
+    protected static List<String> sessionSetupSqls(CallContext context) {
+        return SessionVariables.toSetStatements(
+                getVerifiedClaims(context).get(Headers.CLAIM_SESSION_VARIABLES));
     }
 
     protected static DatabaseSchema getDatabaseSchema(CallContext context, AccessMode accessMode){
@@ -1447,6 +1471,11 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
             query = transformQuery(context, connection, query);
         } catch (UnauthorizedException e) {
             throw CallStatus.UNAUTHORIZED.withCause(e).withDescription(e.getMessage()).toRuntimeException();
+        } catch (IllegalArgumentException e) {
+            // A rejected request (unsupported LIMIT form, offset past the query's own bound) is a
+            // client error. getStreamStatement already maps it via ErrorHandling; without this
+            // branch the getFlightInfo half of the same call returned INTERNAL / HTTP 500.
+            throw CallStatus.INVALID_ARGUMENT.withCause(e).withDescription(e.getMessage()).toRuntimeException();
         } catch (Exception e){
             throw CallStatus.INTERNAL.withCause(e).withDescription("Failed to transform query: " + e.getMessage()).toRuntimeException();
         }

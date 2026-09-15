@@ -143,7 +143,9 @@ public interface SqlAuthorizer {
     default JsonNode authorize(String user, String database, String schema, JsonNode query,
                        Map<String, String> verifiedClaims, long limit, long offset) throws UnauthorizedException {
         var authorized = authorize(user, database, schema, query, verifiedClaims);
-        return Transformations.addLimit(authorized, limit, offset);
+        // Offset first: skipping rows of the query's own bounded result reduces what remains,
+        // and the cap is then a ceiling on whatever is left.
+        return Transformations.capLimit(Transformations.applyOffset(authorized, offset), limit);
     }
 
     boolean hasWriteAccess(String user, String ingestionQueue, Map<String, String> verifiedClaims);

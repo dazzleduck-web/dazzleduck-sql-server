@@ -1027,14 +1027,22 @@ public class Transformations {
             ObjectNode rootCopy = (ObjectNode) outerSqlAst.deepCopy();
             ObjectNode outerCopy = (ObjectNode) getFirstStatementNode(rootCopy);
             boolean changed = false;
-            for (int idx : cteRefs) {
+            // Visit the references high-index-first: pruneStarFilterCteForConsumers can split a CTE,
+            // which grows the cte_map (one entry removed, N clones inserted) and shifts every index
+            // above the split point. Descending order guarantees a split only ever moves entries we
+            // have already processed, so an index we still hold stays valid.
+            for (int i = cteRefs.size() - 1; i >= 0; i--) {
+                int idx = cteRefs.get(i);
                 ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
                         .get(idx).get("value").get("query").get("node");
                 if (isStarFilterCteBody(cteBody)) {
                     // Row-filter wrapper `SELECT * FROM <view> WHERE <filter>` (the RLS authorizer's
                     // output): its own STAR hides the real column usage, which lives in the CTE's
                     // consumers. Recover it from there rather than bailing on the STAR.
-                    changed |= pruneStarFilterCte(outerCopy, cteBody, viewBodyAst);
+                    String cteName = asText(outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
+                            .get(idx), FIELD_KEY);
+                    changed |= pruneStarFilterCteForConsumers(outerCopy, idx, cteName, cteBody,
+                            viewBodyAst);
                 } else {
                     changed |= pruneScope(cteBody, viewBodyAst, collectScopedUsage(cteBody, false));
                 }
@@ -1091,31 +1099,218 @@ public class Transformations {
     }
 
     /**
-     * Prune a view referenced inside a CTE body whose own SELECT list is a STAR — most importantly
-     * the RESTRICT_READ_ONLY authorizer's row-filter wrapper
-     * {@code ___t AS (SELECT * FROM <view> WHERE <rls-filter>)}. The STAR forwards every column to
-     * the CTE's consumers, so {@link #pruneScope} (which bails on any STAR) cannot drive elimination
-     * here. The columns actually needed are recovered from the union of:
-     * <ul>
-     *   <li>the enclosing scope's references to the CTE — its <b>consumers</b>
-     *       ({@code consumerScope} minus its own CTE bodies), and</li>
-     *   <li>the CTE body's own <b>WHERE</b> — the filter's columns: the wrapper still applies the
-     *       filter over the inlined subquery, so those columns must survive pruning or the wrapper
-     *       fails to bind.</li>
-     * </ul>
-     * The view body is then inlined and its now-unused LEFT JOINs eliminated, leaving the wrapper's
-     * {@code SELECT *} and {@code WHERE} intact over the pruned subquery.
+     * Prune a star-filter CTE against <b>every</b> scope that consumes it, specializing per consumer
+     * where their column usage differs.
      *
-     * <p>No-op (returns false) when the consumer scope itself contains a STAR over the CTE — the
-     * view's columns can't be enumerated there, so no narrowing is safe. Consumer usage is read from
-     * {@code consumerScope} excluding its CTE bodies, matching the authorizer's output shape (the
-     * filter-CTE is consumed at the top level). Over-collection from sibling references is harmless
-     * (keeps extra columns → fewer joins dropped, never a wrong result), and the projection-only
-     * change is fail-safe: a missed column yields a bind error, never an unfiltered row.
+     * <p>The RLS authorizer emits <b>one</b> filter CTE per table ({@code injectFilterCtes} keys
+     * {@code tablesToWrap} by qualified table name), so a query naming the same view twice — the
+     * two-phase page shape {@code WITH page AS (SELECT rowid, ts FROM v) SELECT … FROM v JOIN page}
+     * — has both references rewritten to a single {@code ___v}. That makes the CTE's consumers a
+     * <b>set</b>, not one scope, with two consequences:
+     * <ul>
+     *   <li><b>Correctness.</b> Pruning against the enclosing scope alone drops columns a sibling
+     *       CTE still reads, and the query no longer binds.</li>
+     *   <li><b>Specialization.</b> Pruning against the union keeps every join any consumer needs,
+     *       so a narrow consumer inherits a wide one's joins. Splitting the CTE — one pruned clone
+     *       per consumer — is what lets the narrow scope actually skip them.</li>
+     * </ul>
+     *
+     * <p>Splitting duplicates the filter expression, never the rows: each clone is the identical
+     * {@code SELECT * FROM <view> WHERE <filter>} with a different subset of the view's joins, so
+     * every consumer still reads exactly the rows the grant allows. A consumer whose columns cannot
+     * be enumerated (a STAR in that scope) keeps an unpruned clone rather than blocking the others.
      */
-    private static boolean pruneStarFilterCte(ObjectNode consumerScope, ObjectNode cteBody,
-                                              JsonNode viewBodyAst) {
-        UsedColumns consumer = collectScopedUsage(consumerScope, true);
+    private static boolean pruneStarFilterCteForConsumers(ObjectNode outerCopy, int cteIndex,
+                                                          String cteName, ObjectNode cteBody,
+                                                          JsonNode viewBodyAst) {
+        if (cteName == null || cteName.isEmpty()) {
+            return pruneStarFilterCte(outerCopy, true, cteBody, viewBodyAst);
+        }
+        // The filter's own columns are needed by every clone: the wrapper still applies the WHERE
+        // over the inlined subquery, so they must survive pruning in each.
+        UsedColumns filterUse = new UsedColumns();
+        collectUsage(cteBody.get(FIELD_WHERE_CLAUSE), filterUse);
+
+        List<ObjectNode> consumers = findCteConsumers(outerCopy, cteIndex, cteName);
+        if (consumers.isEmpty()) {
+            // An unreferenced filter CTE: no scope enumerates its columns, so nothing to narrow to.
+            return false;
+        }
+        if (consumers.size() == 1) {
+            // Single consumer: nothing to specialize. Prune in place against exactly that scope's
+            // usage — which may be a sibling CTE, not the enclosing statement, so read it from the
+            // consumer itself. (For an outer-scope consumer this is the pre-split path unchanged.)
+            ObjectNode only = consumers.get(0);
+            return pruneStarFilterCte(only, only == outerCopy, cteBody, viewBodyAst);
+        }
+
+        List<Set<String>> perConsumer = new ArrayList<>();
+        for (ObjectNode scope : consumers) {
+            UsedColumns use = collectScopedUsage(scope, scope == outerCopy);
+            if (use.hasStar || use.hasQualifiedStar) {
+                perConsumer.add(null);            // not enumerable → unpruned clone
+            } else {
+                Set<String> cols = new HashSet<>(use.columnNames);
+                cols.addAll(filterUse.columnNames);
+                perConsumer.add(cols);
+            }
+        }
+        boolean diverges = false;
+        for (int i = 1; i < perConsumer.size(); i++) {
+            if (!Objects.equals(perConsumer.get(0), perConsumer.get(i))) { diverges = true; break; }
+        }
+        if (!diverges) {
+            // Every consumer wants the same columns — prune once, in place, no split.
+            Set<String> cols = perConsumer.get(0);
+            return cols != null
+                    && pruneViewBodyInto(cteBody, cteBody.get(FIELD_FROM_TABLE), viewBodyAst, cols);
+        }
+        return splitStarFilterCte(outerCopy, cteIndex, cteName, cteBody, viewBodyAst,
+                consumers, perConsumer);
+    }
+
+    /**
+     * Replace one star-filter CTE with a pruned clone per consumer, rewriting each consumer's
+     * references to its own clone. Clones are inserted at the original's index so they stay
+     * declared ahead of every scope that reads them, and the original entry is removed.
+     */
+    private static boolean splitStarFilterCte(ObjectNode outerCopy, int cteIndex, String cteName,
+                                              ObjectNode cteBody, JsonNode viewBodyAst,
+                                              List<ObjectNode> consumers,
+                                              List<Set<String>> perConsumer) {
+        ArrayNode map = (ArrayNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP);
+        JsonNode original = map.get(cteIndex);
+
+        // Phase 1 — build and prune the clones off to the side, mutating nothing shared, so any
+        // bail below leaves the AST exactly as it was. findCteConsumers selected every consumer by
+        // the same referencesTable predicate the phase-2 rename uses, so that rename is guaranteed
+        // to hit; phase ordering (build → confirm → mutate) is what makes the split atomic.
+        List<JsonNode> clones = new ArrayList<>();
+        List<String> cloneNames = new ArrayList<>();
+        boolean anyPruned = false;
+        for (int i = 0; i < consumers.size(); i++) {
+            String cloneName = uniqueCteKey(map, cteName + "__c" + i);
+            ObjectNode cloneEntry = (ObjectNode) original.deepCopy();
+            cloneEntry.put(FIELD_KEY, cloneName);
+            ObjectNode cloneBody = (ObjectNode) cloneEntry.path("value").path("query").path("node");
+            Set<String> cols = perConsumer.get(i);
+            if (cols != null) {
+                anyPruned |= pruneViewBodyInto(cloneBody, cloneBody.get(FIELD_FROM_TABLE),
+                        viewBodyAst, cols);
+            }
+            clones.add(cloneEntry);
+            cloneNames.add(cloneName);
+        }
+        if (!anyPruned) return false;   // nothing gained; the shared tree is still untouched
+
+        // Phase 2 — commit: point each consumer at its clone, then swap the map entries. From here
+        // on the tree is mutated, but only once the split is guaranteed to complete.
+        for (int i = 0; i < consumers.size(); i++) {
+            renameTableRefs(consumers.get(i), cteName, cloneNames.get(i),
+                    consumers.get(i) == outerCopy);
+        }
+        map.remove(cteIndex);
+        for (int i = 0; i < clones.size(); i++) {
+            map.insert(cteIndex + i, clones.get(i));
+        }
+        return true;
+    }
+
+    /** {@code base}, or {@code base + "_" + n} for the first n that no existing cte_map key uses. */
+    private static String uniqueCteKey(ArrayNode map, String base) {
+        String candidate = base;
+        int suffix = 0;
+        while (cteKeyExists(map, candidate)) candidate = base + "_" + (++suffix);
+        return candidate;
+    }
+
+    private static boolean cteKeyExists(ArrayNode map, String name) {
+        for (JsonNode entry : map) {
+            if (name.equalsIgnoreCase(asText(entry, FIELD_KEY))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Every scope that reads {@code cteName}: each <em>other</em> CTE body that names it, then the
+     * enclosing statement itself. CTE bodies come first so a clone is never inserted after one of
+     * its readers.
+     */
+    private static List<ObjectNode> findCteConsumers(ObjectNode outerCopy, int selfIndex,
+                                                     String cteName) {
+        List<ObjectNode> consumers = new ArrayList<>();
+        JsonNode map = outerCopy.path(FIELD_CTE_MAP).path(FIELD_MAP);
+        if (map.isArray()) {
+            for (int i = 0; i < map.size(); i++) {
+                if (i == selfIndex) continue;
+                JsonNode body = map.get(i).path("value").path("query").path("node");
+                if (body.isObject() && referencesTable((ObjectNode) body, cteName, false)) {
+                    consumers.add((ObjectNode) body);
+                }
+            }
+        }
+        if (referencesTable(outerCopy, cteName, true)) consumers.add(outerCopy);
+        return consumers;
+    }
+
+    /** Whether {@code scope} contains a BASE_TABLE reference named {@code table}. */
+    private static boolean referencesTable(ObjectNode scope, String table, boolean excludeCteMap) {
+        return countTableRefs(scope, table, excludeCteMap, null) > 0;
+    }
+
+    /** Rewrite every BASE_TABLE reference to {@code from} into {@code to} within {@code scope}. */
+    private static boolean renameTableRefs(ObjectNode scope, String from, String to,
+                                           boolean excludeCteMap) {
+        return countTableRefs(scope, from, excludeCteMap, to) > 0;
+    }
+
+    /**
+     * Shared walk for {@link #referencesTable} and {@link #renameTableRefs} — counts BASE_TABLE
+     * nodes named {@code table}, renaming each to {@code rename} when that is non-null. The
+     * {@code cte_map} subtree is skipped for the enclosing scope, whose sibling CTEs are their own
+     * consumers and are visited separately; nested scopes are always walked in full.
+     */
+    private static int countTableRefs(JsonNode node, String table, boolean excludeCteMap,
+                                      String rename) {
+        if (node == null) return 0;
+        int n = 0;
+        if (node.isObject()) {
+            ObjectNode obj = (ObjectNode) node;
+            if (NODE_TYPE_BASE_TABLE.equals(asText(obj, FIELD_TYPE))
+                    && table.equalsIgnoreCase(asText(obj, FIELD_TABLE_NAME))) {
+                n++;
+                if (rename != null) obj.put(FIELD_TABLE_NAME, rename);
+            }
+            var it = obj.fields();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (excludeCteMap && FIELD_CTE_MAP.equals(e.getKey())) continue;
+                n += countTableRefs(e.getValue(), table, false, rename);
+            }
+        } else if (node.isArray()) {
+            for (JsonNode child : node) n += countTableRefs(child, table, false, rename);
+        }
+        return n;
+    }
+
+    /**
+     * Prune a star-filter CTE in place against a single consumer scope. The columns to keep are the
+     * union of that scope's references to the CTE and the CTE body's own {@code WHERE} (the filter
+     * columns must survive, or the wrapper fails to bind); the view body is then inlined and its
+     * now-unused LEFT JOINs eliminated, leaving the wrapper's {@code SELECT *} and {@code WHERE}
+     * intact over the pruned subquery.
+     *
+     * <p>{@code excludeCteMap} skips {@code consumerScope}'s own {@code cte_map} when collecting
+     * usage — set for the enclosing statement (whose sibling CTEs are separate consumers), clear
+     * when the consumer <em>is</em> a sibling CTE and its full body is the usage. No-op (returns
+     * false) if the scope contains a STAR over the CTE, since the view's columns can't be enumerated
+     * there. Over-collection is harmless (keeps extra columns → fewer joins dropped, never a wrong
+     * result), and the projection-only change is fail-safe: a missed column yields a bind error,
+     * never an unfiltered row.
+     */
+    private static boolean pruneStarFilterCte(ObjectNode consumerScope, boolean excludeCteMap,
+                                              ObjectNode cteBody, JsonNode viewBodyAst) {
+        UsedColumns consumer = collectScopedUsage(consumerScope, excludeCteMap);
         if (consumer.hasStar || consumer.hasQualifiedStar) return false;
         Set<String> usedViewCols = new HashSet<>(consumer.columnNames);
         UsedColumns filterUse = new UsedColumns();
@@ -1900,32 +2095,307 @@ public class Transformations {
         }
     }
     /**
-     * Applies LIMIT (and optionally OFFSET) to the outermost SELECT node.
+     * Applies a row cap and a request offset to the outermost SELECT node - a thin delegate over
+     * {@link #applyOffset} then {@link #capLimit}, kept for callers compiled against it.
      *
-     * <p>Works for all FROM clause types: BASE_TABLE, TABLE_FUNCTION, SUBQUERY,
-     * SET_OPERATION_NODE. Previously only BASE_TABLE and simple SUBQUERY were
-     * handled; TABLE_FUNCTION queries (e.g. generate_series) were silently skipped.
+     * <p>The order matters: applying an offset reduces how many of the query's own rows remain,
+     * and the cap is then a ceiling on whatever is left.
+     *
+     * @param limit  row cap, or negative for "no cap"
+     * @param offset request offset, or negative for "no offset"
+     * @deprecated the name says "add" but this caps, and it bundles two unrelated concerns - the
+     *             row cap is a security bound, the offset is request pagination - which is how
+     *             several offset bugs stayed hidden. Call {@link #applyOffset(JsonNode, long)}
+     *             then {@link #capLimit(JsonNode, long)} instead, in that order:
+     *             <pre>{@code capLimit(applyOffset(query, offset), cap)}</pre>
      */
+    @Deprecated(since = "0.2.18", forRemoval = true)
     public static JsonNode addLimit(JsonNode query, long limit, long offset) {
-        if (limit < 0 && offset < 0) {
+        return capLimit(applyOffset(query, offset), limit);
+    }
+
+    /**
+     * Bounds the outermost SELECT's LIMIT by {@code cap} - a <b>ceiling, not an assignment</b>.
+     * When the query already carries a LIMIT, the smaller of the two wins; a cap must never widen
+     * a query's own {@code LIMIT 10} to the cap, which is what made a named-query template with
+     * {@code LIMIT 10} render all 16 rows.
+     *
+     * <p>The query's LIMIT must be an integer literal, or unlimited (absent, or {@code LIMIT
+     * NULL} - which SQL reads as every row). The min folds in Java, so the emitted SQL stays a
+     * plain {@code LIMIT n}.
+     *
+     * <p>A negative {@code cap} means "no cap" and leaves the query untouched.
+     *
+     * <p>Both {@code LIMIT n%} and a non-literal LIMIT (expression, scalar subquery, bind
+     * parameter) are <b>rejected</b> with an {@link IllegalArgumentException}, which both
+     * transports map to 400 / INVALID_ARGUMENT - see {@link #rejectPercentLimit} and
+     * {@link #rejectNonLiteralLimit}. A negative cap still leaves such a query untouched.
+     */
+    public static JsonNode capLimit(JsonNode query, long cap) {
+        if (cap < 0) {
             return query;
         }
-        var select = (ObjectNode) getFirstStatementNode(query);
+        ObjectNode modifier = limitModifierOf(query);
+        modifier.set(FIELD_LIMIT, cappedLimit(modifier.get(FIELD_LIMIT), cap));
+        return query;
+    }
 
+    /**
+     * Applies a request offset to the outermost SELECT node, <b>composing</b> with the query's own
+     * OFFSET rather than replacing it: a request offset paginates within the query's result, which
+     * already begins after the query's own OFFSET, so the two add ({@code OFFSET 5} + request 10 =
+     * {@code OFFSET 15}). Replacing it silently discarded a template's {@code OFFSET 5} on every
+     * non-paginated read, since the cap path passes {@code offset = 0}.
+     *
+     * <p>It also <b>reduces the query's own LIMIT</b> by the offset. That LIMIT bounds the query's
+     * <i>result</i>, so skipping {@code offset} rows of it leaves only {@code own - offset} rows
+     * for this page; without that, {@code LIMIT 10} with a request offset of 9 returned 10 rows
+     * instead of the single row that remains.
+     *
+     * <p>A negative {@code offset} means "no offset" and leaves the query untouched.
+     *
+     * <p>A zero or negative {@code offset} means "no offset" and leaves the query untouched -
+     * including its modifiers and any construct {@link #rejectNonLiteralLimit} would refuse, since
+     * nothing is being bounded.
+     *
+     * @throws IllegalArgumentException if the offset lands strictly <i>past</i> the query's own
+     *         literal LIMIT. An offset exactly <i>at</i> that LIMIT is allowed and yields an empty
+     *         page, so the usual "request pages until a short page" loop still terminates; going
+     *         beyond it can only be a client error. Also thrown if the query's LIMIT is not a
+     *         non-negative integer literal - see {@link #rejectNonLiteralLimit}.
+     */
+    public static JsonNode applyOffset(JsonNode query, long offset) {
+        if (offset <= 0) {
+            return query;   // skipping zero rows changes nothing - do not touch the AST
+        }
+        ObjectNode modifier = limitModifierOf(query);
+        JsonNode ownLimit = modifier.get(FIELD_LIMIT);
+        rejectOffsetPastOwnLimit(ownLimit, offset);
+        modifier.set(FIELD_LIMIT, remainingAfterOffset(ownLimit, offset));
+        modifier.set(FIELD_OFFSET, composedOffset(modifier.get(FIELD_OFFSET), offset));
+        return query;
+    }
+
+    /**
+     * The outermost SELECT's LIMIT_MODIFIER, creating an empty one (limit = JSON null, DuckDB's
+     * own shape for an OFFSET-only modifier) when absent. Mutated in place, so LIMIT and OFFSET
+     * can be set independently without either clobbering the other - they share one AST node,
+     * which is why a rewrite of one used to destroy the other.
+     */
+    private static ObjectNode limitModifierOf(JsonNode query) {
+        var select = (ObjectNode) getFirstStatementNode(query);
         ArrayNode modifiers = (ArrayNode) select.get(FIELD_MODIFIERS);
         if (modifiers == null) {
             modifiers = select.putArray(FIELD_MODIFIERS);
-        } else {
-            for (int i = 0; i < modifiers.size(); i++) {
-                if (modifiers.get(i).get(FIELD_TYPE).asText().equals(LIMIT_MODIFIER_TYPE)) {
-                    modifiers.remove(i);
-                    break;
-                }
+        }
+        rejectPercentLimit(modifiers);
+        for (JsonNode modifier : modifiers) {
+            if (LIMIT_MODIFIER_TYPE.equals(modifier.path(FIELD_TYPE).asText())) {
+                rejectNonLiteralLimit(modifier.get(FIELD_LIMIT));
+                return (ObjectNode) modifier;
             }
         }
+        ObjectNode created = modifiers.addObject();
+        created.put(FIELD_TYPE, LIMIT_MODIFIER_TYPE);
+        created.set(FIELD_LIMIT, NullNode.getInstance());
+        return created;
+    }
 
-        modifiers.add(ExpressionFactory.limitModifier(limit, offset));
-        return query;
+    /**
+     * Rejects {@code LIMIT n%}, which no row cap can meaningfully bound.
+     *
+     * <p>A percent limit is a fraction of the query's <i>result cardinality</i>, so the engine
+     * must materialize the whole result before it can take the percentage. A row cap therefore
+     * cannot bound the work: {@code SELECT * FROM huge LIMIT 1%} still builds the entire result
+     * and discards 99% of it, making the cap cosmetic in exactly the modes that rely on it.
+     *
+     * <p>It is also not expressible by merging: {@code %} is a syntactic form, not a scalar, so
+     * there is no {@code least(cap, 3%)} to emit ({@code Parser Error}), and a percent limit is a
+     * separate LIMIT_PERCENT_MODIFIER node - appending a row LIMIT beside it produced
+     * {@code LIMIT (3) % LIMIT 5}, which does not parse.
+     *
+     * <p>Only reached when a cap or an offset is actually being applied, so a query with
+     * {@code LIMIT n%} and no cap is left alone.
+     */
+    private static void rejectPercentLimit(ArrayNode modifiers) {
+        for (JsonNode modifier : modifiers) {
+            if (LIMIT_PERCENT_MODIFIER_TYPE.equals(modifier.path(FIELD_TYPE).asText())) {
+                throw new IllegalArgumentException(
+                        "'LIMIT n%' is not supported when a row cap or offset applies: a percent "
+                        + "limit is a fraction of the result, so the whole result must be built "
+                        + "before it can be taken and the cap cannot bound the work. "
+                        + "Use an absolute LIMIT instead.");
+            }
+        }
+    }
+
+    /**
+     * Rejects a LIMIT that is not an integer literal, when a cap or offset is being applied.
+     *
+     * <p>Bounding a non-literal limit means reproducing SQL's own semantics in AST arithmetic -
+     * {@code least} skips NULLs but {@code subtract} propagates them, {@code greatest} clamps only
+     * after {@code subtract} has already poisoned the value, and {@code LIMIT NULL} is
+     * <i>unlimited</i> in SQL but NULL in arithmetic. Each limit form was a separate special case,
+     * and each one passed its tests before the next was found. Rejecting is the honest bound: the
+     * caller learns the query cannot be paginated instead of receiving a plausible wrong page.
+     *
+     * <p>It also closes an inconsistency: {@link #rejectOffsetPastOwnLimit} can only compare a
+     * literal, so {@code LIMIT 5+5 OFFSET 20} previously returned a silent empty page where
+     * {@code LIMIT 10 OFFSET 20} raised. With non-literals rejected, that guard always applies.
+     *
+     * <p>An <i>unlimited</i> limit is allowed: an absent LIMIT and an explicit {@code LIMIT NULL}
+     * both mean "every row", which is exactly the case the cap handles, so there is no arithmetic
+     * to get wrong.
+     */
+    private static void rejectNonLiteralLimit(JsonNode ownLimit) {
+        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+            return;
+        }
+        Long literal = literalIntOf(ownLimit);
+        if (literal == null) {
+            throw new IllegalArgumentException(
+                    "the query's LIMIT must be an integer literal when a row cap or offset "
+                    + "applies; an expression, scalar subquery, bind parameter or non-integer "
+                    + "literal cannot be bounded reliably. Use a literal integer LIMIT instead.");
+        }
+        if (literal < 0) {
+            // DuckDB folds "LIMIT -1" into a constant, so it reaches here and would otherwise be
+            // reported as an offset problem by rejectOffsetPastOwnLimit.
+            throw new IllegalArgumentException(
+                    "the query's LIMIT must not be negative, got " + literal + ".");
+        }
+    }
+
+    /**
+     * Rejects a request offset that lands at or past the query's own LIMIT - that page is empty,
+     * and merging modifiers would instead hand back rows the query's own bound excluded.
+     */
+    private static void rejectOffsetPastOwnLimit(JsonNode ownLimit, long offset) {
+        if (offset <= 0) {
+            return;
+        }
+        Long literal = literalIntOf(ownLimit);
+        if (literal != null && offset > literal) {
+            throw new IllegalArgumentException(
+                    "'offset' " + offset + " is past the query's own LIMIT " + literal
+                    + ". Lower the offset or raise the query's LIMIT.");
+        }
+    }
+
+    /**
+     * The query's own LIMIT less {@code offset} rows already skipped, clamped at 0.
+     *
+     * <p>An unlimited query stays unlimited: there is nothing to subtract from. That covers an
+     * absent LIMIT and an explicit {@code LIMIT NULL}, which SQL reads as <i>unlimited</i> - it
+     * parses as a CONSTANT whose value is NULL, not as JSON null, so without the
+     * {@link #isNullConstant} check it took the arithmetic path and
+     * {@code greatest(subtract(NULL, 5), 0)} collapsed to {@code LIMIT 0}, i.e. an empty page for
+     * a query that asked for every row.
+     */
+    private static JsonNode remainingAfterOffset(JsonNode ownLimit, long offset) {
+        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+            return NullNode.getInstance();
+        }
+        if (offset == 0) {
+            return ownLimit;
+        }
+        // Guaranteed a literal by rejectNonLiteralLimit, and > offset by rejectOffsetPastOwnLimit.
+        return ExpressionFactory.constant(literalIntOf(ownLimit) - offset);
+    }
+
+    /**
+     * The limit bounded by {@code cap}. A pure ceiling - no offset arithmetic. An unlimited query
+     * (absent LIMIT, or {@code LIMIT NULL}) is bounded by the cap itself; otherwise the limit is
+     * an integer literal, guaranteed by {@link #rejectNonLiteralLimit}, so the min folds in Java
+     * and the emitted SQL stays a plain {@code LIMIT n}.
+     */
+    private static JsonNode cappedLimit(JsonNode existing, long cap) {
+        if (existing == null || existing.isNull() || isNullConstant(existing)) {
+            return ExpressionFactory.constant(cap);
+        }
+        return ExpressionFactory.constant(Math.min(literalIntOf(existing), cap));
+    }
+
+    /**
+     * The query's own OFFSET composed additively with the caller's. A non-literal offset is
+     * wrapped in {@code coalesce(..., 0)} so a NULL offset contributes 0 instead of poisoning the
+     * sum - the {@code add} counterpart to {@code least}'s NULL-skipping in {@link #cappedLimit}.
+     */
+    private static JsonNode composedOffset(JsonNode existing, long offset) {
+        if (existing == null || existing.isNull()) {
+            return ExpressionFactory.constant(offset);
+        }
+        if (offset == 0) {
+            return existing;
+        }
+        Long literal = literalIntOf(existing);
+        if (literal != null) {
+            long sum = literal + offset;
+            return ExpressionFactory.constant(sum < 0 ? Long.MAX_VALUE : sum); // saturate
+        }
+        return call("add", coalesceWithZero(existing), ExpressionFactory.constant(offset));
+    }
+
+    /**
+     * {@code coalesce(expr, 0)}. COALESCE is not a FUNCTION node in DuckDB's AST - it serializes
+     * as an OPERATOR of type OPERATOR_COALESCE (so does {@code ifnull}), and a FUNCTION node
+     * named "coalesce" fails to bind.
+     */
+    private static JsonNode coalesceWithZero(JsonNode expression) {
+        ObjectNode coalesce = JsonNodeFactory.instance.objectNode();
+        coalesce.put(FIELD_CLASS, OPERATOR_CLASS);
+        coalesce.put(FIELD_TYPE, COALESCE_TYPE_OPERATOR);
+        ArrayNode children = coalesce.putArray(FIELD_CHILDREN);
+        children.add(expression);
+        children.add(ExpressionFactory.constant(0L));
+        return coalesce;
+    }
+
+    /** A two-argument function call in the default catalog/schema. */
+    private static JsonNode call(String name, JsonNode left, JsonNode right) {
+        ArrayNode args = JsonNodeFactory.instance.arrayNode();
+        args.add(left);
+        args.add(right);
+        return ExpressionFactory.createFunction(name, "", "", args);
+    }
+
+    /** True for a CONSTANT node whose value is NULL - i.e. an explicit {@code LIMIT/OFFSET NULL}. */
+    private static boolean isNullConstant(JsonNode node) {
+        return node != null
+                && CONSTANT_CLASS.equals(node.path(FIELD_CLASS).asText())
+                && node.path(FIELD_VALUE).path(FIELD_IS_NULL).asBoolean(false);
+    }
+
+    /**
+     * DuckDB {@code type.id} values whose serialized constant is a plain integer. Anything else -
+     * DECIMAL, DOUBLE, FLOAT - is <b>not</b> read as a literal, because DuckDB serializes a
+     * DECIMAL as its <i>unscaled</i> integer plus a scale in {@code type_info}: {@code LIMIT 10.9}
+     * arrives as {@code 109}, and reading that as 10.9 rows would widen the query's own bound by
+     * 10^scale - the very bug this class now guards against.
+     */
+    private static final Set<String> INTEGER_CONSTANT_TYPE_IDS = Set.of(
+            "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
+            "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT");
+
+    /**
+     * The value of a LIMIT/OFFSET expression when it is an integer literal, else {@code null} (an
+     * expression, bind parameter, NULL, or a non-integer numeric type) - i.e. when it cannot be
+     * folded in Java, and so is rejected or composed at execution time instead.
+     */
+    private static Long literalIntOf(JsonNode node) {
+        if (node == null || node.isNull()
+                || !CONSTANT_CLASS.equals(node.path(FIELD_CLASS).asText())) {
+            return null;
+        }
+        JsonNode value = node.get(FIELD_VALUE);
+        if (value == null || value.path(FIELD_IS_NULL).asBoolean(false)) {
+            return null;
+        }
+        if (!INTEGER_CONSTANT_TYPE_IDS.contains(value.path(FIELD_TYPE).path(FIELD_ID).asText())) {
+            return null;
+        }
+        JsonNode inner = value.get(FIELD_VALUE);
+        return inner != null && inner.isIntegralNumber() ? inner.asLong() : null;
     }
 
     private static String escapeSpecialChar(String sql) {

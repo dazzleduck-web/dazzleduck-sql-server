@@ -62,6 +62,14 @@ public class ErrorHandling {
             handleSqlException(s);
         } else if (t instanceof IOException io) {
             handleIOException(io);
+        } else if (t instanceof IllegalArgumentException e) {
+            // Mirrors the ServerStreamListener overload: a rejected request (an unsupported
+            // LIMIT form, an offset past the query's own bound) is the caller's mistake, so it
+            // must not surface as INTERNAL - which gRPC clients retry and which pages ops.
+            throw CallStatus.INVALID_ARGUMENT
+                    .withDescription(e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException();
         } else if (t instanceof Exception e) {
             var exception = CallStatus.INTERNAL
                     .withDescription(e.getMessage())

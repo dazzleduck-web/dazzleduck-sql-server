@@ -535,7 +535,10 @@ public class RestrictedFlightSqlProducer extends DuckDBFlightSqlProducer {
                                                         final FlightDescriptor descriptor) {
         try {
             var splitSize = getSplitSize(context);
-            var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize);
+            // The tree already carries the injected RLS filter; the pruners open their own
+            // connections, so they need this request's session variables or a getvariable(...)
+            // filter prunes against NULL and every file is discarded.
+            var splits = SplitPlanner.getSplitTreeAndSize(tree, splitSize, sessionSetupSqls(context));
             var list = splits.stream().map(split -> {
                 try {
                     var sql = Transformations.parseToSql(split.tree());

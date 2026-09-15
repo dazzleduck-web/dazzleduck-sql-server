@@ -152,6 +152,19 @@ public class DucklakePartitionPruning {
     public List<FileStatus> pruneFiles(String schema,
                                        String table,
                                        JsonNode tree) throws SQLException {
+        return pruneFiles(schema, table, tree, List.of());
+    }
+
+    /**
+     * @param sessionSetupSqls the request's {@code SET VARIABLE} statements. {@code toRun} carries
+     *                         the caller's filter, so a filter referencing {@code getvariable('x')}
+     *                         evaluates against NULL — pruning away every file — unless the
+     *                         connection that runs it has applied them.
+     */
+    public List<FileStatus> pruneFiles(String schema,
+                                       String table,
+                                       JsonNode tree,
+                                       List<String> sessionSetupSqls) throws SQLException {
         var where = Transformations.identity()
                 .andThen(Transformations::getFirstStatementNode)
                 .andThen(Transformations::getWhereClauseForBaseTable)
@@ -188,7 +201,7 @@ public class DucklakePartitionPruning {
                 toRun = partitionSql(partitionSql, tableId, columnIds);
             }
         }
-        try (var connection = ConnectionPool.getConnection()) {
+        try (var connection = ConnectionPool.getConnection(sessionSetupSqls)) {
             var res = ConnectionPool.collectAll(connection, toRun, DucklakeFileStatus.class);
             var result = new java.util.ArrayList<FileStatus>();
             for (var x : res) {

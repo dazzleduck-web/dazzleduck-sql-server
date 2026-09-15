@@ -144,7 +144,10 @@ public final class FlightSqlProducerFactory {
             try {
                 this.tempWriteDir = DuckDBFlightSqlProducer.getTempWriteDir(config);
             } catch (IOException e) {
-                throw new RuntimeException("Failed to create temp write directory", e);
+                // Pass the message through: getTempWriteDir also rejects a blank value, an
+                // existing file and a non-writable directory, none of which are creation
+                // failures, and its message names the config key an operator has to fix.
+                throw new RuntimeException(e.getMessage(), e);
             }
 
             // Query timeout (required)

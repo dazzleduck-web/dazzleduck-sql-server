@@ -2,6 +2,7 @@ package io.dazzleduck.sql.flight.server;
 
 
 import io.dazzleduck.sql.common.ConfigConstants;
+import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.util.TestUtils;
 import org.apache.arrow.driver.jdbc.ArrowFlightConnection;
@@ -352,6 +353,25 @@ public class DuckDBFlightJDBCTest {
         }
     }
 
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    public void testSessionVariableFromConnectionProperties() throws Exception {
+        // A variable supplied at connect time (as a connection property) is sent as a call header,
+        // baked into the Flight-generated JWT (x-dd-variables is in claims.generate.headers), and
+        // applied to the connection as SET VARIABLE — so getvariable() reads it back.
+        var props = new Properties();
+        props.setProperty(Headers.CLAIM_SESSION_VARIABLES, "{\"owner\":\"alice\"}");
+        try (var connection = getConnection(url, props);
+             var st = connection.createStatement()) {
+            st.executeQuery("select getvariable('owner')");
+            try (ResultSet rs = st.getResultSet()) {
+                assertTrue(rs.next(), "expected one row");
+                assertEquals("alice", rs.getString(1),
+                        "getvariable('owner') should return the value from the connection property");
+            }
+        }
+    }
 
     private static ArrowFlightConnection getConnection(String url, Properties properties) throws SQLException {
         return new ArrowFlightJdbcDriver().connect(url, properties);

@@ -118,6 +118,19 @@ public class HivePartitionPruning extends PartitionPruning {
     public static List<FileStatus> pruneFiles(String basePath,
                                               String filterExpression,
                                               String[][] partitionDataTypes) throws SQLException, IOException {
+        return pruneFiles(basePath, filterExpression, partitionDataTypes, List.of());
+    }
+
+    /**
+     * @param sessionSetupSqls the request's {@code SET VARIABLE} statements. The pruning query
+     *                         carries the caller's filter, so a filter referencing
+     *                         {@code getvariable('x')} evaluates against NULL — pruning away every
+     *                         file — unless the connection that runs it has applied them.
+     */
+    public static List<FileStatus> pruneFiles(String basePath,
+                                              String filterExpression,
+                                              String[][] partitionDataTypes,
+                                              List<String> sessionSetupSqls) throws SQLException, IOException {
         if (partitionDataTypes == null || partitionDataTypes.length == 0) {
             return pruneFilesNoPartition(basePath);
         }
@@ -128,7 +141,9 @@ public class HivePartitionPruning extends PartitionPruning {
             String partitionSql = HivePartitionPruning.getPartitionSql(partitionDataTypes, tempTableName, filterExpression);
             String transformed = doQueryTransformation(readConnection, partitionSql,
                     Arrays.stream(partitionDataTypes).map(ss -> ss[0]).collect(Collectors.toSet()));
-            try (DuckDBConnection writeConnection = ConnectionPool.getConnection();
+            // writeConnection is the one that evaluates `transformed` (the filter), so it — not the
+            // parse-only readConnection — is the connection that needs the session variables.
+            try (DuckDBConnection writeConnection = ConnectionPool.getConnection(sessionSetupSqls);
                  BufferAllocator allocator = new RootAllocator();
                  ArrowReader reader1 = ConnectionPool.getReader(readConnection, allocator, firstSql, 1000);
                  Closeable ignored = ConnectionPool.createTempTableWithMap(writeConnection, allocator, reader1,
@@ -154,7 +169,18 @@ public class HivePartitionPruning extends PartitionPruning {
                                               JsonNode tree,
                                               String[][] partitionDataTypes) throws SQLException, IOException {
 
-        return pruneFiles(basePath, getFilterSql(tree), partitionDataTypes);
+        return pruneFiles(basePath, tree, partitionDataTypes, List.of());
+    }
+
+    /**
+     * @param sessionSetupSqls see {@link #pruneFiles(String, String, String[][], List)}
+     */
+    public static List<FileStatus> pruneFiles(String basePath,
+                                              JsonNode tree,
+                                              String[][] partitionDataTypes,
+                                              List<String> sessionSetupSqls) throws SQLException, IOException {
+
+        return pruneFiles(basePath, getFilterSql(tree), partitionDataTypes, sessionSetupSqls);
     }
     /**
      * Retrieves all files from a specified not partitioned directory path and returns their names and sizes.

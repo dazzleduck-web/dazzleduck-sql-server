@@ -18,6 +18,19 @@ public interface SplitPlanner {
 
     static List<List<FileStatus>> getSplitStatus(JsonNode tree,
                                                  long maxSplitSize) throws SQLException, IOException {
+        return getSplitStatus(tree, maxSplitSize, List.of());
+    }
+
+    /**
+     * @param sessionSetupSqls statements (today the request's {@code SET VARIABLE}s) that every
+     *                         connection evaluating the tree must run first. The tree handed here
+     *                         already carries the injected row-level-security filter, so a filter
+     *                         referencing {@code getvariable('x')} prunes against NULL — i.e.
+     *                         discards every file — on a connection that has not run them.
+     */
+    static List<List<FileStatus>> getSplitStatus(JsonNode tree,
+                                                 long maxSplitSize,
+                                                 List<String> sessionSetupSqls) throws SQLException, IOException {
         var catalogSchemaAndTables =
                 Transformations.getAllTablesOrPathsFromSelect(Transformations.getFirstStatementNode(tree), null, null);
 
@@ -35,7 +48,7 @@ public interface SplitPlanner {
         if (splitPlanner == null) {
             throw new SQLException("unsupported type : " + tableFunction);
         }
-        var fileStatuses = splitPlanner.pruneFiles(tree, maxSplitSize, Map.of());
+        var fileStatuses = splitPlanner.pruneFiles(tree, maxSplitSize, Map.of(), sessionSetupSqls);
         //fileStatuses.sort(Comparator.comparing(FileStatus::lastModified));
         return getSplitStatus(maxSplitSize, fileStatuses);
     }
@@ -133,7 +146,16 @@ public interface SplitPlanner {
 
     static List<TreeAndSize> getSplitTreeAndSize(JsonNode tree,
                                                  long maxSplitSize) throws SQLException, IOException {
-        var splits = getSplitStatus(tree, maxSplitSize);
+        return getSplitTreeAndSize(tree, maxSplitSize, List.of());
+    }
+
+    /**
+     * @param sessionSetupSqls see {@link #getSplitStatus(JsonNode, long, List)}
+     */
+    static List<TreeAndSize> getSplitTreeAndSize(JsonNode tree,
+                                                 long maxSplitSize,
+                                                 List<String> sessionSetupSqls) throws SQLException, IOException {
+        var splits = getSplitStatus(tree, maxSplitSize, sessionSetupSqls);
         return splits.stream().map(split -> {
             var copy = tree.deepCopy();
             SplitPlanner.replacePathInFromClause(copy, split.stream().map(FileStatus::fileName).toArray(String[]::new));

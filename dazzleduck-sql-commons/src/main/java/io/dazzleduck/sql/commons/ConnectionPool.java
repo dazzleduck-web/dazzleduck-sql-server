@@ -426,8 +426,27 @@ public enum ConnectionPool {
      */
     public static DuckDBConnection getConnection(String[] sqls) {
         DuckDBConnection connection = getConnection();
-        executeBatch(connection, sqls);
+        try {
+            executeBatch(connection, sqls);
+        } catch (RuntimeException e) {
+            // The setup batch can fail on caller-influenced SQL (SET VARIABLE from a JWT claim).
+            // Without this the connection we just opened is never closed.
+            try {
+                connection.close();
+            } catch (SQLException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
         return connection;
+    }
+
+    /**
+     * @param sqls Sql which will be executed on connection before connection is returned.
+     * @see #getConnection(String[])
+     */
+    public static DuckDBConnection getConnection(List<String> sqls) {
+        return getConnection(sqls.toArray(new String[0]));
     }
 
     /**

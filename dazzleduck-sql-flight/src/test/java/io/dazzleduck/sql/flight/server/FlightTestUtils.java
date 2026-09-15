@@ -190,7 +190,7 @@ public interface FlightTestUtils {
 
     static AdvanceJWTTokenAuthenticator getTestJWTTokenAuthenticator() throws NoSuchAlgorithmException {
         var jwtGenerateConfigString = """
-                jwt_token.claims.generate.headers=[database,catalog,schema,x-dd-table,x-dd-filter,x-dd-access,x-dd-path,x-dd-function]
+                jwt_token.claims.generate.headers=[database,catalog,schema,x-dd-table,x-dd-filter,x-dd-access,x-dd-path,x-dd-function,x-dd-variables]
                 jwt_token.claims.validate.headers=[database,schema]
                 """;
         var jwtConfig = ConfigFactory.parseString(jwtGenerateConfigString);
