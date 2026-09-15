@@ -1099,29 +1099,6 @@ public class Transformations {
     }
 
     /**
-     * Prune a view referenced inside a CTE body whose own SELECT list is a STAR — most importantly
-     * the RESTRICT_READ_ONLY authorizer's row-filter wrapper
-     * {@code ___t AS (SELECT * FROM <view> WHERE <rls-filter>)}. The STAR forwards every column to
-     * the CTE's consumers, so {@link #pruneScope} (which bails on any STAR) cannot drive elimination
-     * here. The columns actually needed are recovered from the union of:
-     * <ul>
-     *   <li>the enclosing scope's references to the CTE — its <b>consumers</b>
-     *       ({@code consumerScope} minus its own CTE bodies), and</li>
-     *   <li>the CTE body's own <b>WHERE</b> — the filter's columns: the wrapper still applies the
-     *       filter over the inlined subquery, so those columns must survive pruning or the wrapper
-     *       fails to bind.</li>
-     * </ul>
-     * The view body is then inlined and its now-unused LEFT JOINs eliminated, leaving the wrapper's
-     * {@code SELECT *} and {@code WHERE} intact over the pruned subquery.
-     *
-     * <p>No-op (returns false) when the consumer scope itself contains a STAR over the CTE — the
-     * view's columns can't be enumerated there, so no narrowing is safe. Consumer usage is read from
-     * {@code consumerScope} excluding its CTE bodies, matching the authorizer's output shape (the
-     * filter-CTE is consumed at the top level). Over-collection from sibling references is harmless
-     * (keeps extra columns → fewer joins dropped, never a wrong result), and the projection-only
-     * change is fail-safe: a missed column yields a bind error, never an unfiltered row.
-     */
-    /**
      * Prune a star-filter CTE against <b>every</b> scope that consumes it, specializing per consumer
      * where their column usage differs.
      *
@@ -1204,17 +1181,14 @@ public class Transformations {
         ArrayNode map = (ArrayNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP);
         JsonNode original = map.get(cteIndex);
 
-        // Phase 1 — build and prune the clones off to the side, mutating nothing shared. Every
-        // consumer is known to reference cteName (findCteConsumers selected them by the same
-        // predicate renameTableRefs uses), so the rename below cannot come up empty; assert it
-        // rather than half-rewrite the tree and bail.
+        // Phase 1 — build and prune the clones off to the side, mutating nothing shared, so any
+        // bail below leaves the AST exactly as it was. findCteConsumers selected every consumer by
+        // the same referencesTable predicate the phase-2 rename uses, so that rename is guaranteed
+        // to hit; phase ordering (build → confirm → mutate) is what makes the split atomic.
         List<JsonNode> clones = new ArrayList<>();
         List<String> cloneNames = new ArrayList<>();
         boolean anyPruned = false;
         for (int i = 0; i < consumers.size(); i++) {
-            if (!referencesTable(consumers.get(i), cteName, consumers.get(i) == outerCopy)) {
-                return false;   // a consumer we cannot rewrite → abandon before touching anything
-            }
             String cloneName = uniqueCteKey(map, cteName + "__c" + i);
             ObjectNode cloneEntry = (ObjectNode) original.deepCopy();
             cloneEntry.put(FIELD_KEY, cloneName);
@@ -1319,6 +1293,21 @@ public class Transformations {
         return n;
     }
 
+    /**
+     * Prune a star-filter CTE in place against a single consumer scope. The columns to keep are the
+     * union of that scope's references to the CTE and the CTE body's own {@code WHERE} (the filter
+     * columns must survive, or the wrapper fails to bind); the view body is then inlined and its
+     * now-unused LEFT JOINs eliminated, leaving the wrapper's {@code SELECT *} and {@code WHERE}
+     * intact over the pruned subquery.
+     *
+     * <p>{@code excludeCteMap} skips {@code consumerScope}'s own {@code cte_map} when collecting
+     * usage — set for the enclosing statement (whose sibling CTEs are separate consumers), clear
+     * when the consumer <em>is</em> a sibling CTE and its full body is the usage. No-op (returns
+     * false) if the scope contains a STAR over the CTE, since the view's columns can't be enumerated
+     * there. Over-collection is harmless (keeps extra columns → fewer joins dropped, never a wrong
+     * result), and the projection-only change is fail-safe: a missed column yields a bind error,
+     * never an unfiltered row.
+     */
     private static boolean pruneStarFilterCte(ObjectNode consumerScope, boolean excludeCteMap,
                                               ObjectNode cteBody, JsonNode viewBodyAst) {
         UsedColumns consumer = collectScopedUsage(consumerScope, excludeCteMap);
