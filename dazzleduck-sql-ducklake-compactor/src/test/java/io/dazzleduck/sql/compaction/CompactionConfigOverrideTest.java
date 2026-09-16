@@ -32,6 +32,7 @@ class CompactionConfigOverrideTest {
             minor_compaction_frequency = 1 minute
             major_compaction_frequency = 1 hour
             minor_compaction_max_size = 8MB
+            minor_compaction_max_files = 1000
             major_compaction_max_size = 64MB
             housekeeping_frequency = 5 minutes
             snapshot_retention = 60 minutes

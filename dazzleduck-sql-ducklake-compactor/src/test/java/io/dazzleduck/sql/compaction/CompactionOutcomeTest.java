@@ -23,6 +23,7 @@ class CompactionOutcomeTest {
             Duration.ZERO,
             Duration.ofSeconds(60),
             512 * 1024L,
+            0,
             10 * 1024 * 1024L,
             Duration.ofSeconds(5),
             0);

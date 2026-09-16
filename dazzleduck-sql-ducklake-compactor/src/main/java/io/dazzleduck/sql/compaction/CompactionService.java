@@ -141,8 +141,18 @@ public class CompactionService implements Closeable {
     private void runMinor(String database) throws Exception {
         Timer.Sample sample = state.startTimer();
         try (var connection = ConnectionPool.getConnection()) {
-            String sql = "CALL ducklake_merge_adjacent_files('%s', max_file_size := %d)"
-                    .formatted(database, config.minorCompactionMaxSize());
+            // Unbounded (max_compacted_files := 0, the default) merges every eligible file across
+            // every table in the catalog in a single call — on a large catalog this can hold open a
+            // transaction whose native memory footprint grows with the whole database rather than
+            // with minor_compaction_max_size, and a cycle that never returns never reports a
+            // completed "minor"/"merge" duration either. Capping it turns one unbounded pass into
+            // several bounded ones: this tick merges up to minorCompactionMaxFiles files and the next
+            // scheduled tick (minor_compaction_frequency later) picks up where it left off.
+            String sql = config.minorCompactionMaxFiles() > 0
+                    ? "CALL ducklake_merge_adjacent_files('%s', max_file_size := %d, max_compacted_files := %d)"
+                            .formatted(database, config.minorCompactionMaxSize(), config.minorCompactionMaxFiles())
+                    : "CALL ducklake_merge_adjacent_files('%s', max_file_size := %d)"
+                            .formatted(database, config.minorCompactionMaxSize());
             ConnectionPool.execute(connection, sql);
             logger.info("Minor compaction completed for {}", database);
         } finally {

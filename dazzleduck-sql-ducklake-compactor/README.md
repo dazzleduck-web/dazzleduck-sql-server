@@ -19,6 +19,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | `minor_compaction_frequency` | `1 minute` | How often to run minor compaction |
 | `major_compaction_frequency` | `1 hour` | How often to run major compaction |
 | `minor_compaction_max_size` | `8MB` | Only merge files smaller than this |
+| `minor_compaction_max_files` | `1000` | Caps files merged per minor-compaction call (`0` = unbounded); bounds memory/duration of a single cycle on a large catalog, remainder picks up next cycle |
 | `major_compaction_max_size` | `64MB` | Only compact files smaller than this during major pass |
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |

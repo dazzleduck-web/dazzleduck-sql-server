@@ -54,6 +54,7 @@ class CompactionIntegrationTest {
                 Duration.ofMillis(100),   // short so major fires quickly in tests
                 Duration.ofMillis(500),   // housekeeping every 500ms in tests
                 512 * 1024L,              // 512KB minor max
+                0,                        // 0 = unbounded, unchanged behavior for this test
                 10 * 1024 * 1024L,        // 10MB major max
                 Duration.ofSeconds(5),
                 0                         // 0 = OS-assigned port, health server not used in tests

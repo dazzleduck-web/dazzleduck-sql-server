@@ -13,6 +13,7 @@ public record CompactionConfig(
         Duration majorCompactionFrequency,
         Duration housekeepingFrequency,
         long minorCompactionMaxSize,
+        long minorCompactionMaxFiles,
         long majorCompactionMaxSize,
         Duration snapshotRetention,
         int healthPort
@@ -39,6 +40,7 @@ public record CompactionConfig(
                 c.getDuration("major_compaction_frequency"),
                 c.getDuration("housekeeping_frequency"),
                 c.getBytes("minor_compaction_max_size"),
+                c.getLong("minor_compaction_max_files"),
                 c.getBytes("major_compaction_max_size"),
                 c.getDuration("snapshot_retention"),
                 c.getInt("health_port")
