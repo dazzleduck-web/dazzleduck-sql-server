@@ -31,25 +31,6 @@ import java.util.Properties;
  */
 final class RawConnections {
 
-    /**
-     * Applied before the startup script and before a tier's {@code connection_settings}, so an
-     * operator can still override any of them.
-     *
-     * <p>{@code enable_external_file_cache} is an in-memory LRU over external Parquet <b>data</b>
-     * (not just footers - {@code parquet_metadata_cache} and {@code enable_http_metadata_cache} are
-     * already false by default). Compaction reads each file exactly once and then retires it, so the
-     * hit rate is ~0% and the cache only accumulates memory. It is GLOBAL-scoped, so it is set per
-     * instance here rather than in the shared ConnectionPool, which query paths use and where the
-     * cache does earn its keep.
-     *
-     * <p>Measured on a benchmark compactor: the minor tier grew to 14.8 GiB RSS against a 12 GB
-     * {@code memory_limit} in ~44 minutes, and the major tier sat at its 8 GB limit. With this
-     * setting the same tiers hold ~0.7 GiB and ~1.1 GiB, flat, with cycle duration unchanged
-     * (major 17.9s vs 17-22s before) - confirming the cache was buying nothing on this workload.
-     */
-    private static final List<String> WORKLOAD_DEFAULTS =
-            List.of("SET enable_external_file_cache = false");
-
     private RawConnections() {
     }
 
@@ -58,9 +39,6 @@ final class RawConnections {
         properties.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
         Connection connection = DriverManager.getConnection("jdbc:duckdb:", properties);
         try (Statement statement = connection.createStatement()) {
-            for (String sql : WORKLOAD_DEFAULTS) {
-                statement.execute(sql);
-            }
             for (String sql : splitStatements(startupScript)) {
                 statement.execute(sql);
             }
