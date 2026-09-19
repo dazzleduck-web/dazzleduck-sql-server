@@ -40,6 +40,14 @@ public class Main {
         // Run the startup script before calling toProperties() so that extensions like
         // ducklake and arrow are loaded before DuckLakeIngestionHandler queries DuckLake metadata.
         CollectorConfig config = new CollectorConfig(args.configFile);
+
+        // The ingest path stages each batch to an Arrow file, reads it exactly once via
+        // read_arrow([...]) and then deletes it, so DuckDB's external-file cache (an in-memory LRU
+        // over external file DATA) can never hit and only costs memory. GLOBAL-scoped, so one SET on
+        // the singleton covers this process; deliberately not set inside ConnectionPool itself,
+        // which query paths share and where repeated reads make the cache worthwhile.
+        ConnectionPool.executeOnSingleton("SET enable_external_file_cache = false");
+
         String startupScript = config.getStartupScript();
         if (startupScript != null && !startupScript.isBlank()) {
             log.info("Executing startup script");
