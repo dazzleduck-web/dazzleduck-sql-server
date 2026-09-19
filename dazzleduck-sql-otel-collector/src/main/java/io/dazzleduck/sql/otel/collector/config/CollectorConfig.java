@@ -152,6 +152,17 @@ public class CollectorConfig {
     }
 
     /**
+     * Raw SQL applied to the ingestion DuckDB instance at startup, from
+     * {@code otel_collector.ingestion.connection_settings}. The default lives in
+     * {@code reference.conf} so it is visible and overridable rather than hidden in code;
+     * an empty list restores DuckDB's own defaults.
+     */
+    public java.util.List<String> getIngestionConnectionSettings() {
+        String path = CONFIG_PREFIX + ".ingestion." + ConfigConstants.CONNECTION_SETTINGS_KEY;
+        return config.hasPath(path) ? config.getStringList(path) : java.util.List.of();
+    }
+
+    /**
      * Returns the single unified {@link IngestionHandler} from the top-level
      * {@code ingestion_task_factory_provider} block.
      */

@@ -41,12 +41,13 @@ public class Main {
         // ducklake and arrow are loaded before DuckLakeIngestionHandler queries DuckLake metadata.
         CollectorConfig config = new CollectorConfig(args.configFile);
 
-        // The ingest path stages each batch to an Arrow file, reads it exactly once via
-        // read_arrow([...]) and then deletes it, so DuckDB's external-file cache (an in-memory LRU
-        // over external file DATA) can never hit and only costs memory. GLOBAL-scoped, so one SET on
-        // the singleton covers this process; deliberately not set inside ConnectionPool itself,
-        // which query paths share and where repeated reads make the cache worthwhile.
-        ConnectionPool.executeOnSingleton("SET enable_external_file_cache = false");
+        // DuckDB settings for the ingestion instance. The default (disabling the external-file
+        // cache) is declared in reference.conf rather than here, so it is visible to operators
+        // and overridable per deployment - the ingest path stages each batch to an Arrow file,
+        // reads it once via read_arrow([...]) and then deletes it, so that cache can never hit.
+        for (String setting : config.getIngestionConnectionSettings()) {
+            ConnectionPool.executeOnSingleton(setting);
+        }
 
         String startupScript = config.getStartupScript();
         if (startupScript != null && !startupScript.isBlank()) {

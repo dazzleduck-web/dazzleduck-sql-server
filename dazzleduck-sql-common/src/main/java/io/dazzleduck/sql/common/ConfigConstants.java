@@ -57,6 +57,8 @@ public class ConfigConstants {
     public static final String MAX_BATCHES_KEY = "max_batches";
     public static final String MAX_PENDING_WRITE_KEY = "max_pending_write";
     public static final String MAX_DELAY_MS_KEY = "max_delay_ms";
+    //! Raw SQL applied to the ingestion DuckDB instance at startup, e.g. "SET ...".
+    public static final String CONNECTION_SETTINGS_KEY = "connection_settings";
     public static final String PARQUET_COMPRESSION_KEY = "parquet_compression";
 
     public static final String QUEUE_CONFIG_REFRESH_DELAY_MS_KEY = "queue_config_refresh_delay_ms";
