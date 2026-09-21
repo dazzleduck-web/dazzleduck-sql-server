@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.compaction;
 
 import com.typesafe.config.Config;
+import com.typesafe.config.ConfigException;
 import com.typesafe.config.ConfigFactory;
 import com.typesafe.config.ConfigObject;
 import com.typesafe.config.ConfigValue;
@@ -76,9 +77,15 @@ public record CompactionConfig(
      */
     private static List<CompactionTier> parseTiers(Config c) {
         ConfigValue configured = c.getValue(TIERS_KEY);
-        return configured.valueType() == ConfigValueType.LIST
-                ? parseTierList(c)
-                : parseTierObject(configured);
+        if (configured.valueType() == ConfigValueType.LIST) {
+            return parseTierList(c);
+        }
+        if (configured.valueType() != ConfigValueType.OBJECT) {
+            throw new IllegalArgumentException(
+                    "%s must be tiers keyed by name, or a list of tiers, but is %s"
+                            .formatted(TIERS_KEY, configured.valueType()));
+        }
+        return parseTierObject(configured);
     }
 
     /**
@@ -104,7 +111,21 @@ public record CompactionConfig(
                         ("Compaction tier keyed '%s' declares name '%s' — the key is the tier name,"
                                 + " so drop the field").formatted(name, tier.getString("name")));
             }
-            tiers.add(toTier(name, tier));
+            try {
+                tiers.add(toTier(name, tier));
+            } catch (ConfigException.Missing e) {
+                // Reached most often by a config still on the LIST shape that has picked up a
+                // tier override: the override is an object, so it REPLACES the list, leaving one
+                // tier holding only the overridden field. Without this the failure surfaces as a
+                // bare "No configuration setting found for key 'enabled'" pointing at nothing.
+                throw new IllegalArgumentException(
+                        ("Compaction tier '%s' is incomplete: %s. A tier must declare enabled,"
+                                + " frequency, min_file_size, max_file_size and max_compacted_files."
+                                + " If %s is still a LIST in your config, an override such as"
+                                + " %s.%s.frequency replaces the whole list rather than merging into"
+                                + " it — key the tiers by name first.")
+                                .formatted(name, e.getMessage(), TIERS_KEY, TIERS_KEY, name), e);
+            }
         }
         tiers.sort(Comparator.comparingLong(CompactionTier::minFileSize));
         return List.copyOf(tiers);

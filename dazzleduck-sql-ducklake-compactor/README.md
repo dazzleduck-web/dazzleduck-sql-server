@@ -78,8 +78,12 @@ same spelling works from a `config_provider` table (see below). Tiers are always
 band order.
 
 A **list** of tiers, each carrying its own `name` field, is still accepted so configs written
-against 0.2.19 keep working; with a list, declaration order is preserved and per-tier overrides are
-not possible.
+against 0.2.19 keep working; with a list, declaration order is preserved.
+
+> **Migrating from the list shape:** don't add a per-tier override until the file is keyed by name.
+> Against a list, `compaction_tiers.minor.frequency` is an object that *replaces* the whole list
+> rather than merging into it, leaving one tier holding only the overridden field — startup then
+> fails naming the incomplete tier and pointing back here.
 
 Per-tier fields:
 

@@ -397,4 +397,48 @@ class CompactionConfigOverrideTest {
                 resolve(raw).tiers().stream().map(CompactionTier::name).toList(),
                 "declaration order, not band order, is what a list always had");
     }
+
+    @Test
+    void aTiersBlockThatIsNeitherKeyedNorAListIsRejectedClearly() {
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers = 5
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        // Not a ClassCastException: this module refuses to start on bad config *and says why*.
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(raw));
+        assertTrue(e.getMessage().contains("keyed by name"), e.getMessage());
+    }
+
+    @Test
+    void overridingATierWhileStillOnTheListShapeSaysWhatWentWrong() throws Exception {
+        // The trap this change introduces: the docs now advertise per-tier overrides, but against
+        // a LIST an override is an object that REPLACES the list, leaving one tier with one field.
+        // The bare HOCON error ("No configuration setting found for key 'enabled'") names neither
+        // the tier nor the cause.
+        insert("compaction.compaction_tiers.minor.frequency", "10 seconds");
+        Config listShaped = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers = [
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, max_compacted_files = 0, connection_settings = [] }
+                ]
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """ + """
+                config_provider {
+                  class = "io.dazzleduck.sql.commons.TableConfigProvider"
+                  table = "%s"
+                  prefix = "compaction."
+                }
+                """.formatted(TABLE));
+
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(listShaped));
+        assertTrue(e.getMessage().contains("minor"), e.getMessage());
+        assertTrue(e.getMessage().contains("key the tiers by name first"), e.getMessage());
+    }
 }
