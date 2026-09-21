@@ -31,7 +31,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | Key | Default | Description |
 |-----|---------|-------------|
 | `databases` | `[]` | DuckLake catalog names to compact (must be attached via startup script) |
-| `compaction_tiers` | see below | List of compaction tiers (see below) |
+| `compaction_tiers` | see below | Compaction tiers, keyed by tier name (see below) |
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `housekeeping_connection_settings` | `[]` | Raw SQL run on housekeeping's connection right after opening it — independent of any tier |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |
@@ -44,9 +44,8 @@ The bundled defaults live in this module's `application.conf` (not `reference.co
 ### Compaction tiers
 
 ```hocon
-compaction_tiers = [
-  {
-    name = "minor"
+compaction_tiers {
+  minor {
     enabled = true
     frequency = 1 minute
     min_file_size = 0
@@ -54,8 +53,7 @@ compaction_tiers = [
     max_compacted_files = 1000   # 0 = unbounded
     connection_settings = ["SET memory_limit='2GB'", "SET threads=2"]
   }
-  {
-    name = "major"
+  major {
     enabled = true
     frequency = 1 hour
     min_file_size = 8MB
@@ -63,19 +61,35 @@ compaction_tiers = [
     max_compacted_files = 1000
     connection_settings = ["SET memory_limit='8GB'", "SET threads=4"]
   }
-]
+}
 ```
+
+Tiers are **keyed by name**, and the key is the tier's name — there is no `name` field. That is
+what makes a tier individually overridable: HOCON merges objects field-by-field but replaces lists
+wholesale, so
+
+```bash
+--conf 'dazzleduck_sql_compaction.compaction_tiers.minor.frequency = 10 seconds'
+```
+
+changes one cadence and leaves every other field of `minor` — and every other tier — intact. The
+same spelling works from a `config_provider` table (see below). Tiers are always processed in
+`min_file_size` order regardless of key order, so logs and the per-tier file-count gauges read in
+band order.
+
+A **list** of tiers, each carrying its own `name` field, is still accepted so configs written
+against 0.2.19 keep working; with a list, declaration order is preserved and per-tier overrides are
+not possible.
 
 Per-tier fields:
 
 | Field | Description |
 |-------|-------------|
-| `name` | Identifies the tier in metrics/health output and logs. Must be unique. |
 | `enabled` | Set `false` to turn this tier off entirely, for all databases, without removing it from config |
 | `frequency` | How often this tier runs |
 | `min_file_size` / `max_file_size` | This tier only touches files in `[min_file_size, max_file_size)`. Always required, including `0` for the lowest tier |
 | `max_compacted_files` | Caps files merged per cycle (passed through as `ducklake_merge_adjacent_files`'s own `max_compacted_files`); `0` = unbounded, and a catalog with more eligible files than the cap just finishes over several ticks instead of one |
-| `connection_settings` | Raw SQL run on this tier's own connection right after opening it, e.g. to set `memory_limit`/`threads` differently per tier |
+| `connection_settings` | Optional (default none). Raw SQL run on this tier's own connection right after opening it, e.g. to set `memory_limit`/`threads` differently per tier. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
 Disabling a tier (`enabled = false`) is the direct way to turn it off. Simply raising a tier's
 `frequency` to a very large value is **not** equivalent — with the old hardcoded minor/major design
@@ -137,11 +151,20 @@ dazzleduck_sql_compaction.config_provider {
 }
 ```
 
-Only scalar keys can be overridden this way — `housekeeping_frequency`, `snapshot_retention`, and
-`health_port`. List-valued keys can't (same restriction `databases` already has): that rules out
-`housekeeping_connection_settings` and, notably, all of `compaction_tiers` — an individual tier's
-`frequency`, `max_file_size`, etc. can't be retuned from this table; changing a tier requires a
-config file change and redeploy.
+Only scalar keys can be overridden this way, because every table value is read as a string and
+HOCON will not widen a string to a list. That still rules out `databases` and
+`housekeeping_connection_settings`, but **individual tier fields are scalars and can be set**, since
+tiers are keyed by name rather than listed:
+
+| Row key | Effect |
+|---------|--------|
+| `compaction_tiers.minor.frequency` | retunes one cadence; the tier's other fields are untouched |
+| `compaction_tiers.minor.enabled` | turns one tier off while leaving it configured, so its file-count gauge still reports its band |
+| `compaction_tiers.mega.min_file_size` (+ the other scalars) | declares a whole new tier — `connection_settings` is optional precisely so this is possible |
+
+A tier's `connection_settings` is still a list and so cannot be set from the table; it stays in the
+file. Note also that overrides are read **once at startup**, so a changed row takes effect on the
+next restart — this centralizes the values, it does not make them live.
 
 A configured table that cannot be read is a fatal startup error by design — silently falling
 back to file defaults would hide a broken override source.

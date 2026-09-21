@@ -30,18 +30,16 @@ class CompactionConfigOverrideTest {
     /** The bundled application.conf's shape, as the fallback layer. */
     private static final String FILE_CONFIG = """
             databases = ["mylake"]
-            compaction_tiers = [
-              {
-                name = "minor"
+            compaction_tiers {
+              minor {
                 enabled = true
                 frequency = 1 minute
                 min_file_size = 0
                 max_file_size = 8MB
                 max_compacted_files = 1000
-                connection_settings = []
+                connection_settings = ["SET threads=2"]
               }
-              {
-                name = "major"
+              major {
                 enabled = true
                 frequency = 1 hour
                 min_file_size = 8MB
@@ -49,7 +47,7 @@ class CompactionConfigOverrideTest {
                 max_compacted_files = 1000
                 connection_settings = []
               }
-            ]
+            }
             housekeeping_frequency = 5 minutes
             housekeeping_connection_settings = []
             snapshot_retention = 60 minutes
@@ -271,5 +269,132 @@ class CompactionConfigOverrideTest {
         var e = assertThrows(com.typesafe.config.ConfigException.WrongType.class,
                 () -> resolve(raw));
         assertTrue(e.getMessage().contains("databases"), e.getMessage());
+    }
+
+    @Test
+    void keyedTiersTakeTheirNameFromTheKey() throws Exception {
+        CompactionConfig config = resolve(ConfigFactory.parseString(FILE_CONFIG));
+        assertEquals(List.of("minor", "major"),
+                config.tiers().stream().map(CompactionTier::name).toList());
+        assertEquals(Duration.ofMinutes(1), tier(config, "minor").frequency());
+        assertEquals(64_000_000L, tier(config, "major").maxFileSize());
+    }
+
+    @Test
+    void oneTierFieldCanBeRetunedFromTheTableWithoutRestatingTheTier() throws Exception {
+        // The reason tiers are keyed rather than listed. HOCON merges objects field-by-field, so
+        // this row changes a cadence and nothing else — with a list it would have replaced every
+        // tier and startup would fail on the first field the row did not restate.
+        insert("compaction.compaction_tiers.minor.frequency", "10 seconds");
+
+        CompactionConfig config = resolve(withProvider("compaction."));
+        CompactionTier minor = tier(config, "minor");
+        assertEquals(Duration.ofSeconds(10), minor.frequency(), "the overridden field");
+        assertEquals(8_000_000L, minor.maxFileSize(), "its siblings survive the merge");
+        assertEquals(1000L, minor.maxCompactedFiles());
+        assertEquals(List.of("SET threads=2"), minor.connectionSettings(),
+                "a list INSIDE the tier is untouched by overriding a scalar beside it");
+        assertEquals(Duration.ofHours(1), tier(config, "major").frequency(), "other tiers untouched");
+    }
+
+    @Test
+    void aTierCanBeDisabledFromTheTable() throws Exception {
+        // The per-process case: one shared config, each process turning off the tiers it does not
+        // own. Equivalent on the command line as
+        // --conf 'dazzleduck_sql_compaction.compaction_tiers.minor.enabled = false'.
+        insert("compaction.compaction_tiers.minor.enabled", "false");
+
+        CompactionConfig config = resolve(withProvider("compaction."));
+        assertFalse(tier(config, "minor").enabled());
+        assertTrue(tier(config, "major").enabled());
+        assertEquals(2, config.tiers().size(),
+                "a disabled tier stays configured so its file-count gauge still reports its band");
+    }
+
+    @Test
+    void aBrandNewTierCanBeAddedFromTheTable() throws Exception {
+        insert("compaction.compaction_tiers.mega.enabled", "true");
+        insert("compaction.compaction_tiers.mega.frequency", "1 minute");
+        insert("compaction.compaction_tiers.mega.min_file_size", "64MB");
+        insert("compaction.compaction_tiers.mega.max_file_size", "256MB");
+        insert("compaction.compaction_tiers.mega.max_compacted_files", "5");
+        // deliberately no connection_settings row: it is list-valued, and a key/value table can
+        // only carry scalars, so the field has to be optional for this to be possible at all
+
+        CompactionConfig config = resolve(withProvider("compaction."));
+        assertEquals(3, config.tiers().size());
+        assertEquals(256_000_000L, tier(config, "mega").maxFileSize());
+        assertEquals(List.of(), tier(config, "mega").connectionSettings());
+    }
+
+    @Test
+    void keyedTiersAreOrderedByBandNotByKey() throws Exception {
+        // An object's key order is not meaningful, so band order is imposed — otherwise the logs
+        // and the per-tier gauges would come out in whatever order the parser happened to produce.
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers {
+                  mega  { enabled = true, frequency = 1 hour,   min_file_size = 64MB, max_file_size = 256MB, max_compacted_files = 5, connection_settings = [] }
+                  minor { enabled = true, frequency = 1 minute, min_file_size = 0,    max_file_size = 8MB,   max_compacted_files = 0, connection_settings = [] }
+                  major { enabled = true, frequency = 5 minutes, min_file_size = 8MB, max_file_size = 64MB,  max_compacted_files = 0, connection_settings = [] }
+                }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        assertEquals(List.of("minor", "major", "mega"),
+                resolve(raw).tiers().stream().map(CompactionTier::name).toList());
+    }
+
+    @Test
+    void aKeyedTierDeclaringADifferentNameIsRejected() {
+        // Catches a half-finished migration from the list shape, which would otherwise run under
+        // the key while being tuned under the field.
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers {
+                  minor { name = "major", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, max_compacted_files = 0, connection_settings = [] }
+                }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(raw));
+        assertTrue(e.getMessage().contains("the key is the tier name"), e.getMessage());
+    }
+
+    @Test
+    void aKeyedTierThatIsNotAnObjectIsRejected() {
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers { minor = "1 minute" }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(raw));
+        assertTrue(e.getMessage().contains("must be an object"), e.getMessage());
+    }
+
+    @Test
+    void theListShapeStillParsesSoExistingConfigsKeepWorking() throws Exception {
+        // 0.2.19 shape, verbatim: `name` as a field, declaration order preserved.
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers = [
+                  { name = "major", enabled = true, frequency = 1 hour,   min_file_size = 8MB, max_file_size = 64MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  max_compacted_files = 0, connection_settings = [] }
+                ]
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        assertEquals(List.of("major", "minor"),
+                resolve(raw).tiers().stream().map(CompactionTier::name).toList(),
+                "declaration order, not band order, is what a list always had");
     }
 }
