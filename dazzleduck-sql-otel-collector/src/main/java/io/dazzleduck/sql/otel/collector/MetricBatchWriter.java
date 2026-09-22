@@ -16,7 +16,6 @@ import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
-import org.apache.arrow.vector.complex.impl.UnionMapWriter;
 import org.apache.arrow.vector.complex.writer.BaseWriter;
 
 import java.nio.charset.StandardCharsets;
@@ -52,8 +51,8 @@ public class MetricBatchWriter {
         BitVector isMonotonicVec        = (BitVector)            root.getVector(OtelMetricSchema.COL_IS_MONOTONIC);
         VarCharVector aggTempVec        = (VarCharVector)        root.getVector(OtelMetricSchema.COL_AGGREGATION_TEMPORALITY);
 
-        UnionMapWriter attrWriter    = attributesVec.getWriter();
-        UnionMapWriter resAttrWriter = resourceAttributesVec.getWriter();
+        MapColumnWriter attrWriter    = MapColumnWriter.of(attributesVec);
+        MapColumnWriter resAttrWriter = MapColumnWriter.of(resourceAttributesVec);
 
         int row = 0;
         for (MetricEntry entry : entries) {
@@ -162,7 +161,7 @@ public class MetricBatchWriter {
                                   List<KeyValue> attributes,
                                   VarCharVector nameVec, VarCharVector descVec, VarCharVector unitVec,
                                   VarCharVector typeVec, TimeStampMilliVector startVec, TimeStampMilliVector timeVec,
-                                  UnionMapWriter attrWriter, UnionMapWriter resAttrWriter,
+                                  MapColumnWriter attrWriter, MapColumnWriter resAttrWriter,
                                   VarCharVector scopeNameVec, VarCharVector scopeVersionVec) {
         writeVarChar(nameVec, row, metric.getName());
         writeVarChar(descVec, row, LogRecordConverter.emptyToNull(metric.getDescription()));
@@ -170,8 +169,8 @@ public class MetricBatchWriter {
         writeVarChar(typeVec, row, metricType);
         if (startNanos > 0) startVec.setSafe(row, startNanos / 1_000_000L); else startVec.setNull(row);
         if (timeNanos  > 0) timeVec.setSafe(row, timeNanos  / 1_000_000L);  else timeVec.setNull(row);
-        writeMap(attrWriter, row, attributes);
-        writeMap(resAttrWriter, row, resource != null ? resource.getAttributesList() : List.of());
+        attrWriter.write(row, attributes);
+        resAttrWriter.write(row, resource != null ? resource.getAttributesList() : List.of());
         if (scope != null) {
             writeVarChar(scopeNameVec, row, LogRecordConverter.emptyToNull(scope.getName()));
             writeVarChar(scopeVersionVec, row, LogRecordConverter.emptyToNull(scope.getVersion()));
@@ -245,15 +244,6 @@ public class MetricBatchWriter {
         bucketCountsVec.setNull(row);
         explicitBoundsVec.setNull(row);
         quantileValuesVec.setNull(row);
-    }
-
-    private static void writeMap(UnionMapWriter writer, int index, List<KeyValue> kvList) {
-        writer.setPosition(index);
-        writer.startMap();
-        for (KeyValue kv : kvList) {
-            OtelSchemaFields.writeEntry(writer, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
-        }
-        writer.endMap();
     }
 
     private static void writeVarChar(VarCharVector vec, int index, String value) {

@@ -11,7 +11,6 @@ import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
-import org.apache.arrow.vector.complex.impl.UnionMapWriter;
 import org.apache.arrow.vector.complex.writer.BaseWriter;
 
 import java.nio.charset.StandardCharsets;
@@ -46,8 +45,8 @@ public class SpanBatchWriter {
         ListVector eventsVec            = (ListVector)           root.getVector(OtelTraceSchema.COL_EVENTS);
         ListVector linksVec             = (ListVector)           root.getVector(OtelTraceSchema.COL_LINKS);
 
-        UnionMapWriter attrWriter    = attributesVec.getWriter();
-        UnionMapWriter resAttrWriter = resourceAttributesVec.getWriter();
+        MapColumnWriter attrWriter    = MapColumnWriter.of(attributesVec);
+        MapColumnWriter resAttrWriter = MapColumnWriter.of(resourceAttributesVec);
 
         for (int i = 0; i < entries.size(); i++) {
             SpanEntry entry = entries.get(i);
@@ -79,8 +78,8 @@ public class SpanBatchWriter {
             writeVarChar(statusCodeVec, i, statusCode);
             writeVarChar(statusMsgVec, i, LogRecordConverter.emptyToNull(status.getMessage()));
 
-            writeMap(attrWriter, i, span.getAttributesList());
-            writeMap(resAttrWriter, i, resource != null ? resource.getAttributesList() : List.of());
+            attrWriter.write(i, span.getAttributesList());
+            resAttrWriter.write(i, resource != null ? resource.getAttributesList() : List.of());
 
             if (scope != null) {
                 writeVarChar(scopeNameVec, i, LogRecordConverter.emptyToNull(scope.getName()));
@@ -156,15 +155,6 @@ public class SpanBatchWriter {
             OtelSchemaFields.writeEntry(mw, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
         }
         mw.endMap();
-    }
-
-    private static void writeMap(UnionMapWriter writer, int index, List<KeyValue> kvList) {
-        writer.setPosition(index);
-        writer.startMap();
-        for (KeyValue kv : kvList) {
-            OtelSchemaFields.writeEntry(writer, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
-        }
-        writer.endMap();
     }
 
     private static void writeVarChar(VarCharVector vec, int index, String value) {

@@ -1,7 +1,6 @@
 package io.dazzleduck.sql.otel.collector;
 
 import io.opentelemetry.proto.common.v1.InstrumentationScope;
-import io.opentelemetry.proto.common.v1.KeyValue;
 import io.opentelemetry.proto.logs.v1.LogRecord;
 import io.opentelemetry.proto.resource.v1.Resource;
 import org.apache.arrow.vector.IntVector;
@@ -9,7 +8,6 @@ import org.apache.arrow.vector.TimeStampMilliVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.MapVector;
-import org.apache.arrow.vector.complex.impl.UnionMapWriter;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
@@ -40,8 +38,8 @@ public class LogRecordBatchWriter {
         VarCharVector scopeNameVec      = (VarCharVector)        root.getVector(OtelLogSchema.COL_SCOPE_NAME);
         VarCharVector scopeVersionVec   = (VarCharVector)        root.getVector(OtelLogSchema.COL_SCOPE_VERSION);
 
-        UnionMapWriter attrWriter    = attributesVec.getWriter();
-        UnionMapWriter resAttrWriter = resourceAttributesVec.getWriter();
+        MapColumnWriter attrWriter    = MapColumnWriter.of(attributesVec);
+        MapColumnWriter resAttrWriter = MapColumnWriter.of(resourceAttributesVec);
 
         for (int i = 0; i < entries.size(); i++) {
             LogEntry entry = entries.get(i);
@@ -73,8 +71,8 @@ public class LogRecordBatchWriter {
             flagsVec.setSafe(i, (int) (record.getFlags() & 0xFFFFFFFFL));
             eventNameVec.setNull(i);
 
-            writeMap(attrWriter, i, record.getAttributesList());
-            writeMap(resAttrWriter, i, resource != null ? resource.getAttributesList() : List.of());
+            attrWriter.write(i, record.getAttributesList());
+            resAttrWriter.write(i, resource != null ? resource.getAttributesList() : List.of());
 
             if (scope != null) {
                 writeVarChar(scopeNameVec, i, LogRecordConverter.emptyToNull(scope.getName()));
@@ -94,14 +92,5 @@ public class LogRecordBatchWriter {
         } else {
             vec.setSafe(index, value.getBytes(StandardCharsets.UTF_8));
         }
-    }
-
-    private static void writeMap(UnionMapWriter writer, int index, List<KeyValue> kvList) {
-        writer.setPosition(index);
-        writer.startMap();
-        for (KeyValue kv : kvList) {
-            OtelSchemaFields.writeEntry(writer, kv.getKey(), LogRecordConverter.anyValueToString(kv.getValue()));
-        }
-        writer.endMap();
     }
 }
