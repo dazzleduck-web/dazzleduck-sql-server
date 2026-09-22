@@ -467,6 +467,85 @@ public class ParquetIngestionQueueTest {
         }
     }
 
+    /**
+     * Two batches coalesced into ONE bucket must yield every row of BOTH inputs, unchanged.
+     *
+     * <p>testMultipleBatches already asserts the coalescing itself, but only by row COUNT, and a
+     * count cannot see rows attributed to the wrong input — the two fixtures it uses have
+     * overlapping ids (0-99 and 0-49), so a batch read twice and a batch read once each total
+     * 150. This test gives the two inputs DISJOINT id ranges so that duplication, loss, or a
+     * cross-batch mix-up all change the result set rather than cancelling out.
+     *
+     * <p>It matters because constructSourceRelation hands the whole bucket to DuckDB as one
+     * read_parquet([f1, f2, ...]) list. Anything that keys data per batch — a foreign key into a
+     * side table, say — is only unique WITHIN a batch, and two batches sharing a bucket is
+     * exactly where such a scheme breaks.
+     */
+    @Test
+    public void testTwoBatchesInOneBucketKeepEveryRowOfBoth() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+
+        Path fileA = createOffsetParquetFile("bucket-a.parquet", 0, 100);
+        Path fileB = createOffsetParquetFile("bucket-b.parquet", 1000, 50);
+
+        AtomicInteger postTaskCount = new AtomicInteger(0);
+        var postTaskFactory = new IngestionHandler() {
+            @Override
+            public PostIngestionTask createPostIngestionTask(IngestionResult ingestionResult) {
+                return postTaskCount::incrementAndGet;
+            }
+
+            @Override
+            public String getTargetPath(String queueId) {
+                return targetPath.toString();
+            }
+
+            @Override
+            public String[] getPartitionBy(String queueId) {
+                return new String[0];
+            }
+        };
+
+        try (var queue = new ParquetIngestionQueue(
+                TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "test-queue",
+                DEFAULT_SMALL_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
+                DEFAULT_MAX_DELAY, postTaskFactory, service, clock)) {
+
+            var future1 = queue.add(createBatch(fileA.toString(), "producer1", 0, 600));
+            var future2 = queue.add(createBatch(fileB.toString(), "producer1", 1, 600));
+
+            service.tick(1, TimeUnit.MILLISECONDS);
+            var result1 = future1.get(2, SECONDS);
+            var result2 = future2.get(2, SECONDS);
+
+            // Precondition: they really did share a bucket, otherwise this proves nothing.
+            assertEquals(1, postTaskCount.get(), "both batches must land in one bucket");
+            assertEquals(result1.filesCreated(), result2.filesCreated(),
+                    "one bucket writes one set of files");
+
+            assertEquals(150, result1.rowCount());
+            TestUtils.isEqual(
+                    "SELECT * FROM (%s UNION ALL %s) ORDER BY id"
+                            .formatted(offsetSourceData(0, 100), offsetSourceData(1000, 50)),
+                    "SELECT * FROM read_parquet('%s') ORDER BY id"
+                            .formatted(result1.filesCreated().get(0)));
+        }
+    }
+
+    /** Source SQL for a fixture whose ids start at {@code start} — mirrors createOffsetParquetFile. */
+    private static String offsetSourceData(int start, int rows) {
+        return "SELECT i AS id, i * 2 AS value, 'category' || (i %% 3) AS category FROM range(%d, %d) t(i)"
+                .formatted(start, start + rows);
+    }
+
+    private Path createOffsetParquetFile(String filename, int start, int rows) throws Exception {
+        Path file = tempDir.resolve(filename);
+        ConnectionPool.execute("COPY (%s) TO '%s' (FORMAT PARQUET)"
+                .formatted(offsetSourceData(start, rows), file));
+        return file;
+    }
+
     // -------------------------------------------------------------------------
     // Transformation tests
     // -------------------------------------------------------------------------

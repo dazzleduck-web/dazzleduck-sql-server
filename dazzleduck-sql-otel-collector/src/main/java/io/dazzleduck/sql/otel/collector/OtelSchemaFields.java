@@ -6,7 +6,6 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.arrow.vector.util.Text;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,14 +40,6 @@ class OtelSchemaFields {
         } else {
             ((BaseWriter.ListWriter) writer.value()).varChar().writeNull();
         }
-        writer.endEntry();
-    }
-
-    /** Pre-encoded variant — a plain byte copy, no per-call UTF-8 encoding. */
-    static void writeEntry(BaseWriter.MapWriter writer, Text key, Text value) {
-        writer.startEntry();
-        ((BaseWriter.ListWriter) writer.key()).varChar().writeVarChar(key);
-        ((BaseWriter.ListWriter) writer.value()).varChar().writeVarChar(value);
         writer.endEntry();
     }
 

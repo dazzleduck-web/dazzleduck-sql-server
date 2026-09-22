@@ -3,8 +3,6 @@ package io.dazzleduck.sql.otel.collector;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.MapVector;
-import org.apache.arrow.vector.complex.impl.UnionMapWriter;
-import org.apache.arrow.vector.util.Text;
 
 import java.util.Map;
 
@@ -20,25 +18,26 @@ final class ClaimsColumnWriter {
     static void write(VectorSchemaRoot root, Map<String, String> claims) {
         int rowCount = root.getRowCount();
         MapVector claimsVec = (MapVector) root.getVector(IngestionHandler.CLAIMS_COLUMN);
-        UnionMapWriter writer = claimsVec.getWriter();
 
         // Single entrySet pass: encodes once per batch and keeps key/value pairing guaranteed.
-        Text[] keys = new Text[claims.size()];
-        Text[] values = new Text[claims.size()];
+        // This column is the extreme case of the duplication MapColumnWriter exists to make
+        // cheap — one export request carries exactly one token, so the SAME map is written on
+        // every one of the batch's rows. Encoding once and replaying the bytes means the
+        // per-row cost is just the Arrow offset bookkeeping.
+        byte[][] keys = new byte[claims.size()][];
+        byte[][] values = new byte[claims.size()][];
         int n = 0;
         for (Map.Entry<String, String> claim : claims.entrySet()) {
-            keys[n] = new Text(claim.getKey());
-            values[n] = new Text(claim.getValue());
+            keys[n] = MapColumnWriter.utf8(claim.getKey());
+            // A null claim value used to throw from Text's constructor; write a null entry
+            // instead, matching how the attribute maps treat an absent value.
+            values[n] = claim.getValue() == null ? null : MapColumnWriter.utf8(claim.getValue());
             n++;
         }
 
+        MapColumnWriter writer = MapColumnWriter.of(claimsVec);
         for (int i = 0; i < rowCount; i++) {
-            writer.setPosition(i);
-            writer.startMap();
-            for (int k = 0; k < keys.length; k++) {
-                OtelSchemaFields.writeEntry(writer, keys[k], values[k]);
-            }
-            writer.endMap();
+            writer.writeEncoded(i, keys, values);
         }
         // The batch writer's setRowCount stamped this vector's value count while it was
         // still empty — refresh it now that the maps are written.

@@ -103,7 +103,30 @@ final class MapColumnWriter {
         vector.endValue(row, count);
     }
 
-    private static byte[] utf8(String s) {
+    /**
+     * Writes one row from already-encoded entries, for a map whose contents repeat across rows.
+     *
+     * <p>The caller encodes once and passes the same arrays for every row — which is the whole
+     * point for the JWT claims column, where one export request carries exactly one token and so
+     * every row of the batch gets an identical map. {@code values} entries may be null.
+     */
+    void writeEncoded(int row, byte[][] keys, byte[][] values) {
+        vector.startNewValue(row);
+        for (int i = 0; i < keys.length; i++) {
+            entries.setIndexDefined(entryIndex);
+            keyVector.setSafe(entryIndex, keys[i]);
+            if (values[i] == null) {
+                valueVector.setNull(entryIndex);
+            } else {
+                valueVector.setSafe(entryIndex, values[i]);
+            }
+            entryIndex++;
+        }
+        vector.endValue(row, keys.length);
+    }
+
+    /** UTF-8 bytes for a value that will be written to a map column. */
+    static byte[] utf8(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
     }
 }
