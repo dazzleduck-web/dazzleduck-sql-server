@@ -16,9 +16,12 @@ import java.util.concurrent.ScheduledExecutorService;
 /**
  * A {@link ParquetIngestionQueue} that splits one logical ingestion queue into {@code numPartitions}
  * hash-routed child queues. Each child is a fully independent {@link ParquetIngestionQueue} (its own
- * batching, backpressure, flush loop and write path) writing to its own {@code p<index>}
- * sub-directory of the shared target path; all children share the parent's queue id so the
- * transformation, watermark spec and DuckLake catalog registration all resolve to the same table.
+ * batching, backpressure, flush loop and write path). All children write into the parent's output
+ * path — the on-disk layout is identical to an unpartitioned queue, so Hive partition pruning and
+ * plain directory globs keep working — and share the parent's queue id so the transformation,
+ * watermark spec and DuckLake catalog registration all resolve to the same table. Files never
+ * collide: unpartitioned writes are named {@code dd_<uuid>} and {@code PARTITION_BY} writes use
+ * {@code APPEND}, which generates unique names.
  *
  * <p><b>Routing.</b> On {@link #add}, the partition index of a batch is computed once as
  * {@code hash(partitionExpression) % numPartitions}, evaluated over the batch's raw input rows. A
@@ -37,12 +40,6 @@ import java.util.concurrent.ScheduledExecutorService;
 public class PartitionedIngestionQueue extends ParquetIngestionQueue {
 
     private static final Logger logger = LoggerFactory.getLogger(PartitionedIngestionQueue.class);
-
-    /** Creates a child {@link ParquetIngestionQueue} bound to {@code queueId} writing to {@code childOutputPath}. */
-    @FunctionalInterface
-    public interface ChildQueueFactory {
-        ParquetIngestionQueue create(String queueId, String childOutputPath);
-    }
 
     private final String queueId;
     private final String inputFormat;
@@ -66,8 +63,7 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
                                      ScheduledExecutorService executorService,
                                      Clock clock,
                                      int numPartitions,
-                                     String partitionExpression,
-                                     ChildQueueFactory childFactory) {
+                                     String partitionExpression) {
         super(applicationId, inputFormat, outputPath, ingestionQueue, minBucketSize, maxBucketSize, maxBatches,
                 maxPendingWrite, maxDelay, parquetCompression, postIngestionHandler, executorService, clock);
         if (numPartitions <= 1) {
@@ -84,17 +80,15 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
         this.inputFormat = inputFormat;
         this.numPartitions = numPartitions;
         this.partitionExpression = partitionExpression;
-        String base = outputPath.endsWith("/") ? outputPath.substring(0, outputPath.length() - 1) : outputPath;
         List<ParquetIngestionQueue> built = new ArrayList<>(numPartitions);
         for (int i = 0; i < numPartitions; i++) {
-            String childPath = base + "/p" + i;
-            // A single-file DuckDB COPY does not create missing parent directories, and unlike the
-            // operator-provisioned table root these p<index> sub-dirs are ones we invent — so create
-            // them here for local paths. Object-store URIs (s3://, gs://, …) need no directory.
-            provisionLocalDir(childPath);
-            // Children keep the parent's queue id (so the handler resolves the same table/transform)
-            // and differ only in output path — one p<index> sub-directory each.
-            built.add(childFactory.create(ingestionQueue, childPath));
+            // Children are plain queues with the parent's exact configuration (same queue id, so the
+            // handler resolves the same table/transform; same output path); they differ only in
+            // their own batching/flush/backpressure state. Note min_bucket_size, max_delay and
+            // max_pending_write therefore apply per child, not to the logical queue as a whole.
+            built.add(new ParquetIngestionQueue(applicationId, inputFormat, outputPath, ingestionQueue,
+                    minBucketSize, maxBucketSize, maxBatches, maxPendingWrite, maxDelay, parquetCompression,
+                    postIngestionHandler, executorService, clock));
         }
         this.children = List.copyOf(built);
     }
@@ -152,21 +146,6 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
                 return MULTIPLE_PARTITIONS;
             }
             return (int) rs.getLong("partition");
-        }
-    }
-
-    /** Matches a URI scheme prefix like {@code s3://}, {@code gs://}, {@code az://}, {@code file://}. */
-    private static final java.util.regex.Pattern URI_SCHEME =
-            java.util.regex.Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*://.*");
-
-    private void provisionLocalDir(String path) {
-        if (URI_SCHEME.matcher(path).matches()) {
-            return; // object-store / URI path — nothing to create locally
-        }
-        try {
-            Files.createDirectories(Path.of(path));
-        } catch (Exception e) {
-            logger.warn("Queue '{}': could not create partition output directory {}", queueId, path, e);
         }
     }
 

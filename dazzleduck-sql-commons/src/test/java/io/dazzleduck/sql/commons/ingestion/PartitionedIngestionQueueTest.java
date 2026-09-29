@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import io.dazzleduck.sql.commons.ConnectionPool;
+import io.dazzleduck.sql.commons.hive.HivePartitionPruning;
 import io.dazzleduck.sql.commons.util.MutableClock;
 import org.jmock.lib.concurrent.DeterministicScheduler;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,9 +21,9 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Tests for {@link PartitionedIngestionQueue}: single-partition batches route to the correct child
- * (its own {@code p<index>} sub-directory), and batches whose rows span more than one partition are
- * rejected and their input file deleted.
+ * Tests for {@link PartitionedIngestionQueue}: single-partition batches route to the correct child,
+ * every child writes straight into the shared output path (no per-partition sub-directory), and
+ * batches whose rows span more than one partition are rejected and their input file deleted.
  */
 public class PartitionedIngestionQueueTest {
 
@@ -86,19 +87,19 @@ public class PartitionedIngestionQueueTest {
     }
 
     private PartitionedIngestionQueue newQueue(ScheduledExecutorService scheduler, MutableClock clock, String expression) {
-        IngestionHandler handler = noopHandler();
         return new PartitionedIngestionQueue(
                 TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "test-queue",
                 MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
-                MAX_DELAY, null, handler, scheduler, clock, NUM_PARTITIONS, expression,
-                (childId, childPath) -> new ParquetIngestionQueue(
-                        TEST_APP_ID, INPUT_FORMAT, childPath, childId,
-                        MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
-                        MAX_DELAY, null, handler, scheduler, clock));
+                MAX_DELAY, null, noopHandler(), scheduler, clock, NUM_PARTITIONS, expression);
+    }
+
+    /** True when {@code file} sits directly inside the queue's output path, with no sub-directory. */
+    private boolean isDirectlyUnderOutput(String file) {
+        return Path.of(file).toAbsolutePath().getParent().equals(targetPath.toAbsolutePath());
     }
 
     @Test
-    public void singlePartitionBatchIsWrittenToItsChildSubdir() throws Exception {
+    public void singlePartitionBatchIsWrittenByItsChildIntoSharedOutputPath() throws Exception {
         var scheduler = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
         int pkey = 7;
@@ -110,12 +111,18 @@ public class PartitionedIngestionQueueTest {
             var future = queue.add(batch(source, "producer1", 0, MIN_BATCH_SIZE + 1));
             scheduler.tick(1, TimeUnit.MILLISECONDS);
             var result = future.get(5, SECONDS);
+            queue.drain(); // write counters are bumped after the futures complete
 
             assertEquals(100, result.rowCount());
             assertFalse(result.filesCreated().isEmpty());
-            String expectedDir = "/p" + expectedPartition(pkey) + "/";
-            assertTrue(result.filesCreated().get(0).contains(expectedDir),
-                    "expected output under " + expectedDir + " but was " + result.filesCreated().get(0));
+            String out = result.filesCreated().get(0);
+            assertTrue(isDirectlyUnderOutput(out), "expected output directly under " + targetPath + " but was " + out);
+            assertFalse(out.matches(".*[/\\\\]p\\d+[/\\\\].*"), "no p<index> sub-directory expected: " + out);
+            // Only the routed child did the write.
+            int expected = expectedPartition(pkey);
+            for (int i = 0; i < NUM_PARTITIONS; i++) {
+                assertEquals(i == expected ? 1 : 0, queue.children().get(i).getTotalWriteBatches(), "child " + i);
+            }
         }
     }
 
@@ -140,11 +147,42 @@ public class PartitionedIngestionQueueTest {
 
             String outA = fa.get(5, SECONDS).filesCreated().get(0);
             String outB = fb.get(5, SECONDS).filesCreated().get(0);
+            queue.drain(); // write counters are bumped after the futures complete
 
-            assertTrue(outA.contains("/p" + expectedPartition(keyA) + "/"), outA);
-            assertTrue(outB.contains("/p" + expectedPartition(keyB) + "/"), outB);
+            assertTrue(isDirectlyUnderOutput(outA), outA);
+            assertTrue(isDirectlyUnderOutput(outB), outB);
             assertNotEquals(outA, outB);
+            assertEquals(1, queue.children().get(expectedPartition(keyA)).getTotalWriteBatches());
+            assertEquals(1, queue.children().get(expectedPartition(keyB)).getTotalWriteBatches());
         }
+    }
+
+    /**
+     * Regression for the reported symptom: files written through a partitioned queue must be visible
+     * to the plain-directory file listing that Hive pruning uses (it globs {@code base/*.parquet}),
+     * which a per-partition sub-directory used to hide.
+     */
+    @Test
+    public void partitionedOutputIsVisibleToHivePruning() throws Exception {
+        var scheduler = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        int keyA = 0, keyB = -1;
+        for (int candidate = 1; candidate < 1000 && expectedPartition(keyB) == expectedPartition(keyA); candidate++) {
+            keyB = candidate;
+        }
+        Path fileA = singleKeyFile("ha.parquet", keyA, 20);
+        Path fileB = singleKeyFile("hb.parquet", keyB, 20);
+
+        try (var queue = newQueue(scheduler, clock)) {
+            var fa = queue.add(batch(fileA, "pa", 0, MIN_BATCH_SIZE + 1));
+            var fb = queue.add(batch(fileB, "pb", 0, MIN_BATCH_SIZE + 1));
+            scheduler.tick(1, TimeUnit.MILLISECONDS);
+            fa.get(5, SECONDS);
+            fb.get(5, SECONDS);
+        }
+
+        var files = HivePartitionPruning.pruneFiles(targetPath.toString().replace('\\', '/'), "true", null);
+        assertEquals(2, files.size(), "both partitions' files must be listed: " + files);
     }
 
     @Test
@@ -227,19 +265,17 @@ public class PartitionedIngestionQueueTest {
         var scheduler = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
         IngestionHandler handler = noopHandler();
-        PartitionedIngestionQueue.ChildQueueFactory childFactory =
-                (id, path) -> { throw new AssertionError("should not build children"); };
 
         // Blank expression with >1 partitions.
         assertThrows(IllegalArgumentException.class, () -> new PartitionedIngestionQueue(
                 TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "q",
                 MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
-                MAX_DELAY, null, handler, scheduler, clock, NUM_PARTITIONS, "  ", childFactory));
+                MAX_DELAY, null, handler, scheduler, clock, NUM_PARTITIONS, "  "));
 
         // numPartitions <= 1 is not a partitioned queue.
         assertThrows(IllegalArgumentException.class, () -> new PartitionedIngestionQueue(
                 TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "q",
                 MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
-                MAX_DELAY, null, handler, scheduler, clock, 1, PARTITION_EXPRESSION, childFactory));
+                MAX_DELAY, null, handler, scheduler, clock, 1, PARTITION_EXPRESSION));
     }
 }

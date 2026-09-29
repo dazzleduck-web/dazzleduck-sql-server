@@ -26,9 +26,9 @@ import java.util.Map;
  *                      caller's JWT (see {@code IngestionHandler#extractClaims})
  * @param numPartitions number of hash-routed sub-queues the queue is split into ({@code >= 1};
  *                      {@code 1} disables partitioning). When {@code > 1} the queue owns that many
- *                      child queues, each writing to its own {@code p<index>} sub-directory of the
- *                      target path; a batch is routed to the single partition its rows map to and
- *                      rejected if its rows span more than one partition.
+ *                      child queues — independent writers with their own backpressure, all writing
+ *                      into the target path; a batch is routed to the single partition its rows map
+ *                      to and rejected if its rows span more than one partition.
  * @param partitionExpression SQL expression over the raw input row that the partition index is
  *                      derived from as {@code hash(partitionExpression) % numPartitions} — e.g. a
  *                      column {@code "user_id"}, a map/struct field access

@@ -947,17 +947,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                         flushScheduler,
                         Clock.systemDefaultZone(),
                         numPartitions,
-                        ingestionHandler.getPartitionExpression(localQueueId),
-                        (childId, childPath) -> new ParquetIngestionQueue(producerId, TEMP_WRITE_FORMAT, childPath, childId,
-                                bulkIngestionConfig.minBucketSize(),
-                                bulkIngestionConfig.maxBucketSize(),
-                                bulkIngestionConfig.maxBatches(),
-                                bulkIngestionConfig.maxPendingWrite(),
-                                bulkIngestionConfig.maxDelay(),
-                                bulkIngestionConfig.parquetCompression(),
-                                ingestionHandler,
-                                flushScheduler,
-                                Clock.systemDefaultZone()))
+                        ingestionHandler.getPartitionExpression(localQueueId))
                 : new ParquetIngestionQueue(producerId, TEMP_WRITE_FORMAT, path, localQueueId,
                         bulkIngestionConfig.minBucketSize(),
                         bulkIngestionConfig.maxBucketSize(),

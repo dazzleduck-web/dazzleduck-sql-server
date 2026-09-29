@@ -91,17 +91,7 @@ class OtelServiceBase implements Closeable {
                             handler,
                             flushScheduler, Clock.systemUTC(),
                             numPartitions,
-                            handler.getPartitionExpression(id),
-                            (childId, childPath) -> new ParquetIngestionQueue(
-                                    "otel-collector", "arrow", childPath, childId,
-                                    ingestionConfig.minBucketSize(),
-                                    ingestionConfig.maxBucketSize(),
-                                    ingestionConfig.maxBatches(),
-                                    ingestionConfig.maxPendingWrite(),
-                                    ingestionConfig.maxDelay(),
-                                    ingestionConfig.parquetCompression(),
-                                    handler,
-                                    flushScheduler, Clock.systemUTC()))
+                            handler.getPartitionExpression(id))
                     : new ParquetIngestionQueue(
                             "otel-collector", "arrow", targetPath, id,
                             ingestionConfig.minBucketSize(),
