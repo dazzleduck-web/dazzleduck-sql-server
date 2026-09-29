@@ -185,6 +185,68 @@ public class PartitionedIngestionQueueTest {
         assertEquals(2, files.size(), "both partitions' files must be listed: " + files);
     }
 
+    /**
+     * Regression for the {@code partition_by} symptom: with Hive {@code key=value} output, pruning
+     * reads partition values by directory position, so a {@code p<index>} level made it take
+     * {@code p1} as the first partition value and glob one level too shallow. The two batches are
+     * routed to different children and carry different days; pruning must select each day's file
+     * by its real value and list both with a match-all filter.
+     */
+    @Test
+    public void partitionByOutputIsPrunedByItsRealPartitionValues() throws Exception {
+        var scheduler = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        int keyA = 0, keyB = -1;
+        for (int candidate = 1; candidate < 1000 && expectedPartition(keyB) == expectedPartition(keyA); candidate++) {
+            keyB = candidate;
+        }
+        assertNotEquals(expectedPartition(keyA), expectedPartition(keyB), "test needs two keys in different partitions");
+        Path fileA = singleKeyDayFile("da.parquet", keyA, "2026-09-01", 20);
+        Path fileB = singleKeyDayFile("db.parquet", keyB, "2026-09-02", 20);
+
+        IngestionHandler byDay = new IngestionHandler() {
+            @Override public PostIngestionTask createPostIngestionTask(IngestionResult r) { return PostIngestionTask.NOOP; }
+            @Override public String getTargetPath(String queueId) { return targetPath.toString(); }
+            @Override public String[] getPartitionBy(String queueId) { return new String[]{"day"}; }
+            @Override public int getNumPartitions(String queueId) { return NUM_PARTITIONS; }
+            @Override public String getPartitionExpression(String queueId) { return PARTITION_EXPRESSION; }
+        };
+        try (var queue = new PartitionedIngestionQueue(
+                TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "test-queue",
+                MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
+                MAX_DELAY, null, byDay, scheduler, clock, NUM_PARTITIONS, PARTITION_EXPRESSION)) {
+            var fa = queue.add(batch(fileA, "pa", 0, MIN_BATCH_SIZE + 1));
+            var fb = queue.add(batch(fileB, "pb", 0, MIN_BATCH_SIZE + 1));
+            scheduler.tick(1, TimeUnit.MILLISECONDS);
+            fa.get(5, SECONDS);
+            fb.get(5, SECONDS);
+            queue.drain(); // write counters are bumped after the futures complete
+            assertEquals(1, queue.children().get(expectedPartition(keyA)).getTotalWriteBatches());
+            assertEquals(1, queue.children().get(expectedPartition(keyB)).getTotalWriteBatches());
+        }
+
+        String base = targetPath.toString().replace('\\', '/');
+        String[][] partitionTypes = {{"day", "date"}};
+        var dayA = HivePartitionPruning.pruneFiles(base, "day = DATE '2026-09-01'", partitionTypes);
+        assertEquals(1, dayA.size(), "only 2026-09-01's file: " + dayA);
+        assertEquals(targetPath.resolve("day=2026-09-01").toAbsolutePath(),
+                Path.of(dayA.get(0).fileName()).toAbsolutePath().getParent(),
+                "file must sit directly in its day= directory, with no p<index> level");
+        var dayB = HivePartitionPruning.pruneFiles(base, "day = DATE '2026-09-02'", partitionTypes);
+        assertEquals(1, dayB.size(), "only 2026-09-02's file: " + dayB);
+        assertEquals(2, HivePartitionPruning.pruneFiles(base, "true", partitionTypes).size(),
+                "a match-all filter must list both days' files");
+    }
+
+    /** A parquet file whose rows share one partition key and one {@code day}. */
+    private Path singleKeyDayFile(String name, int pkey, String day, int rows) throws Exception {
+        Path file = tempDir.resolve(name);
+        ConnectionPool.execute(
+                "COPY (SELECT %d AS pkey, i AS id, DATE '%s' AS day FROM range(0, %d) t(i)) TO '%s' (FORMAT PARQUET)"
+                        .formatted(pkey, day, rows, file));
+        return file;
+    }
+
     @Test
     public void multiPartitionBatchIsRejectedAndInputDeleted() throws Exception {
         var scheduler = new DeterministicScheduler();
