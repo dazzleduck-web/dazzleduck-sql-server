@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import io.dazzleduck.sql.common.Headers;
 import io.dazzleduck.sql.common.ConfigConstants;
+import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.util.CommandLineConfigUtil;
 import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.ingestion.NOOPIngestionTaskFactoryProvider;
@@ -13,11 +14,14 @@ import io.dazzleduck.sql.flight.optimizer.QueryOptimizer;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceJWTTokenAuthenticator;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
 import io.dazzleduck.sql.flight.server.auth2.AuthUtils;
+import io.dazzleduck.sql.flight.stream.ArrowStreamReaderWrapper;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlClient;
+import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.duckdb.DuckDBConnection;
 
 import java.io.File;
 import java.io.IOException;
@@ -245,6 +249,21 @@ public interface FlightTestUtils {
     static void testStream(String expectedQuery, Supplier<FlightStream> streamSupplier, BufferAllocator clientAllocator) throws Exception {
         try (final FlightStream stream = streamSupplier.get()) {
             TestUtils.isEqual(expectedQuery, clientAllocator, FlightStreamReader.of(stream, clientAllocator));
+        }
+    }
+
+    /** Bulk-ingests a five-row Arrow batch into {@code queue} over Flight SQL {@code executeIngest}. */
+    static void bulkIngest(ServerClient serverClient, String queue) throws Exception {
+        try (DuckDBConnection conn = ConnectionPool.getConnection();
+             var reader = ConnectionPool.getReader(conn, serverClient.clientAllocator(),
+                     "SELECT * FROM generate_series(5)", 1000)) {
+            var options = new FlightSqlClient.ExecuteIngestOptions(
+                    "",
+                    FlightSql.CommandStatementIngest.TableDefinitionOptions.newBuilder().build(),
+                    false, "", "",
+                    Map.of(Headers.QUERY_PARAMETER_INGESTION_QUEUE, queue));
+            serverClient.flightSqlClient().executeIngest(
+                    new ArrowStreamReaderWrapper(reader, serverClient.clientAllocator()), options);
         }
     }
 

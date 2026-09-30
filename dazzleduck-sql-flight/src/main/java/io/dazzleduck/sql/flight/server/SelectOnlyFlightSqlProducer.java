@@ -7,6 +7,7 @@ import io.dazzleduck.sql.commons.authorization.AccessMode;
 import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.flight.FlightRecorder;
+import io.dazzleduck.sql.flight.ingestion.IngestionParameters;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.BufferAllocator;
@@ -95,5 +96,26 @@ public class SelectOnlyFlightSqlProducer extends DuckDBFlightSqlProducer {
             CallContext context, FlightStream flightStream,
             StreamListener<PutResult> ackStream) {
         return throwNotSupported("acceptPutPreparedStatementUpdate");
+    }
+
+    /**
+     * Flight bulk ingest writes to an ingestion queue without going through SQL, so it is gated on
+     * the authorizer's write check, as HTTP {@code /v1/ingest} already is in its JWT filter. The
+     * READ_ONLY and RESTRICT_READ_ONLY authorizers grant no write access, so this refuses every
+     * ingest in both modes.
+     */
+    @Override
+    public Runnable acceptPutStatementBulkIngest(
+            FlightSql.CommandStatementIngest command,
+            CallContext context,
+            FlightStream flightStream,
+            StreamListener<PutResult> ackStream) {
+        var queue = IngestionParameters.getIngestionParameters(command).ingestionQueue();
+        if (!getSqlAuthorizer().hasWriteAccess(context.peerIdentity(), queue, getVerifiedClaims(context))) {
+            ErrorHandling.handleUnauthorized(ackStream,
+                    new UnauthorizedException("No write access to ingestion_queue:" + queue));
+            return () -> {};
+        }
+        return super.acceptPutStatementBulkIngest(command, context, flightStream, ackStream);
     }
 }

@@ -196,4 +196,12 @@ public class RestrictedReadOnlyFlightSqlTest {
         assertEquals(4L, ConnectionPool.collectFirst("SELECT count(*) FROM rro_orders", Long.class),
                 "no rows were deleted");
     }
+
+    @Test
+    void bulkIngestIsBlocked() throws Exception {
+        // executeIngest writes to an ingestion queue without going through SQL, so the
+        // SELECT-only check never sees it; it must be refused by the write-access check.
+        var refused = assertThrows(FlightRuntimeException.class, () -> FlightTestUtils.bulkIngest(noFilterClient, "rro_queue"));
+        assertTrue(refused.getMessage().contains("No write access"), "refused by authorization: " + refused.getMessage());
+    }
 }

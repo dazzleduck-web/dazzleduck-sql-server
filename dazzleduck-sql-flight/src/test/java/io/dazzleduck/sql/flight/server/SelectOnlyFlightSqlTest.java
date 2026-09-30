@@ -197,6 +197,15 @@ public class SelectOnlyFlightSqlTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    public void testBulkIngestBlocked() throws Exception {
+        // executeIngest writes to an ingestion queue without going through SQL, so the
+        // SELECT-only check never sees it; it must be refused by the write-access check.
+        var refused = assertThrows(FlightRuntimeException.class, () -> FlightTestUtils.bulkIngest(serverClient, "ro_queue"));
+        assertTrue(refused.getMessage().contains("No write access"), "refused by authorization: " + refused.getMessage());
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void testInsertBlocked() {
         // INSERT should be blocked
         String query = "INSERT INTO test_table VALUES (1, 'test')";
