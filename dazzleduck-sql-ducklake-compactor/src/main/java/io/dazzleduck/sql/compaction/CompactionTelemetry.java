@@ -84,7 +84,19 @@ record CompactionTelemetry(MeterRegistry registry, OpenTelemetrySdk sdk, OpenTel
         // Validate everything that can refuse to start before building or attaching anything.
         Level level = logsOn ? parseLevel(logs.getString("level")) : null;
         String metricToken = metricsOn ? bearerToken(metrics, "metrics", "DD_METRICS_OTLP_TOKEN") : null;
-        LogRecordExporter logExporter = logsOn ? logExporterFactory.apply(logs) : null;
+        String logToken = logsOn ? bearerToken(logs, "logs", "DD_LOGS_OTLP_TOKEN") : null;
+        if (metricToken != null && metricToken.equals(logToken)) {
+            // The collector routes by the token's queue claim, so one token for both would write log
+            // rows into the metrics queue (or the reverse). Always a misconfiguration.
+            throw new IllegalStateException("logs.token is the same as metrics.token: log and metric"
+                    + " queues have different schemas, so logs need their own token whose"
+                    + " x-dd-ingestion-queue claim names a log queue (DD_LOGS_OTLP_TOKEN)");
+        }
+        // Every exported record passes through the redactor: DuckDB errors can echo the startup
+        // script's credentials (connection-string passwords, CREATE SECRET values).
+        LogRecordExporter logExporter = logsOn
+                ? new RedactingLogRecordExporter(logExporterFactory.apply(logs))
+                : null;
 
         String serviceName = metrics.getString("service_name");
         Resource resource = Resource.getDefault().toBuilder()

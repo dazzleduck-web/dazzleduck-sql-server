@@ -189,4 +189,41 @@ class CompactionTelemetryTest {
             assertTrue(stack.contains("CompactionTelemetryTest"), stack);
         }
     }
+
+    @Test
+    void credentialsInAFailedStartupAreMaskedBeforeExport() {
+        // The shape of a failed startup: ConnectionPool wraps the failing statement, DuckDB's cause
+        // echoes the connection string. Both reach exception.message / exception.stacktrace.
+        var cause = new java.sql.SQLException("IO Error: Unable to connect to Postgres at \"host=db user=svc"
+                + " password=FAKE_PG_PASSWORD\": Connection refused");
+        var failure = new RuntimeException("Failed to execute on singleton connection: ATTACH"
+                + " 'ducklake:postgres:host=db user=svc password=FAKE_PG_PASSWORD' AS lake", cause);
+        InMemoryExporter exporter = new InMemoryExporter();
+        try (CompactionTelemetry telemetry = CompactionTelemetry.create(
+                metricsOff(), logsOn("tok", "INFO"), c -> exporter)) {
+            LoggerFactory.getLogger("compaction.test").error("Startup failed: {}", failure.getMessage(), failure);
+            telemetry.sdk().getSdkLoggerProvider().forceFlush().join(5, TimeUnit.SECONDS);
+
+            List<LogRecordData> mine = exporter.from("compaction.test");
+            assertEquals(1, mine.size(), () -> "records: " + exporter.records);
+            LogRecordData record = mine.get(0);
+            assertFalse(record.getBodyValue().asString().contains("FAKE_PG_PASSWORD"), record.getBodyValue().asString());
+            record.getAttributes().forEach((key, value) ->
+                    assertFalse(String.valueOf(value).contains("FAKE_PG_PASSWORD"), key + " = " + value));
+            // still useful: the error and its cause are there, only the credential is masked
+            String stack = record.getAttributes().get(AttributeKey.stringKey("exception.stacktrace"));
+            assertTrue(stack.contains("Unable to connect to Postgres") && stack.contains("password=***"), stack);
+        }
+    }
+
+    @Test
+    void theSameTokenForLogsAndMetricsIsRefused() {
+        int before = rootAppenderCount();
+        Config metrics = metricsOff().withValue("enabled", com.typesafe.config.ConfigValueFactory.fromAnyRef(true))
+                .withValue("token", com.typesafe.config.ConfigValueFactory.fromAnyRef("shared-token"));
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> CompactionTelemetry.create(
+                metrics, logsOn("Bearer shared-token", "INFO"), c -> fail("exporter built")));
+        assertTrue(e.getMessage().contains("same as metrics.token"), e.getMessage());
+        assertEquals(before, rootAppenderCount());
+    }
 }

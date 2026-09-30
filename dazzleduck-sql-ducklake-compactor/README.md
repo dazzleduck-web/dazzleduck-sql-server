@@ -233,7 +233,7 @@ signal, and its log and metric queues have different schemas. So the two exports
 different tokens**: one whose claim names a metrics queue and one whose claim names a logs queue.
 Mint each with the login endpoint, passing the queue in the `claims` map (see the root README's
 "Ingestion Queue Routing" section), and configure the collector's `ingestion_queue_table_mapping` with
-one entry per queue.
+one entry per queue. Using the same token for both is refused at startup.
 
 | Variable | Config key | Default |
 |----------|------------|---------|
@@ -268,7 +268,7 @@ in `body`, the level in `severity_text`, and a logged exception in the `exceptio
 `exception.message` and `exception.stacktrace` attributes. The exporter batches records, so a
 line shows up in the collector within a few seconds; shutdown flushes whatever is still queued.
 
-Two things worth knowing:
+Things worth knowing:
 
 - With logs on and metrics off, the fallback logging meter registry prints every meter once a
   minute at INFO, and those lines are exported too. Enable metrics or set `DD_LOGS_LEVEL=WARN`.
@@ -276,6 +276,16 @@ Two things worth knowing:
   script, unreadable config-provider table, port in use) is logged and flushed before the process
   exits and the reason a pod is crash-looping is in the log table. A failure in the export setup
   itself (missing token, bad level, unreachable collector) can only be read from the console.
+- Credentials are masked in every exported record, in the body and in every string attribute
+  including `exception.message` and `exception.stacktrace`. This matters because DuckDB repeats
+  the startup script in its errors: a failed Postgres or DuckLake-on-Postgres `ATTACH` reports the
+  whole connection string with its password, and a parser error quotes the statement. Every
+  compaction connection re-runs the script, so these errors can recur on every cycle. Masked:
+  quoted values of secret-like names (`SECRET`, `KEY_ID`, `SESSION_TOKEN`, `password`,
+  `s3_secret_access_key`, ...), unquoted `password=...`-style and URL query values, `user:password@`
+  in URIs, `Bearer` tokens, and parser echo lines (`LINE n: ...`) as a whole. Console output is not
+  masked. Masking works on patterns, so keep credentials in those forms (or in DuckDB secrets
+  created from environment variables) rather than in free text.
 
 ### Metrics
 

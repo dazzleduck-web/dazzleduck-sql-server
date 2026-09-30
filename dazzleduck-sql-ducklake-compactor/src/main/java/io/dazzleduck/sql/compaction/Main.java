@@ -20,6 +20,9 @@ public class Main {
         // exported too. It reads the file/env config only; config-provider overrides don't apply.
         CompactionTelemetry telemetry = CompactionTelemetry.create(
                 rawConfig.getConfig("metrics"), rawConfig.getConfig("logs"));
+        // Declared here so a failed start can stop whatever it already started (see the catch).
+        CompactionService service = null;
+        HealthServer healthServer = null;
         try {
             // The startup script is what ATTACHes the catalog, so it must run before a config provider
             // that reads a table in it. Ordering is the whole trick: file config -> attach -> overlay.
@@ -41,23 +44,31 @@ public class Main {
                     startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
                     config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
-            CompactionService service = new CompactionService(config, startupScript, tierCompactor, housekeeper, state, runLog);
-            HealthServer healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
+            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, state, runLog);
+            healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
 
             healthServer.start();
             service.start();
+
+            final CompactionService startedService = service;
+            final HealthServer startedHealthServer = healthServer;
 
             // Registered only once startup has succeeded, so the catch below is the sole owner of
             // telemetry on a failed start and it is never closed twice.
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 logger.info("Shutdown signal received");
-                service.close();
-                healthServer.close();
+                startedService.close();
+                startedHealthServer.close();
                 telemetry.close();
             }, "shutdown-hook"));
         } catch (Throwable t) {
             // Nothing else flushes the exporters before the shutdown hook exists.
             logger.error("Startup failed", t);
+            // Stop whatever already started (e.g. service.start() throws after the health server and
+            // earlier tiers are running): their non-daemon threads would otherwise keep the JVM alive
+            // and compacting, with telemetry closed and no shutdown hook.
+            closeQuietly(service);
+            closeQuietly(healthServer);
             telemetry.close();
             throw t;
         }
@@ -92,5 +103,16 @@ public class Main {
         StartupScriptProvider provider = StartupScriptProvider.load(config);
         String script = provider.getStartupScript();
         return (script != null && !script.isBlank()) ? script : null;
+    }
+
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Exception e) {
+            logger.warn("Failed to close {} after a failed start", closeable.getClass().getSimpleName(), e);
+        }
     }
 }
