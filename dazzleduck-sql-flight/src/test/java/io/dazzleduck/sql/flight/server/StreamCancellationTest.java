@@ -255,4 +255,41 @@ class StreamCancellationTest {
             ctx.close();
         }
     }
+
+    @Test
+    void aSecondStreamThatCannotStartLeavesTheRunningStreamAlone() throws Exception {
+        var connection = ConnectionPool.getConnection();
+        var prepared = connection.prepareStatement("SELECT 1");
+        var ctx = new StatementContext<>(connection, prepared, "SELECT 1", true);
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            ctx.markClaimed();
+            ctx.start(); // stream A is running on the prepared statement
+
+            // Stream B for the same prepared handle: its start() fails because A holds the context.
+            var executed = new java.util.concurrent.atomic.AtomicBoolean();
+            var listener = new RecordingListener();
+            ctx.markClaimed();
+            ResultSetStreamUtil.streamResultSet(executor, ctx, new DuckDBFlightSqlProducer.CacheKey("admin", 1L),
+                    new OptionalResultSetSupplier() {
+                        @Override public boolean hasResultSet() { return false; }
+                        @Override public org.duckdb.DuckDBResultSet get() { return null; }
+                        @Override public void execute() { executed.set(true); }
+                    }, allocator, 1024, listener, () -> {},
+                    new MicroMeterFlightRecorder(new SimpleMeterRegistry(), "test"));
+            assertTrue(listener.done.await(10, java.util.concurrent.TimeUnit.SECONDS));
+            assertNotNull(listener.error, "B fails to start");
+            assertFalse(executed.get(), "B never runs the query");
+
+            assertTrue(ctx.running(), "B's failure must not end A's stream");
+            ctx.closeWhenIdle(); // e.g. a cancel or cache invalidation while A is still streaming
+            assertFalse(prepared.isClosed(), "the statement must not be closed under A");
+
+            ctx.end(); // A finishes
+            assertTrue(prepared.isClosed(), "closed once A ends");
+        } finally {
+            executor.shutdown();
+            ctx.close();
+        }
+    }
 }

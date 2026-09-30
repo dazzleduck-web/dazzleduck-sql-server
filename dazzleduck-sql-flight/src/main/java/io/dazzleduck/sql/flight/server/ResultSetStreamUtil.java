@@ -90,9 +90,14 @@ public class ResultSetStreamUtil {
         submit(executorService, finalBlock, () -> {
             BufferAllocator childAllocator = null;
             var error = false;
+            // Whether this stream owns the context. start() throws if another stream is already
+            // using it (the same prepared handle streamed twice at once); ending it then would clear
+            // that other stream's in-use state and let a cancel close the statement under it.
+            var started = false;
             try {
                 childAllocator = allocator.newChildAllocator("statement-allocator", 0, allocator.getLimit());
                 statementContext.start();
+                started = true;
                 // A client that disconnects or cancels the DoGet must stop the query. Without this,
                 // Flight drops every later putNext() silently and the query runs to completion.
                 listener.setOnCancelHandler(() -> {
@@ -151,9 +156,11 @@ public class ResultSetStreamUtil {
                     if (!error && !listener.isCancelled()) {
                         listener.completed();
                     }
-                    statementContext.end();
-                    recorder.endStream(statementContext.isPreparedStatementContext());
-                    recorder.recordStatementStreamEnd(key, statementContext);
+                    if (started) {
+                        statementContext.end();
+                        recorder.endStream(statementContext.isPreparedStatementContext());
+                        recorder.recordStatementStreamEnd(key, statementContext);
+                    }
                     finalBlock.run();
                     if (childAllocator != null) {
                         childAllocator.close();
