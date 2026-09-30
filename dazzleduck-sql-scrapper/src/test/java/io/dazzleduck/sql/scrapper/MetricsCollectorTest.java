@@ -2,10 +2,12 @@ package io.dazzleduck.sql.scrapper;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.Tag;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -184,7 +186,7 @@ class MetricsCollectorTest {
 
     @Test
     @DisplayName("Should use target prefix")
-    void useTargetPrefix() {
+    void useTargetPrefix() throws Exception {
         String prometheusData = "prefixed_metric 123\n";
         targetServer.enqueue(new MockResponse().setBody(prometheusData).setResponseCode(200));
 
@@ -194,9 +196,12 @@ class MetricsCollectorTest {
 
         MetricsCollector collector = new MetricsCollector(properties);
         collector.start();
+        // stop() cancels a scheduled scrape that hasn't run yet, so wait for the first one to land.
+        RecordedRequest request = targetServer.takeRequest(5, TimeUnit.SECONDS);
         collector.stop();
 
-        assertTrue(targetServer.getRequestCount() > 0, "Should have scraped from prefixed target");
+        assertNotNull(request, "Should have scraped from prefixed target");
+        assertEquals("/metrics", request.getPath());
     }
 
     @Test
