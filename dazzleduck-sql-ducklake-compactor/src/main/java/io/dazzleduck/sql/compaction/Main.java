@@ -16,39 +16,51 @@ public class Main {
     public static void main(String[] args) throws Exception {
         Config rawConfig = CompactionConfig.rawConfig(args);
 
-        // The startup script is what ATTACHes the catalog, so it must run before a config provider
-        // that reads a table in it. Ordering is the whole trick: file config -> attach -> overlay.
-        // Run once here (via the shared commons ConnectionPool, since TableConfigProvider's own table
-        // read depends on it) purely so the config-provider table below can be read; the script text
-        // itself is captured and handed to every raw compaction/housekeeping connection too, each of
-        // which independently re-runs it on its own real DuckDB instance (see RawConnections).
-        String startupScript = readStartupScript(rawConfig);
-        if (startupScript != null) {
-            ConnectionPool.executeOnSingleton(startupScript);
+        // Telemetry comes first so the startup lines below (script, config overlay, failures) are
+        // exported too. It reads the file/env config only; config-provider overrides don't apply.
+        CompactionTelemetry telemetry = CompactionTelemetry.create(
+                rawConfig.getConfig("metrics"), rawConfig.getConfig("logs"));
+        try {
+            // The startup script is what ATTACHes the catalog, so it must run before a config provider
+            // that reads a table in it. Ordering is the whole trick: file config -> attach -> overlay.
+            // Run once here (via the shared commons ConnectionPool, since TableConfigProvider's own table
+            // read depends on it) purely so the config-provider table below can be read; the script text
+            // itself is captured and handed to every raw compaction/housekeeping connection too, each of
+            // which independently re-runs it on its own real DuckDB instance (see RawConnections).
+            String startupScript = readStartupScript(rawConfig);
+            if (startupScript != null) {
+                ConnectionPool.executeOnSingleton(startupScript);
+            }
+
+            CompactionConfig config = CompactionConfig.from(withOverrides(rawConfig));
+
+            List<String> tierNames = config.tiers().stream().map(CompactionTier::name).toList();
+            CompactionState state = new CompactionState(telemetry.registry(), config.databases(), tierNames);
+            TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state);
+            Housekeeper housekeeper = new DuckLakeHousekeeper(
+                    startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
+                    config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
+            CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
+            CompactionService service = new CompactionService(config, startupScript, tierCompactor, housekeeper, state, runLog);
+            HealthServer healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
+
+            healthServer.start();
+            service.start();
+
+            // Registered only once startup has succeeded, so the catch below is the sole owner of
+            // telemetry on a failed start and it is never closed twice.
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                logger.info("Shutdown signal received");
+                service.close();
+                healthServer.close();
+                telemetry.close();
+            }, "shutdown-hook"));
+        } catch (Throwable t) {
+            // Nothing else flushes the exporters before the shutdown hook exists.
+            logger.error("Startup failed", t);
+            telemetry.close();
+            throw t;
         }
-
-        CompactionConfig config = CompactionConfig.from(withOverrides(rawConfig));
-
-        CompactionMetrics metrics = CompactionMetrics.create(rawConfig.getConfig("metrics"));
-        List<String> tierNames = config.tiers().stream().map(CompactionTier::name).toList();
-        CompactionState state = new CompactionState(metrics.registry(), config.databases(), tierNames);
-        TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state);
-        Housekeeper housekeeper = new DuckLakeHousekeeper(
-                startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
-                config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
-        CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
-        CompactionService service = new CompactionService(config, startupScript, tierCompactor, housekeeper, state, runLog);
-        HealthServer healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            logger.info("Shutdown signal received");
-            service.close();
-            healthServer.close();
-            metrics.close();
-        }, "shutdown-hook"));
-
-        healthServer.start();
-        service.start();
 
         Thread.currentThread().join();
     }

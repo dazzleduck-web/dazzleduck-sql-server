@@ -219,9 +219,68 @@ docker run \
   --conf 'dazzleduck_sql_compaction.startup_script_provider.script_location=/config/startup.sql'
 ```
 
-## Metrics
+## Telemetry
 
-Micrometer metrics are emitted via the logging registry by default:
+The service can ship both its meters and its log lines to the DazzleDuck OTel collector over OTLP
+gRPC. Both exports are off by default and independent of each other: either can be on without the
+other. Both are configured in the file or via environment variables only; the config-provider
+table overrides described above do not apply to them.
+
+### Two tokens, two queues
+
+The collector routes every export by the token's `x-dd-ingestion-queue` claim, regardless of
+signal, and its log and metric queues have different schemas. So the two exports need **two
+different tokens**: one whose claim names a metrics queue and one whose claim names a logs queue.
+Mint each with the login endpoint, passing the queue in the `claims` map (see the root README's
+"Ingestion Queue Routing" section), and configure the collector's `ingestion_queue_table_mapping` with
+one entry per queue.
+
+| Variable | Config key | Default |
+|----------|------------|---------|
+| `DD_METRICS_ENABLED` | `metrics.enabled` | `false` |
+| `DD_METRICS_OTLP_ENDPOINT` | `metrics.endpoint` | `http://localhost:4317` (the collector's gRPC port, not its health port) |
+| `DD_METRICS_OTLP_TOKEN` | `metrics.token` | none; required when metrics are enabled |
+| `DD_LOGS_ENABLED` | `logs.enabled` | `false` |
+| `DD_LOGS_OTLP_ENDPOINT` | `logs.endpoint` | the metrics endpoint |
+| `DD_LOGS_OTLP_TOKEN` | `logs.token` | none; required when logs are enabled |
+| `DD_LOGS_LEVEL` | `logs.level` | `INFO` |
+
+`metrics.service_name` (default `ducklake-compactor`) is reported as the `service.name` resource
+attribute on both signals. An enabled export with no token is a fatal startup error, since the
+collector would reject every request and the signal would silently never land.
+
+```bash
+docker run \
+  -e DD_METRICS_ENABLED=true -e DD_METRICS_OTLP_TOKEN=... \
+  -e DD_LOGS_ENABLED=true -e DD_LOGS_OTLP_TOKEN=... \
+  -e DD_METRICS_OTLP_ENDPOINT=http://collector:4317 \
+  dazzleduck/ducklake-compactor:latest \
+  --conf 'dazzleduck_sql_compaction.databases=[mydb]'
+```
+
+### Logs
+
+All code logs through SLF4J with Logback as the backend. With `logs.enabled = true` an
+OpenTelemetry appender is attached to the root logger next to the console appender, so console
+output is unchanged and every line at `logs.level` or above is also exported as an OTLP log
+record. In the collector's log table the logger name lands in `scope_name`, the rendered message
+in `body`, the level in `severity_text`, and a logged exception in the `exception.type`,
+`exception.message` and `exception.stacktrace` attributes. The exporter batches records, so a
+line shows up in the collector within a few seconds; shutdown flushes whatever is still queued.
+
+Two things worth knowing:
+
+- With logs on and metrics off, the fallback logging meter registry prints every meter once a
+  minute at INFO, and those lines are exported too. Enable metrics or set `DD_LOGS_LEVEL=WARN`.
+- Log export is set up before the rest of startup, so a failure later in startup (bad startup
+  script, unreadable config-provider table, port in use) is logged and flushed before the process
+  exits and the reason a pod is crash-looping is in the log table. A failure in the export setup
+  itself (missing token, bad level, unreachable collector) can only be read from the console.
+
+### Metrics
+
+Micrometer metrics are emitted via the logging registry by default, and over OTLP when
+`metrics.enabled = true`:
 
 | Metric | Tags | Description |
 |--------|------|-------------|

@@ -11,6 +11,10 @@
   "methods":[{"name":"<init>","parameterTypes":[] }]
 },
 {
+  "name":"ch.qos.logback.classic.spi.ILoggingEvent",
+  "methods":[{"name":"getInstant","parameterTypes":[] }]
+},
+{
   "name":"ch.qos.logback.classic.util.DefaultJoranConfigurator",
   "methods":[{"name":"<init>","parameterTypes":[] }]
 },

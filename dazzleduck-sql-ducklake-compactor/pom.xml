@@ -105,6 +105,13 @@
             <artifactId>opentelemetry-micrometer-1.5</artifactId>
             <version>${otel.instrumentation.version}</version>
         </dependency>
+        <!-- Ships SLF4J/Logback events to the collector as OTLP log records. Attached to the root
+             logger in code (no logback.xml), so a disabled exporter leaves logging untouched. -->
+        <dependency>
+            <groupId>io.opentelemetry.instrumentation</groupId>
+            <artifactId>opentelemetry-logback-appender-1.0</artifactId>
+            <version>${otel.instrumentation.version}</version>
+        </dependency>
 
         <!-- Real Postgres for the raw-connection concurrent-tiers integration test — file-based
              DuckLake catalogs can't support it (only one attach at a time; see RawConnections). -->
