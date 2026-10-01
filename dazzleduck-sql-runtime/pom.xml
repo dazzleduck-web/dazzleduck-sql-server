@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.2.21</version>
+        <version>0.2.22-SNAPSHOT</version>
     </parent>
     <name>DazzleDuck Project Runtime</name>
     <description>Server runtime that starts the DazzleDuck Arrow Flight SQL and HTTP endpoints.</description>
