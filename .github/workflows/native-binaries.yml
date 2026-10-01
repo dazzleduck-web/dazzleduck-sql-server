@@ -1,0 +1,133 @@
+name: Native binaries (macOS, Windows)
+
+# Standalone GraalVM native binaries of the otel collector and the compactor for macOS (Apple
+# Silicon) and Windows (x64), built on release tags only: macOS and Windows runner minutes cost
+# far more than Linux ones, and these are release artifacts, not a PR check. (Pushing or
+# force-updating a tag both fire a tag push event, so re-tagging rebuilds them.)
+#
+# native-image does not cross-compile, so each platform builds on a runner of that platform,
+# directly on the host: Docker on these runners builds Linux images, which native-ci.yml and
+# release.yml already cover for amd64 and arm64.
+#
+# Each binary is smoke-tested by starting it and waiting for the same ready line native-ci.yml
+# checks, uploaded as a workflow artifact, and attached to the GitHub release for the tag when that
+# release already exists. When the release is created later (see RELEASE.md), attach them with
+#   gh run download <run-id> -D bins && gh release upload <tag> bins/*/*
+#
+# Unlike the Linux images, these binaries ship no pre-installed DuckDB extensions: they install
+# arrow/ducklake from DuckDB's extension repository on first use, so they need network access
+# then. The compactor's patched DuckLake extension (DUCKLAKE_PATCH.md) is only built for Linux, so
+# on macOS and Windows the compactor runs with stock DuckLake, whose compaction-conflict check is
+# per table: concurrent compaction tiers on one table conflict. The binaries are not code-signed:
+# macOS Gatekeeper blocks a downloaded unsigned binary until its quarantine attribute is cleared
+# (xattr -d com.apple.quarantine <file>).
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: native-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # attach the binaries to the release
+
+jobs:
+  native-binary:
+    name: ${{ matrix.binary }} (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+        module: [dazzleduck-sql-otel-collector, dazzleduck-sql-ducklake-compactor]
+        include:
+          - os: macos-14
+            platform: macos-arm64
+            duckdb_lib: osx_universal # the only macOS lib in the duckdb_jdbc jar
+            exe: ''
+          - os: windows-latest
+            platform: windows-amd64
+            duckdb_lib: windows_amd64
+            exe: '.exe'
+          - module: dazzleduck-sql-otel-collector
+            binary: collector
+            name: dazzleduck-otel-collector
+            startup: 'gRPC server started on port 4317'
+          - module: dazzleduck-sql-ducklake-compactor
+            binary: compactor
+            name: ducklake-compactor
+            startup: 'publishing metrics'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # On Windows, setup-graalvm also sets up the MSVC toolchain native-image links with.
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+
+      # -Pnative emits target/<binary>[.exe]. duckdb.native.lib picks the DuckDB lib for this
+      # platform out of the duckdb_jdbc jar (the Linux builds default to linux_<arch>).
+      - name: Build native binary
+        run: |
+          ./mvnw -B -ntp -Pnative -pl ${{ matrix.module }} -am -DskipTests package \
+            -Dduckdb.native.lib=${{ matrix.duckdb_lib }}
+          ls -la ${{ matrix.module }}/target/${{ matrix.binary }}${{ matrix.exe }}
+
+      # Start it and wait for its ready line, so a runtime gap in the reachability metadata
+      # (which a build alone would miss) fails the job, as in native-ci.yml.
+      - name: Smoke — binary starts
+        run: |
+          set -uo pipefail
+          bin="${{ matrix.module }}/target/${{ matrix.binary }}${{ matrix.exe }}"
+          "$bin" > smoke.log 2>&1 &
+          pid=$!
+          ok=no
+          for i in $(seq 1 60); do
+            if grep -qF "${{ matrix.startup }}" smoke.log; then ok=yes; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          echo "--- binary output ---"; tail -30 smoke.log
+          kill "$pid" 2>/dev/null || true
+          [ "$ok" = yes ] || { echo "::error::${{ matrix.binary }} (${{ matrix.platform }}) did not reach '${{ matrix.startup }}'"; exit 1; }
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          base="${{ matrix.name }}-${version}-${{ matrix.platform }}"
+          mkdir -p dist
+          cp "${{ matrix.module }}/target/${{ matrix.binary }}${{ matrix.exe }}" dist/
+          if [ "${{ matrix.exe }}" = ".exe" ]; then
+            (cd dist && 7z a -bd "../${base}.zip" "${{ matrix.binary }}.exe" > /dev/null)
+            echo "file=${base}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "${base}.tar.gz" -C dist "${{ matrix.binary }}"
+            echo "file=${base}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+
+      # --clobber replaces the asset when a tag is re-pushed.
+      - name: Attach to the GitHub release, if it exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.package.outputs.file }}" --clobber
+          else
+            echo "::notice::No release for $GITHUB_REF_NAME yet; the binary is in this run's artifacts."
+          fi

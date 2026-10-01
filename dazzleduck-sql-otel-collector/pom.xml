@@ -30,6 +30,10 @@
         <!-- DuckDB native lib to bundle in the native image (amd64|arm64). The Dockerfile passes
              -Dduckdb.native.arch=$TARGETARCH; defaults to arm64 for a bare local build. -->
         <duckdb.native.arch>arm64</duckdb.native.arch>
+        <!-- Which DuckDB native lib (libduckdb_java.so_<lib> in the duckdb_jdbc jar) the native image
+             bundles: linux_<arch> for the Linux images, or osx_universal / windows_amd64 for the
+             macOS and Windows binaries (native-binaries.yml passes -Dduckdb.native.lib=...). -->
+        <duckdb.native.lib>linux_${duckdb.native.arch}</duckdb.native.lib>
     </properties>
 
     <dependencyManagement>
@@ -253,10 +257,10 @@
                                 <!-- Logback/SLF4J must be initialized at build time or the build aborts. -->
                                 <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
                                 <buildArg>--initialize-at-run-time=io.netty</buildArg>
-                                <!-- Bundle only the target-arch DuckDB .so (the jar ships all of them).
-                                     Kept out of resource-config so one metadata set serves both arches. -->
+                                <!-- Bundle only the target platform's DuckDB lib (the jar ships all of them).
+                                     Kept out of resource-config so one metadata set serves every platform. -->
                                 <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
-                                <buildArg>-H:IncludeResources=libduckdb_java\.so_linux_${duckdb.native.arch}</buildArg>
+                                <buildArg>-H:IncludeResources=libduckdb_java\.so_${duckdb.native.lib}</buildArg>
                             </buildArgs>
                         </configuration>
                     </plugin>

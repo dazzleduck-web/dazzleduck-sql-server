@@ -123,6 +123,18 @@ gh release create vX.Y.Z --repo dazzleduck-web/dazzleduck-sql-server \
   --title "vX.Y.Z" --notes-file notes.md --latest
 ```
 
+Then attach the macOS and Windows native binaries. Pushing the tag starts
+`.github/workflows/native-binaries.yml`, which builds `collector` and `compactor` for `macos-arm64`
+and `windows-amd64` and attaches them to the release if it already exists. A release created after
+that run finished doesn't have them yet, so attach them from the run's artifacts:
+
+```bash
+run=$(gh run list --repo dazzleduck-web/dazzleduck-sql-server --workflow native-binaries.yml \
+  --branch vX.Y.Z -L 1 --json databaseId -q '.[0].databaseId')
+gh run download "$run" --repo dazzleduck-web/dazzleduck-sql-server -D bins
+gh release upload vX.Y.Z bins/*/* --repo dazzleduck-web/dazzleduck-sql-server --clobber
+```
+
 Include in the notes:
 
 - any breaking changes first, with the migration a user has to perform
