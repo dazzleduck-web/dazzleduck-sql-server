@@ -55,7 +55,7 @@
         <duckdb.version>1.5.5.1</duckdb.version>
         <typesafe-config.version>1.4.4</typesafe-config.version>
         <calcite.version>1.25.0</calcite.version>
-        <helidon.version>4.4.1</helidon.version>
+        <helidon.version>4.5.5</helidon.version>
         <!-- JVM flags Arrow/Netty need on JDK 25: opens for Arrow's direct-buffer access, native
              access for Netty's Java 24+ cleaner, and sun.misc.Unsafe memory access, which JDK 24+
              disables by default. One definition, used by every surefire argLine; the same flags are
