@@ -107,6 +107,8 @@ The `Accept` header selects the response format on `/v1/query` and `/v1/named-qu
 | `text/tab-separated-values` | TSV: header row + tab-separated values. Ideal for scripts and LLM agents |
 | `application/jsonl` or `application/x-ndjson` | JSONL: one JSON object per row. Numbers/booleans/nulls keep JSON types; temporal values are ISO-8601 strings; lists/structs/maps are nested JSON |
 
+Any response is gzip-compressed when the request asks for it with `Accept-Encoding: gzip` (curl's `--compressed`), which shrinks TSV and JSONL several times over. Without that header nothing changes. Requests to `/v1/ingest` may likewise send a gzip-compressed body with `Content-Encoding: gzip`.
+
 ### Useful request headers
 
 Every header can also be passed as a URL query parameter.
@@ -132,6 +134,11 @@ curl -H "Authorization: Bearer $TOKEN" "http://localhost:8081/v1/query?q=select%
 
 # Query as TSV
 curl -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/tab-separated-values" \
+  "http://localhost:8081/v1/query?q=select%201"
+
+# Query as TSV, gzip-compressed on the wire (curl decompresses it)
+curl --compressed -H "Authorization: Bearer $TOKEN" \
   -H "Accept: text/tab-separated-values" \
   "http://localhost:8081/v1/query?q=select%201"
 

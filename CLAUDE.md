@@ -83,6 +83,7 @@ Key files: `QueryService.java`, `IngestionService.java`, `PlanningService.java`,
 
 TSV format: header row + tab-separated string values. Ideal for LLM agents and scripts.
 JSONL format: one JSON object per row, per line (newline-delimited, no enclosing array). Numbers/booleans/nulls keep their JSON types; temporal values are ISO-8601 strings; lists/structs/maps are real nested JSON. Streamable and append-friendly.
+Compression: any response is gzip-compressed when the request sends `Accept-Encoding: gzip`, and uncompressed otherwise (Helidon's `helidon-http-encoding-gzip`, found by service loading; it flushes per batch, so streaming is unchanged). Request bodies with `Content-Encoding: gzip` are decompressed too, e.g. for `/v1/ingest`.
 
 ### dazzleduck-sql-commons
 Core DuckDB abstraction (JDK 21). Key classes:

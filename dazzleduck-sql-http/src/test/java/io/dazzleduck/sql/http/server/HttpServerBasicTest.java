@@ -155,6 +155,40 @@ public class HttpServerBasicTest extends HttpServerTestBase {
     }
 
     @Test
+    public void testIngestionPostGzipped() throws IOException, InterruptedException, SQLException {
+        // A body sent with Content-Encoding: gzip is decompressed before ingestion reads it.
+        var path = "gzipped";
+        Files.createDirectories(Path.of(ingestionPath, path));
+        String query = "select * from generate_series(10)";
+        try (BufferAllocator allocator = new RootAllocator();
+             DuckDBConnection connection = ConnectionPool.getConnection();
+             var reader = ConnectionPool.getReader(connection, allocator, query, 1000);
+             var arrow = new ByteArrayOutputStream();
+             var streamWrite = new ArrowStreamWriter(reader.getVectorSchemaRoot(), null, arrow)) {
+            streamWrite.start();
+            while (reader.loadNextBatch()) {
+                streamWrite.writeBatch();
+            }
+            streamWrite.end();
+            var gzipped = new ByteArrayOutputStream();
+            try (var gzip = new java.util.zip.GZIPOutputStream(gzipped)) {
+                gzip.write(arrow.toByteArray());
+            }
+            var request = authenticatedRequestBuilder(URI.create(baseUrl + "/v1/ingest?ingestion_queue=%s".formatted(path)))
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(gzipped.toByteArray()))
+                    .header("Content-Type", ContentTypes.APPLICATION_ARROW)
+                    .header("Content-Encoding", "gzip")
+                    .build();
+
+            var res = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, res.statusCode(), res.body());
+            var lines = ConnectionPool.collectFirst(
+                    String.format("select count(*) from read_parquet('%s/%s/*.parquet')", ingestionPath, path), Long.class);
+            assertEquals(11, lines);
+        }
+    }
+
+    @Test
     public void testIngestionPost() throws IOException, InterruptedException, SQLException {
         String query = "select generate_series, generate_series a from generate_series(10)";
         try (BufferAllocator allocator = new RootAllocator();

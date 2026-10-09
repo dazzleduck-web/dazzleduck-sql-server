@@ -62,6 +62,14 @@
             <artifactId>helidon-webserver-http2</artifactId>
             <version>${helidon.version}</version>
         </dependency>
+        <!-- gzip Content-Encoding, negotiated per request by Accept-Encoding (found by service loading,
+             so no code is needed): TSV and JSONL compress several times over. Also decodes request
+             bodies sent with Content-Encoding: gzip. -->
+        <dependency>
+            <groupId>io.helidon.http.encoding</groupId>
+            <artifactId>helidon-http-encoding-gzip</artifactId>
+            <version>${helidon.version}</version>
+        </dependency>
         <dependency>
             <groupId>com.hubspot.jinjava</groupId>
             <artifactId>jinjava</artifactId>
