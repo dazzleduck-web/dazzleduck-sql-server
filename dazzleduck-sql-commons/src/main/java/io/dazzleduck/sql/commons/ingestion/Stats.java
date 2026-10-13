@@ -28,6 +28,12 @@ import java.util.List;
  *                               (divide a value by 60 for that minute's average rows/sec); may be empty
  * @param batchesReceivedPerMinute batches accepted in each of the last 15 minutes, oldest first — the
  *                               "arrival" view (row counts are only known at write time); may be empty
+ * @param catalogRetries         writes retried once after a failure revealed a catalog change (e.g. a new
+ *                               partition spec) — each one is a batch the client did not see fail
+ * @param catalogRetryFailures   of those retries, how many failed again (the batch then failed as before)
+ * @param orphanFilesDeleted     output files of failed write attempts that were deleted
+ * @param orphanFilesLeft        output files of failed write attempts that could not be deleted (e.g. on an
+ *                               object store); reclaim them with {@code ducklake_delete_orphaned_files}
  * @param partitions             per-partition child stats (empty unless this is a partitioned queue)
  */
 public record Stats(String identifier,
@@ -55,6 +61,10 @@ public record Stats(String identifier,
                     String lastError,
                     long[] rowsWrittenPerMinute,
                     long[] batchesReceivedPerMinute,
+                    long catalogRetries,
+                    long catalogRetryFailures,
+                    long orphanFilesDeleted,
+                    long orphanFilesLeft,
                     List<Stats> partitions) {
 
     private static final long[] EMPTY = new long[0];
@@ -72,7 +82,8 @@ public record Stats(String identifier,
                 failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite,
                 dataPhaseMillis, postIngestMillis, rejected429, rejectedOutOfSequence, rejectedMultiPartition,
                 lastWriteEpochMs, lastReceiveEpochMs, lastErrorEpochMs, lastError,
-                rowsWrittenPerMinute, batchesReceivedPerMinute, partitions);
+                rowsWrittenPerMinute, batchesReceivedPerMinute, catalogRetries, catalogRetryFailures,
+                orphanFilesDeleted, orphanFilesLeft, partitions);
     }
 
     public static Builder builder(String identifier) {
@@ -91,6 +102,7 @@ public record Stats(String identifier,
         private String lastError;
         private long[] rowsWrittenPerMinute = EMPTY;
         private long[] batchesReceivedPerMinute = EMPTY;
+        private long catalogRetries, catalogRetryFailures, orphanFilesDeleted, orphanFilesLeft;
         private List<Stats> partitions = List.of();
 
         private Builder(String identifier) { this.identifier = identifier; }
@@ -119,6 +131,10 @@ public record Stats(String identifier,
         public Builder lastError(String v)          { this.lastError = v; return this; }
         public Builder rowsWrittenPerMinute(long[] v)     { this.rowsWrittenPerMinute = v; return this; }
         public Builder batchesReceivedPerMinute(long[] v) { this.batchesReceivedPerMinute = v; return this; }
+        public Builder catalogRetries(long v)       { this.catalogRetries = v; return this; }
+        public Builder catalogRetryFailures(long v) { this.catalogRetryFailures = v; return this; }
+        public Builder orphanFilesDeleted(long v)   { this.orphanFilesDeleted = v; return this; }
+        public Builder orphanFilesLeft(long v)      { this.orphanFilesLeft = v; return this; }
         public Builder partitions(List<Stats> v)    { this.partitions = v == null ? List.of() : v; return this; }
 
         public Stats build() {
@@ -127,7 +143,8 @@ public record Stats(String identifier,
                     failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite,
                     dataPhaseMillis, postIngestMillis, rejected429, rejectedOutOfSequence, rejectedMultiPartition,
                     lastWriteEpochMs, lastReceiveEpochMs, lastErrorEpochMs, lastError,
-                    rowsWrittenPerMinute, batchesReceivedPerMinute, partitions);
+                    rowsWrittenPerMinute, batchesReceivedPerMinute, catalogRetries, catalogRetryFailures,
+                orphanFilesDeleted, orphanFilesLeft, partitions);
         }
     }
 }

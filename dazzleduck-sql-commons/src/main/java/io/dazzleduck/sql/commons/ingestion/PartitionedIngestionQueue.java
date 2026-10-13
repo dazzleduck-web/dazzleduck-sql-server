@@ -210,6 +210,7 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
         long bytes = 0, batches = 0, buckets = 0, timeW = 0, pBatches = 0, pBuckets = 0, pBytes = 0, maxPend = 0;
         long fBytes = 0, fBatches = 0, fBuckets = 0, evict = 0, rows = 0, dataMs = 0, postMs = 0, r429 = 0, rOos = 0;
         long lastWrite = 0, lastReceive = 0, lastErrMs = 0;
+        long retries = 0, retryFailures = 0, orphansDeleted = 0, orphansLeft = 0;
         String lastErr = null;
         long[] rowsPerMin = new long[BulkIngestQueue.HISTORY_MINUTES];
         long[] batchesPerMin = new long[BulkIngestQueue.HISTORY_MINUTES];
@@ -222,6 +223,8 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
             fBatches += c.failedWriteBatches();  fBuckets += c.failedWriteBuckets(); evict += c.producerIdEvictions();
             rows += c.rowsWritten();             dataMs += c.dataPhaseMillis();      postMs += c.postIngestMillis();
             r429 += c.rejected429();             rOos += c.rejectedOutOfSequence();
+            retries += c.catalogRetries();       retryFailures += c.catalogRetryFailures();
+            orphansDeleted += c.orphanFilesDeleted(); orphansLeft += c.orphanFilesLeft();
             lastWrite = Math.max(lastWrite, c.lastWriteEpochMs());
             lastReceive = Math.max(lastReceive, c.lastReceiveEpochMs());
             if (c.lastErrorEpochMs() > lastErrMs) { lastErrMs = c.lastErrorEpochMs(); lastErr = c.lastError(); }
@@ -237,6 +240,8 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
                 .lastWriteEpochMs(lastWrite).lastReceiveEpochMs(lastReceive)
                 .lastErrorEpochMs(lastErrMs).lastError(lastErr)
                 .rowsWrittenPerMinute(rowsPerMin).batchesReceivedPerMinute(batchesPerMin)
+                .catalogRetries(retries).catalogRetryFailures(retryFailures)
+                .orphanFilesDeleted(orphansDeleted).orphanFilesLeft(orphansLeft)
                 .partitions(childStats)
                 .build();
     }

@@ -79,6 +79,9 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         try {
             addFilesInTransaction(files);
             logger.info("Successfully added {} files to DuckLake table {}.{}.{}", files.size(), catalogName, schemaName, tableName);
+        } catch (FilesNotRegisteredException e) {
+            logger.error("DuckLake table {}.{}.{} rejected {} files", catalogName, schemaName, tableName, files.size(), e);
+            throw e;
         } catch (SQLException e) {
             logger.error("Failed to add files to DuckLake table {}.{}.{}", catalogName, schemaName, tableName, e);
             throw new RuntimeException("Failed to execute DuckLake post-ingestion task for table " + tableName, e);
@@ -100,13 +103,38 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         boolean hasWatermark = watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty();
         try (Connection conn = ConnectionPool.getConnection()) {
             if (!hasWatermark) {
-                ConnectionPool.executeBatchInTxn(conn, queries.toArray(String[]::new));
+                executeInTxn(conn, queries, files);
                 return;
             }
             long predictedSnapshotId = predictNextSnapshotId(conn);
             queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows, predictedSnapshotId));
-            ConnectionPool.executeBatchInTxn(conn, queries.toArray(String[]::new));
+            executeInTxn(conn, queries, files);
             verifySnapshotId(conn, files, predictedSnapshotId);
+        }
+    }
+
+    /**
+     * Runs {@code queries} in one transaction, telling apart a statement that failed (rolled back,
+     * nothing registered: {@link FilesNotRegisteredException}, so the caller may delete the files)
+     * from a failed commit, whose outcome is unknown and which is rethrown as a plain
+     * {@link SQLException}.
+     */
+    private static void executeInTxn(Connection conn, List<String> queries, List<String> files) throws SQLException {
+        boolean oldAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            try (Statement statement = conn.createStatement()) {
+                for (String sql : queries) {
+                    statement.addBatch(sql);
+                }
+                statement.executeBatch();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw new FilesNotRegisteredException("Files were rejected before commit: " + e.getMessage(), files, e);
+            }
+            conn.commit();
+        } finally {
+            conn.setAutoCommit(oldAutoCommit);
         }
     }
 

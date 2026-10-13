@@ -18,6 +18,7 @@ public final class StatsHtml {
             "Queue", "Rows", "Bytes", "Batches", "Buckets",
             "Pending (b/bk)", "Pending bytes (% max)", "Avg write ms/bucket", "Data ms", "Post ms",
             "Failed (b/bytes)", "Rej 429", "Rej out-of-seq", "Rej multi-part", "Evictions",
+            "Catalog retries (ok/failed)", "Orphan files (deleted/left)",
             "Rows/min (15m)", "Arrivals/min (15m)",
             "Last write", "Last receive", "Last error"
     };
@@ -107,6 +108,9 @@ public final class StatsHtml {
         cellClass(sb, Long.toString(s.rejectedOutOfSequence()), s.rejectedOutOfSequence() > 0 ? "warn" : null);
         cellClass(sb, Long.toString(s.rejectedMultiPartition()), s.rejectedMultiPartition() > 0 ? "bad" : null);
         cell(sb, Long.toString(s.producerIdEvictions()), false);
+        cellClass(sb, (s.catalogRetries() - s.catalogRetryFailures()) + " / " + s.catalogRetryFailures(),
+                s.catalogRetryFailures() > 0 ? "bad" : null);
+        cellClass(sb, s.orphanFilesDeleted() + " / " + s.orphanFilesLeft(), s.orphanFilesLeft() > 0 ? "warn" : null);
         sb.append(sparklineCell(s.rowsWrittenPerMinute(), "rows/min"));
         sb.append(sparklineCell(s.batchesReceivedPerMinute(), "batches/min"));
         cell(sb, age(s.lastWriteEpochMs(), now), false);

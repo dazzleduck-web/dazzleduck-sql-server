@@ -343,6 +343,10 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
                 .lastError(lastError)
                 .rowsWrittenPerMinute(rowsWrittenRing.snapshot(clock.millis(), HISTORY_MINUTES))
                 .batchesReceivedPerMinute(batchesReceivedRing.snapshot(clock.millis(), HISTORY_MINUTES))
+                .catalogRetries(catalogRetries())
+                .catalogRetryFailures(catalogRetryFailures())
+                .orphanFilesDeleted(orphanFilesDeleted())
+                .orphanFilesLeft(orphanFilesLeft())
                 .partitions(partitionStats())
                 .build();
     }
@@ -366,6 +370,18 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
 
     /** Cumulative ms in the post-ingestion phase; overridden by {@link ParquetIngestionQueue}. */
     protected long postIngestMillis() { return 0L; }
+
+    /** Writes retried after a catalog change; counted by {@link ParquetIngestionQueue}. */
+    protected long catalogRetries() { return 0L; }
+
+    /** Catalog-change retries that failed again; counted by {@link ParquetIngestionQueue}. */
+    protected long catalogRetryFailures() { return 0L; }
+
+    /** Output files of failed attempts that were deleted; counted by {@link ParquetIngestionQueue}. */
+    protected long orphanFilesDeleted() { return 0L; }
+
+    /** Output files of failed attempts that could not be deleted; counted by {@link ParquetIngestionQueue}. */
+    protected long orphanFilesLeft() { return 0L; }
 
     /** Batches rejected for spanning multiple partitions; only {@link PartitionedIngestionQueue} counts these. */
     protected long rejectedMultiPartition() { return 0L; }

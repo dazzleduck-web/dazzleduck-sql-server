@@ -74,6 +74,8 @@ otel_collector {
         # columns, a view-derived transformation, per-queue session variables. Default 2 min.
         # This is the block the provider reads; the key has no effect in `ingestion` above.
         # queue_config_refresh_delay_ms = 120000
+        # A failed write also re-reads the catalog at once and retries the batch once if its
+        # partitioning or transformation changed.
 
         ingestion_queue_table_mapping = [
             { ingestion_queue = "logs",    output_path = "./otel-logs" }
