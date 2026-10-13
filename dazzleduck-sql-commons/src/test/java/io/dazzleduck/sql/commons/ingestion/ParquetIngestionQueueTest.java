@@ -737,8 +737,30 @@ public class ParquetIngestionQueueTest {
     public void testApplyTransformation() {
         assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", null));
         assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", "  "));
-        assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this)",
+        assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this\n)",
                 ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this"));
+        // Trailing semicolons are valid after a statement but not inside a subquery.
+        assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this\n)",
+                ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this ;; \n"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "SELECT a * 10 AS b FROM __this",
+            "SELECT a * 10 AS b FROM __this;",
+            "'SELECT a * 10 AS b FROM __this;\n'",
+            "SELECT a * 10 AS b FROM __this -- trailing comment",
+            "WITH t AS (SELECT a * 10 AS b FROM __this) SELECT * FROM t;",
+    })
+    public void testAppliedTransformationExecutes(String transformation) throws Exception {
+        // Every form that ran when the transformation was appended after the __this CTE must still
+        // run now that it is nested as a subquery.
+        String sql = ParquetIngestionQueue.applyTransformation("SELECT range AS a FROM range(3)", transformation)
+                + " ORDER BY b";
+        try (var conn = ConnectionPool.getConnection()) {
+            assertIterableEquals(java.util.List.of(0L, 10L, 20L),
+                    ConnectionPool.collectAll(conn, sql, rs -> rs.getLong(1)));
+        }
     }
 
     @Test

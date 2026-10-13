@@ -13,6 +13,7 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResult> {
@@ -25,6 +26,8 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * This is a shared executor - virtual threads are lightweight so no pooling needed.
      */
     private static final ExecutorService CLEANUP_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    /** Trailing semicolons/whitespace, stripped before a transformation is nested as a subquery. */
+    private static final Pattern TRAILING_SEMICOLONS = Pattern.compile("[;\\s]+$");
 
     private final String outputPath;
     private final String queueId;
@@ -211,12 +214,17 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * CTE, so a transformation that declares its own {@code WITH} clause stays valid SQL; its
      * CTEs can still reference the outer {@code __this}. Returns {@code inputSql} unchanged when
      * there is no transformation.
+     *
+     * <p>Trailing semicolons are stripped (they are valid at the end of a statement but not inside
+     * a subquery), and the closing parenthesis goes on its own line so a trailing {@code --}
+     * comment cannot swallow it.
      */
     static String applyTransformation(String inputSql, String transformation) {
         if (transformation == null || transformation.isBlank()) {
             return inputSql;
         }
-        return "WITH __this AS (%s) SELECT * FROM (%s)".formatted(inputSql, transformation);
+        String body = TRAILING_SEMICOLONS.matcher(transformation).replaceAll("");
+        return "WITH __this AS (%s) SELECT * FROM (%s\n)".formatted(inputSql, body);
     }
 
     /**

@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Provider for DuckLakeIngestionTaskFactory.
@@ -18,6 +19,12 @@ import java.util.LinkedHashMap;
 public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskFactoryProvider {
 
     private static final Logger logger = LoggerFactory.getLogger(DuckLakeIngestionTaskFactoryProvider.class);
+
+    /**
+     * A transformation that is already a full query. Matched as a whole word, so a shorthand
+     * expression on a column like {@code with_flag} or {@code selected_at} is still wrapped.
+     */
+    private static final Pattern FULL_QUERY = Pattern.compile("\\s*(SELECT|WITH)\\b", Pattern.CASE_INSENSITIVE);
 
     @Override
     protected Map<String, QueueIdToTableMapping> loadMappings() {
@@ -37,8 +44,7 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             }
             String transformation = c.hasPath(ConfigConstants.TRANSFORMATION_KEY)
                     ? c.getString(ConfigConstants.TRANSFORMATION_KEY) : null;
-            String head = transformation == null ? "" : transformation.trim().toUpperCase();
-            if (transformation != null && !head.startsWith("SELECT") && !head.startsWith("WITH")) {
+            if (transformation != null && !FULL_QUERY.matcher(transformation).lookingAt()) {
                 transformation = "SELECT *, " + transformation + " FROM __this";
             }
             String view       = c.hasPath(ConfigConstants.VIEW_KEY)        ? c.getString(ConfigConstants.VIEW_KEY)        : null;

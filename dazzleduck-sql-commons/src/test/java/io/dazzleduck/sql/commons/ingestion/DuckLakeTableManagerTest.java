@@ -82,6 +82,17 @@ class DuckLakeTableManagerTest {
     }
 
     @Test
+    void createsTableWhenTransformationEndsWithSemicolonOrComment() throws Exception {
+        DuckLakeTableManager.ensureTable(
+                mapping("semi_logs", "SELECT *, severity_text AS level FROM __this;", LOGS));
+        DuckLakeTableManager.ensureTable(
+                mapping("comment_logs", "SELECT *, severity_text AS level FROM __this -- add level", LOGS));
+
+        assertEquals(List.of("severity_number", "severity_text", "body", "level"), columns("semi_logs"));
+        assertEquals(List.of("severity_number", "severity_text", "body", "level"), columns("comment_logs"));
+    }
+
+    @Test
     void createsTableWithRawSchemaWhenNoTransformation() throws Exception {
         DuckLakeTableManager.ensureTable(mapping("raw_logs", null, LOGS));
 

@@ -165,6 +165,26 @@ public class DuckLakeIngestionHandlerProviderTest {
     }
 
     @Test
+    public void testShorthandOnKeywordPrefixedColumnIsStillWrapped() {
+        // with_flag / selected_at start with WITH / SELECT but are expressions, not full queries.
+        var provider = providerFromHocon("""
+            ingestion_queue_table_mapping = [
+                { ingestion_queue = "a", catalog = "loglake", schema = "main", table = "a",
+                  transformation = "with_flag AS f" },
+                { ingestion_queue = "b", catalog = "loglake", schema = "main", table = "b",
+                  transformation = "selected_at AS s" },
+                { ingestion_queue = "c", catalog = "loglake", schema = "main", table = "c",
+                  transformation = "  with t AS (SELECT * FROM __this) SELECT * FROM t" }
+            ]
+            """);
+        var mappings = provider.loadMappings();
+        assertEquals("SELECT *, with_flag AS f FROM __this", mappings.get("a").transformation());
+        assertEquals("SELECT *, selected_at AS s FROM __this", mappings.get("b").transformation());
+        assertEquals("  with t AS (SELECT * FROM __this) SELECT * FROM t", mappings.get("c").transformation());
+        assertDoesNotThrow(provider::validate);
+    }
+
+    @Test
     public void testValidatePassesWithNoTransformation() {
         var provider = providerFromHocon("""
             ingestion_queue_table_mapping = [{
