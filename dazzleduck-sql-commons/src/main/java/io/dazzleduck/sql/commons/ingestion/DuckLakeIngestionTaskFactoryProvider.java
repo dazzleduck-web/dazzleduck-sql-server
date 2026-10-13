@@ -37,7 +37,8 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             }
             String transformation = c.hasPath(ConfigConstants.TRANSFORMATION_KEY)
                     ? c.getString(ConfigConstants.TRANSFORMATION_KEY) : null;
-            if (transformation != null && !transformation.trim().toUpperCase().startsWith("SELECT")) {
+            String head = transformation == null ? "" : transformation.trim().toUpperCase();
+            if (transformation != null && !head.startsWith("SELECT") && !head.startsWith("WITH")) {
                 transformation = "SELECT *, " + transformation + " FROM __this";
             }
             String view       = c.hasPath(ConfigConstants.VIEW_KEY)        ? c.getString(ConfigConstants.VIEW_KEY)        : null;

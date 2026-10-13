@@ -45,9 +45,35 @@ public class DuckLakeIngestionHandlerProviderTest {
                 "SELECT id, upper(category) AS category FROM __this"));
     }
 
+    @Test
+    public void testValidTransformationWithCte() {
+        // __this is referenced only inside the CTE body, not in the outer FROM
+        assertDoesNotThrow(() ->
+            DuckLakeIngestionTaskFactoryProvider.validateTransformation("q",
+                "WITH parsed AS (SELECT *, upper(category) AS cat FROM __this) SELECT id, cat FROM parsed"));
+    }
+
+    @Test
+    public void testValidTransformationWithChainedCtes() {
+        assertDoesNotThrow(() ->
+            DuckLakeIngestionTaskFactoryProvider.validateTransformation("q",
+                "WITH a AS (SELECT id, value FROM __this), b AS (SELECT id, value * 2 AS v2 FROM a) "
+                    + "SELECT * FROM b WHERE v2 > 10"));
+    }
+
     // -------------------------------------------------------------------------
     // Missing __this reference
     // -------------------------------------------------------------------------
+
+    @Test
+    public void testInvalidTransformationCteNotReadingThis() {
+        var ex = assertThrows(IllegalArgumentException.class, () ->
+            DuckLakeIngestionTaskFactoryProvider.validateTransformation("log",
+                "WITH x AS (SELECT * FROM some_other_table) SELECT * FROM x"));
+
+        assertTrue(ex.getMessage().contains("__this"),
+            "Error should mention __this, got: " + ex.getMessage());
+    }
 
     @Test
     public void testInvalidTransformationMissingThisTable() {
@@ -117,6 +143,22 @@ public class DuckLakeIngestionHandlerProviderTest {
                 schema  = "main"
                 table   = "log"
                 transformation = "SELECT id, ts FROM __this"
+            }]
+            """);
+        assertDoesNotThrow(provider::validate);
+    }
+
+    @Test
+    public void testValidatePassesWithCteTransformation() {
+        // A transformation starting with WITH is a full query and must not get the
+        // "SELECT *, <expr> FROM __this" shorthand wrapping.
+        var provider = providerFromHocon("""
+            ingestion_queue_table_mapping = [{
+                ingestion_queue = "log"
+                catalog = "loglake"
+                schema  = "main"
+                table   = "log"
+                transformation = "WITH t AS (SELECT id, ts FROM __this) SELECT * FROM t"
             }]
             """);
         assertDoesNotThrow(provider::validate);

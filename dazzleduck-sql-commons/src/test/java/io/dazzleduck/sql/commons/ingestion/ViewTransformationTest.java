@@ -130,6 +130,33 @@ class ViewTransformationTest {
     }
 
     @Test
+    void resolveView_viewWithCte_derivesValidTransformation() throws Exception {
+        // input_table is referenced only inside the view's CTE body
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn,
+                    "CREATE VIEW %1$s.main.v_logs_cte AS WITH lv AS (SELECT ts, upper(level) AS level, msg FROM %1$s.main.logs) "
+                            .formatted(CATALOG)
+                            + "SELECT * FROM lv WHERE level <> 'DEBUG'");
+        }
+
+        String transformation = DuckLakeIngestionHandler.resolveViewTransformationStatic(
+                CATALOG + ".main.v_logs_cte", CATALOG + ".main.logs");
+
+        assertTrue(transformation.contains("__this"), "derived transformation must reference __this");
+        assertFalse(transformation.contains(CATALOG + ".main.logs"),
+                "original qualified reference should be replaced");
+        assertDoesNotThrow(() -> AbstractIngestionTaskFactoryProvider.validateTransformation("q", transformation));
+        // The derived transformation runs over a __this relation once wrapped
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(1L, ConnectionPool.collectFirst(conn,
+                    "SELECT count(*) FROM (%s)".formatted(ParquetIngestionQueue.applyTransformation(
+                            "SELECT TIMESTAMP '2026-01-01' AS ts, 'info' AS level, 'm' AS msg "
+                                    + "UNION ALL SELECT TIMESTAMP '2026-01-01', 'debug', 'm2'", transformation)),
+                    Long.class));
+        }
+    }
+
+    @Test
     void resolveView_viewDoesNotExist_throws() {
         var ex = assertThrows(RuntimeException.class,
                 () -> DuckLakeIngestionHandler.resolveViewTransformationStatic(

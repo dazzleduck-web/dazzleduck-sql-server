@@ -206,6 +206,20 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     }
 
     /**
+     * Exposes {@code inputSql} as {@code __this} and applies {@code transformation} over it.
+     * The transformation is nested as a subquery rather than appended after the {@code __this}
+     * CTE, so a transformation that declares its own {@code WITH} clause stays valid SQL; its
+     * CTEs can still reference the outer {@code __this}. Returns {@code inputSql} unchanged when
+     * there is no transformation.
+     */
+    static String applyTransformation(String inputSql, String transformation) {
+        if (transformation == null || transformation.isBlank()) {
+            return inputSql;
+        }
+        return "WITH __this AS (%s) SELECT * FROM (%s)".formatted(inputSql, transformation);
+    }
+
+    /**
      * The relation the output files are written from: the temp input files with the
      * transformation and any partition projections applied. This is also the relation the
      * watermark rows are computed over — same schema, same rows as the written output, read
@@ -225,9 +239,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         // Fetch transformation fresh from the handler on every write so view-based
         // and handler-refreshed transformations are always current without caching.
         String transformation = postIngestionHandler.getTransformation(queueId);
-        var querySql = (transformation != null && !transformation.isBlank())
-                ? "WITH __this AS (%s) %s".formatted(innerSql, transformation)
-                : innerSql;
+        var querySql = applyTransformation(innerSql, transformation);
 
         // Add handler-supplied derived-column projections (e.g. day(timestamp) AS day) so the
         // PARTITION_BY tokens resolve. Not needed for header-supplied partitionBy, which names

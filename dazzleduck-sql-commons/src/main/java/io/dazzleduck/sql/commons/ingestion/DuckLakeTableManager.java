@@ -24,7 +24,8 @@ import java.util.stream.Collectors;
  * <p>The desired column set is derived from the queue's {@code input_schema} and {@code transformation}:
  * a zero-row temp table is created from the {@code input_schema} column-definition fragment (e.g.
  * {@code "severity_number INTEGER, body VARCHAR"}), the transformation is expanded over it exactly as
- * at write time ({@code WITH __this AS (...) <transformation>}, see {@code ParquetIngestionQueue}), and
+ * at write time ({@code WITH __this AS (...) SELECT * FROM (<transformation>)}, see
+ * {@link ParquetIngestionQueue#applyTransformation}), and
  * the result is described. This reuses DuckDB's own type resolution, so the derived schema matches what
  * real ingestion produces.
  *
@@ -87,10 +88,7 @@ public final class DuckLakeTableManager {
     static List<Column> deriveSchema(DuckDBConnection conn, QueueIdToTableMapping mapping, String inputSchema)
             throws SQLException {
         String transformation = effectiveTransformation(mapping);
-        String inner = "SELECT * FROM " + INPUT_RELATION;
-        String query = (transformation != null && !transformation.isBlank())
-                ? "WITH __this AS (%s) %s".formatted(inner, transformation)
-                : inner;
+        String query = ParquetIngestionQueue.applyTransformation("SELECT * FROM " + INPUT_RELATION, transformation);
 
         List<Column> columns = new ArrayList<>();
         try (Statement st = conn.createStatement()) {

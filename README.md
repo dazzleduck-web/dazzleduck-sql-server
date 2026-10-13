@@ -510,8 +510,11 @@ wraps it as:
 
 ```sql
 WITH __this AS (SELECT * FROM read_parquet([...]) ORDER BY ...)
-<transformation>
+SELECT * FROM (<transformation>)
 ```
+
+Because the transformation is nested as a subquery, it may declare its own `WITH` clause; those
+CTEs can read `__this` (for example, parse JSON once and project several fields from it).
 
 Common patterns:
 
@@ -527,6 +530,10 @@ SELECT * FROM __this WHERE level != 'DEBUG'
 
 -- Add ingestion timestamp
 SELECT id, ts, msg, current_timestamp AS ingested_at FROM __this
+
+-- CTE: parse once, project several fields
+WITH parsed AS (SELECT *, TRY_CAST(msg AS JSON) AS j FROM __this)
+SELECT id, ts, msg, json_extract_string(j, '$.user.id') AS user_id FROM parsed
 ```
 
 ### View-Based Transformation

@@ -709,6 +709,39 @@ public class ParquetIngestionQueueTest {
     }
 
     @Test
+    public void testTransformationWithCte() throws Exception {
+        var service = new DeterministicScheduler();
+        var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+        // The transformation declares its own CTEs; the first one reads __this
+        String transformation = "WITH doubled AS (SELECT id, value * 2 AS doubled_value FROM __this), "
+                + "kept AS (SELECT * FROM doubled WHERE id >= 50) SELECT * FROM kept";
+        var postTaskFactory = createPostTaskFactory(new AtomicBoolean(), false, transformation);
+
+        try (var queue = new ParquetIngestionQueue(
+                TEST_APP_ID, INPUT_FORMAT, targetPath.toString(), "test-queue",
+                DEFAULT_MIN_BATCH_SIZE, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE,
+                DEFAULT_MAX_DELAY, postTaskFactory, service, clock)) {
+
+            var future = queue.add(createBatch(sourceFile1.toString(), "producer1", 0, DEFAULT_MIN_BATCH_SIZE + 1));
+            service.tick(1, TimeUnit.MILLISECONDS);
+            var result = future.get(2, SECONDS);
+
+            String outputFile = result.filesCreated().get(0);
+            TestUtils.isEqual(
+                "SELECT id, value * 2 AS doubled_value FROM (%s) WHERE id >= 50".formatted(sourceData(100)),
+                "SELECT * FROM read_parquet('%s')".formatted(outputFile));
+        }
+    }
+
+    @Test
+    public void testApplyTransformation() {
+        assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", null));
+        assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", "  "));
+        assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this)",
+                ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this"));
+    }
+
+    @Test
     public void testNullTransformationWritesAllColumns() throws Exception {
         var service = new DeterministicScheduler();
         var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());

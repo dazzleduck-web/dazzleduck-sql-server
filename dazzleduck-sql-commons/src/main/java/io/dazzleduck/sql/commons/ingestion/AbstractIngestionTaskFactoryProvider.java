@@ -82,7 +82,8 @@ public abstract class AbstractIngestionTaskFactoryProvider implements IngestionT
         try {
             var ast = Transformations.parseToTree(transformation);
             var statementNode = Transformations.getFirstStatementNode(ast);
-            var tables = Transformations.getAllTablesOrPathsFromSelect(statementNode, "", "");
+            // CTE-aware walk: __this may be referenced only inside a CTE body of the transformation.
+            var tables = Transformations.collectAllTableReferences(statementNode, "", "");
             boolean hasThis = tables.stream()
                     .anyMatch(t -> Transformations.TableType.BASE_TABLE == t.type()
                             && "__this".equals(t.tableOrPath()));
