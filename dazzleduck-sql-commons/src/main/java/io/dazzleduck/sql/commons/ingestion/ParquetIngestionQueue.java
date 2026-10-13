@@ -137,12 +137,15 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     public void write(WriteTask<String, IngestionResult> writeTask) {
         logger.debug("Ingestion queue '{}' received batch with {} files, outputPath={}",
                 queueId, writeTask.bucket().batches().size(), outputPath);
+        // The COPY of the most recent attempt, for the failure log: rebuilding it there would read the
+        // handler's state again, which after a catalog refresh is not what the failed attempt ran.
+        var lastAttemptSql = new java.util.concurrent.atomic.AtomicReference<String>();
         try {
-            IngestionResult ingestionResult = writeWithCatalogRetry(writeTask);
+            IngestionResult ingestionResult = writeWithCatalogRetry(writeTask, lastAttemptSql);
             writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
         } catch (Exception e) {
-            var sql = constructWriteQuery(writeTask);
-            logger.atError().setCause(e).log("Failed to write to queue {} sql {}", queueId, sql);
+            logger.atError().setCause(e).log("Failed to write to queue {} sql {}", queueId,
+                    lastAttemptSql.get() == null ? "(not built)" : lastAttemptSql.get());
             // Propagate instead of completing the futures here: BulkIngestQueue.processWriteQueue
             // must account this bucket as failed (pendingWrite stays truthful, failed-write
             // metrics accumulate) and roll back producer sequences BEFORE the futures complete,
@@ -174,10 +177,12 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * rejected them before committing ({@link FilesNotRegisteredException}); otherwise they are
      * counted as orphans, for {@code ducklake_delete_orphaned_files} to reclaim.
      */
-    private IngestionResult writeWithCatalogRetry(WriteTask<String, IngestionResult> writeTask) throws Exception {
+    private IngestionResult writeWithCatalogRetry(WriteTask<String, IngestionResult> writeTask,
+                                                  java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql)
+            throws Exception {
         WriteInputs used = currentWriteInputs(writeTask);
         try {
-            return writeAndRegister(writeTask, used);
+            return writeAndRegister(writeTask, used, lastAttemptSql);
         } catch (Exception first) {
             discardOutput(first);
             if (writeTask.isCancel()) {
@@ -202,7 +207,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     queueId, used.partitionBy(), current.partitionBy(),
                     !Objects.equals(used.transformation(), current.transformation()));
             try {
-                return writeAndRegister(writeTask, current);
+                return writeAndRegister(writeTask, current, lastAttemptSql);
             } catch (Exception second) {
                 discardOutput(second);
                 catalogRetryFailures.increment();
@@ -214,10 +219,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     }
 
     /** One attempt: COPY the batch to output files, then run the post-ingestion step (registration). */
-    private IngestionResult writeAndRegister(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs)
+    private IngestionResult writeAndRegister(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs,
+                                             java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql)
             throws Exception {
         long start = System.nanoTime();
-        IngestionResult ingestionResult = tryWrite(writeTask, inputs);
+        IngestionResult ingestionResult = tryWrite(writeTask, inputs, lastAttemptSql);
         long copyDone = System.nanoTime();
         try {
             postIngestionHandler.createPostIngestionTask(ingestionResult).execute();
@@ -447,10 +453,6 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         return values == null ? List.of() : Arrays.asList(values);
     }
 
-    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask) {
-        return constructWriteQuery(writeTask, currentWriteInputs(writeTask));
-    }
-
     private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) {
         var batches = writeTask.bucket().batches();
         String partitionByClause = getClause(inputs.partitionBy().toArray(String[]::new), ", PARTITION_BY(%s)");
@@ -498,8 +500,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 queueId, variables.size(), variables.keySet());
     }
 
-    private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) throws Exception {
+    private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs,
+                                     java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql) throws Exception {
         var sql = constructWriteQuery(writeTask, inputs);
+        lastAttemptSql.set(sql);
         logger.debug("Executing COPY SQL: {}", sql);
         List<String> files = new ArrayList<>();
         long count = 0;

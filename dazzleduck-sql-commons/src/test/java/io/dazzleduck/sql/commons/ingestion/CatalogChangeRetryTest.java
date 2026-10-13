@@ -144,6 +144,38 @@ class CatalogChangeRetryTest {
     }
 
     @Test
+    void aTransformationChangedUnderARunningQueueIsAppliedByRetryingTheBatch() throws Exception {
+        // A view-based transformation whose cached body emits an INTEGER category, which the VARCHAR
+        // table column rejects. The view is fixed after the handler cached it: the next batch fails
+        // with the stale body, the refresh picks up the new one, and the retry succeeds.
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    "CREATE TABLE %s.%s.events_in (id BIGINT, value BIGINT, category VARCHAR)".formatted(CATALOG, SCHEMA),
+                    "CREATE VIEW %s.%s.v_events AS SELECT id, value, 7 AS category FROM %s.%s.events_in"
+                            .formatted(CATALOG, SCHEMA, CATALOG, SCHEMA)
+            });
+        }
+        var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null,
+                CATALOG + "." + SCHEMA + ".v_events", CATALOG + "." + SCHEMA + ".events_in");
+        var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
+        assertTrue(handler.getTransformation(TABLE).contains("7"), "the stale body is cached");
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "CREATE OR REPLACE VIEW %s.%s.v_events AS SELECT id, value, upper(category) AS category FROM %s.%s.events_in"
+                    .formatted(CATALOG, SCHEMA, CATALOG, SCHEMA));
+        }
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            assertEquals(100, write(queue, scheduler, src1, 0).rowCount());
+            assertEquals(1, queue.getCatalogRetries());
+            assertEquals(0, queue.getCatalogRetryFailures());
+            assertEquals(1, queue.getOrphanFilesDeleted(), "the file written with the stale body is deleted");
+            assertEquals(List.of(), unregisteredFilesUnder(outputDir));
+        }
+        assertEquals(33L, count("WHERE category = 'CAT1'"), "rows come from the new view body");
+    }
+
+    @Test
     void onlyLocalOutputFilesAreDeleted() throws Exception {
         Path local = Files.createFile(tempDir.resolve("orphan.parquet"));
         assertTrue(ParquetIngestionQueue.deleteLocalFile(local.toString()));
