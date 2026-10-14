@@ -114,14 +114,20 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     }
 
     /**
-     * Runs {@code queries} in one transaction, telling apart a statement that failed (rolled back,
-     * nothing registered: {@link FilesNotRegisteredException}, so the caller may delete the files)
-     * from a failed commit, whose outcome is unknown and which is rethrown as a plain
-     * {@link SQLException}.
+     * Runs {@code queries} in one transaction, telling apart a statement that failed (nothing
+     * registered: {@link FilesNotRegisteredException}, so the caller may delete the files) from a
+     * failed commit, whose outcome is unknown and which is rethrown as a plain {@link SQLException}.
+     *
+     * <p>The error that is thrown is always the one that decides that outcome. A rollback that fails
+     * after it, or restoring auto-commit afterwards, is attached as suppressed rather than replacing
+     * it: a statement failure is still {@code FilesNotRegisteredException} when its rollback fails
+     * (commit was never called, so nothing can have been registered), and a failed commit is still
+     * reported as itself.
      */
-    private static void executeInTxn(Connection conn, List<String> queries, List<String> files) throws SQLException {
+    static void executeInTxn(Connection conn, List<String> queries, List<String> files) throws SQLException {
         boolean oldAutoCommit = conn.getAutoCommit();
         conn.setAutoCommit(false);
+        Throwable primary = null;
         try {
             try (Statement statement = conn.createStatement()) {
                 for (String sql : queries) {
@@ -129,12 +135,35 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
                 }
                 statement.executeBatch();
             } catch (SQLException e) {
-                conn.rollback();
-                throw new FilesNotRegisteredException("Files were rejected before commit: " + e.getMessage(), files, e);
+                var rejected = new FilesNotRegisteredException("Files were rejected before commit: " + e.getMessage(), files, e);
+                rollbackQuietly(conn, rejected);
+                throw rejected;
             }
-            conn.commit();
+            try {
+                conn.commit();
+            } catch (SQLException e) {
+                // The commit may or may not have landed; end whatever is left of the transaction.
+                rollbackQuietly(conn, e);
+                throw e;
+            }
+        } catch (Throwable t) {
+            primary = t;
+            throw t;
         } finally {
-            conn.setAutoCommit(oldAutoCommit);
+            try {
+                conn.setAutoCommit(oldAutoCommit);
+            } catch (SQLException e) {
+                if (primary == null) throw e;
+                primary.addSuppressed(e);
+            }
+        }
+    }
+
+    private static void rollbackQuietly(Connection conn, Throwable failure) {
+        try {
+            conn.rollback();
+        } catch (SQLException e) {
+            failure.addSuppressed(e);
         }
     }
 

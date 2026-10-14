@@ -176,6 +176,42 @@ class CatalogChangeRetryTest {
     }
 
     @Test
+    void aRegistrationWithAnUnknownOutcomeIsNotRetried() throws Exception {
+        // The registration commits, then fails as a dropped connection after commit would: its
+        // outcome is unknown to the queue. Meanwhile the table's partitioning changed, so the
+        // refreshed state differs. Retrying would register the batch a second time.
+        var landedThenFailed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var handler = new DuckLakeIngestionHandler(
+                Map.of(TABLE, new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null)),
+                Duration.ofHours(1)) {
+            @Override
+            public PostIngestionTask createPostIngestionTask(IngestionResult result) {
+                PostIngestionTask real = super.createPostIngestionTask(result);
+                return () -> {
+                    real.execute();
+                    if (landedThenFailed.getAndSet(false)) {
+                        try {
+                            alter("SET PARTITIONED BY (category)");
+                        } catch (SQLException e) {
+                            throw new IllegalStateException(e);
+                        }
+                        throw new IllegalStateException("connection lost after commit");
+                    }
+                };
+            }
+        };
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            var failure = assertThrows(ExecutionException.class, () -> write(queue, scheduler, src1, 0));
+            assertTrue(failure.getCause().getMessage().contains("connection lost after commit"));
+            assertEquals(0, queue.getCatalogRetries(), "an attempt that may have landed is never written again");
+            assertEquals(0, queue.getOrphanFilesDeleted(), "its files may be live, so they are kept");
+            assertEquals(1, queue.getStats().orphanFilesLeft());
+        }
+        assertEquals(100L, count(""), "the batch is in the table exactly once");
+    }
+
+    @Test
     void onlyLocalOutputFilesAreDeleted() throws Exception {
         Path local = Files.createFile(tempDir.resolve("orphan.parquet"));
         assertTrue(ParquetIngestionQueue.deleteLocalFile(local.toString()));

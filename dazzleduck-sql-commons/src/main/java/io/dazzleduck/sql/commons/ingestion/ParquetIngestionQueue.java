@@ -200,6 +200,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
             if (current.equals(used)) {
                 throw unwrap(first);
             }
+            if (!nothingRegistered(first)) {
+                // The failed attempt may be in the table (e.g. its commit failed after landing), so
+                // writing the batch again could register every row twice. Fail it as before; the
+                // refresh above still applies to the next batch.
+                logger.atWarn().setCause(unwrap(first)).log(
+                        "Queue '{}': write failed and the catalog has changed, but the failed attempt's "
+                                + "registration outcome is unknown; not retrying, to avoid registering the batch twice",
+                        queueId);
+                throw unwrap(first);
+            }
             catalogRetries.increment();
             logger.atInfo().setCause(unwrap(first)).log(
                     "Queue '{}': write failed and the catalog has changed since it was built "
@@ -299,6 +309,17 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     }
 
     /** The underlying failure of an attempt, without this class's registration wrapper. */
+    /**
+     * Whether a failed attempt is certainly not in the table, so the batch may be written again: it
+     * failed before registration (e.g. the COPY), or registration rejected its files before
+     * committing ({@link FilesNotRegisteredException}). Any other registration failure — a failed
+     * commit above all — may have landed.
+     */
+    static boolean nothingRegistered(Exception failure) {
+        return !(failure instanceof RegistrationFailedException)
+                || failure.getCause() instanceof FilesNotRegisteredException;
+    }
+
     private static Exception unwrap(Exception e) {
         return e instanceof RegistrationFailedException && e.getCause() instanceof Exception cause ? cause : e;
     }
