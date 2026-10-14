@@ -185,6 +185,30 @@ public class DuckLakeIngestionHandlerProviderTest {
     }
 
     @Test
+    public void testFullQueryNotStartingWithSelectOrWithIsNotWrapped() {
+        // A leading comment (common in multi-line HOCON), a parenthesized query and FROM-first
+        // syntax are full queries too; only a select-list expression is shorthand.
+        var provider = providerFromHocon("""
+            ingestion_queue_table_mapping = [
+                { ingestion_queue = "a", catalog = "loglake", schema = "main", table = "a",
+                  transformation = "-- parse once\\nWITH t AS (SELECT * FROM __this) SELECT * FROM t" },
+                { ingestion_queue = "b", catalog = "loglake", schema = "main", table = "b",
+                  transformation = "(SELECT id FROM __this)" },
+                { ingestion_queue = "c", catalog = "loglake", schema = "main", table = "c",
+                  transformation = "FROM __this SELECT id" },
+                { ingestion_queue = "d", catalog = "loglake", schema = "main", table = "d",
+                  transformation = "upper(level) AS lvl" }
+            ]
+            """);
+        var mappings = provider.loadMappings();
+        assertEquals("-- parse once\nWITH t AS (SELECT * FROM __this) SELECT * FROM t", mappings.get("a").transformation());
+        assertEquals("(SELECT id FROM __this)", mappings.get("b").transformation());
+        assertEquals("FROM __this SELECT id", mappings.get("c").transformation());
+        assertEquals("SELECT *, upper(level) AS lvl FROM __this", mappings.get("d").transformation());
+        assertDoesNotThrow(provider::validate);
+    }
+
+    @Test
     public void testValidatePassesWithNoTransformation() {
         var provider = providerFromHocon("""
             ingestion_queue_table_mapping = [{

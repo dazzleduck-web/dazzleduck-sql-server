@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import io.dazzleduck.sql.commons.ConnectionPool;
+import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.commons.SqlVariables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +29,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     private static final ExecutorService CLEANUP_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
     /** Trailing semicolons/whitespace, stripped before a transformation is nested as a subquery. */
     private static final Pattern TRAILING_SEMICOLONS = Pattern.compile("[;\\s]+$");
+
+    /** Transformations re-rendered by {@link #embeddable}, by their original text. */
+    private static final java.util.Map<String, String> EMBEDDABLE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int EMBEDDABLE_CACHE_LIMIT = 256;
 
     private final String outputPath;
     private final String queueId;
@@ -215,16 +220,49 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * CTEs can still reference the outer {@code __this}. Returns {@code inputSql} unchanged when
      * there is no transformation.
      *
-     * <p>Trailing semicolons are stripped (they are valid at the end of a statement but not inside
-     * a subquery), and the closing parenthesis goes on its own line so a trailing {@code --}
-     * comment cannot swallow it.
+     * <p>The closing parenthesis goes on its own line so a trailing {@code --} comment cannot
+     * swallow it; see {@link #embeddable} for semicolons and comments.
      */
     static String applyTransformation(String inputSql, String transformation) {
         if (transformation == null || transformation.isBlank()) {
             return inputSql;
         }
-        String body = TRAILING_SEMICOLONS.matcher(transformation).replaceAll("");
-        return "WITH __this AS (%s) SELECT * FROM (%s\n)".formatted(inputSql, body);
+        return "WITH __this AS (%s) SELECT * FROM (%s\n)".formatted(inputSql, embeddable(transformation));
+    }
+
+    /**
+     * {@code transformation} as text that can be nested inside parentheses. Most transformations
+     * are used verbatim. A {@code ;} is valid at the end of a statement but not inside a subquery,
+     * and with a comment after it ({@code ...; -- note}) it cannot be trimmed off the end; neither
+     * can be removed reliably as text, since either may sit inside a string literal. So a
+     * transformation containing {@code ;}, {@code --} or {@code /*} is re-rendered by DuckDB's own
+     * parser ({@code json_serialize_sql} / {@code json_deserialize_sql}, as view transformations
+     * already are), which drops comments and statement terminators. Memoized, since it runs for
+     * every batch. If DuckDB cannot parse it as one statement, trailing semicolons are trimmed and
+     * the COPY reports DuckDB's own error.
+     */
+    static String embeddable(String transformation) {
+        if (transformation.indexOf(';') < 0 && !transformation.contains("--") && !transformation.contains("/*")) {
+            return transformation;
+        }
+        String cached = EMBEDDABLE.get(transformation);
+        if (cached != null) {
+            return cached;
+        }
+        String result;
+        try (var conn = ConnectionPool.getConnection()) {
+            var tree = Transformations.parseToTree(conn, transformation);
+            boolean single = !tree.path("error").asBoolean(false) && tree.path("statements").size() == 1;
+            result = single ? Transformations.parseToSql(conn, tree)
+                    : TRAILING_SEMICOLONS.matcher(transformation).replaceAll("");
+        } catch (Exception e) {
+            result = TRAILING_SEMICOLONS.matcher(transformation).replaceAll("");
+        }
+        if (EMBEDDABLE.size() >= EMBEDDABLE_CACHE_LIMIT) {
+            EMBEDDABLE.clear();
+        }
+        EMBEDDABLE.put(transformation, result);
+        return result;
     }
 
     /**

@@ -739,9 +739,12 @@ public class ParquetIngestionQueueTest {
         assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", "  "));
         assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this\n)",
                 ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this"));
-        // Trailing semicolons are valid after a statement but not inside a subquery.
-        assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this\n)",
-                ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this ;; \n"));
+        // A transformation without ';' or a comment is used verbatim.
+        assertEquals("SELECT a FROM __this WHERE b = 'x'",
+                ParquetIngestionQueue.embeddable("SELECT a FROM __this WHERE b = 'x'"));
+        // One with them is re-rendered by DuckDB's parser: no terminator or comment survives.
+        String rendered = ParquetIngestionQueue.embeddable("SELECT * FROM __this; -- note");
+        assertFalse(rendered.contains(";") || rendered.contains("--"), rendered);
     }
 
     @ParameterizedTest
@@ -751,6 +754,14 @@ public class ParquetIngestionQueueTest {
             "'SELECT a * 10 AS b FROM __this;\n'",
             "SELECT a * 10 AS b FROM __this -- trailing comment",
             "WITH t AS (SELECT a * 10 AS b FROM __this) SELECT * FROM t;",
+            "SELECT a * 10 AS b FROM __this ;; ",
+            "SELECT a * 10 AS b FROM __this; -- note",
+            "'SELECT a * 10 AS b FROM __this;\n-- note'",
+            "SELECT a * 10 AS b FROM __this; /* c */",
+            "SELECT a * 10 AS b FROM __this -- a comment; with a semicolon",
+            "'-- leading comment\nSELECT a * 10 AS b FROM __this'",
+            "SELECT a * 10 AS b FROM __this WHERE '--;' <> 'x'",
+            "WITH __this AS (SELECT a * 10 AS b FROM __this) SELECT * FROM __this",
     })
     public void testAppliedTransformationExecutes(String transformation) throws Exception {
         // Every form that ran when the transformation was appended after the __this CTE must still

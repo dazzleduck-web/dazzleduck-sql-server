@@ -26,6 +26,25 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
      */
     private static final Pattern FULL_QUERY = Pattern.compile("\\s*(SELECT|WITH)\\b", Pattern.CASE_INSENSITIVE);
 
+    /**
+     * Whether {@code transformation} is a full query rather than the {@code SELECT *, <expr> FROM
+     * __this} shorthand. One that starts with {@code SELECT} or {@code WITH} is; otherwise it is
+     * one if DuckDB parses it as a statement — which covers a leading comment, a parenthesized
+     * query and FROM-first syntax ({@code FROM __this SELECT a}) — while a select-list expression
+     * such as {@code upper(level) AS lvl} does not parse and is shorthand.
+     */
+    static boolean isFullQuery(String transformation) {
+        if (FULL_QUERY.matcher(transformation).lookingAt()) {
+            return true;
+        }
+        try {
+            var tree = io.dazzleduck.sql.commons.Transformations.parseToTree(transformation);
+            return !tree.path("error").asBoolean(false) && tree.path("statements").size() == 1;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     @Override
     protected Map<String, QueueIdToTableMapping> loadMappings() {
         if (config == null || !config.hasPath(ConfigConstants.INGESTION_QUEUE_TABLE_MAPPING_KEY))
@@ -44,7 +63,7 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             }
             String transformation = c.hasPath(ConfigConstants.TRANSFORMATION_KEY)
                     ? c.getString(ConfigConstants.TRANSFORMATION_KEY) : null;
-            if (transformation != null && !FULL_QUERY.matcher(transformation).lookingAt()) {
+            if (transformation != null && !isFullQuery(transformation)) {
                 transformation = "SELECT *, " + transformation + " FROM __this";
             }
             String view       = c.hasPath(ConfigConstants.VIEW_KEY)        ? c.getString(ConfigConstants.VIEW_KEY)        : null;
