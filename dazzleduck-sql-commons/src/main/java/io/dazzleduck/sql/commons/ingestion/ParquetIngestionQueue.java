@@ -240,6 +240,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         } catch (RuntimeException e) {
             throw new RegistrationFailedException(ingestionResult.filesCreated(), e);
         }
+        // The batch is registered. Nothing below may throw: a failure here would not be a
+        // RegistrationFailedException, so nothingRegistered() would read it as "failed before
+        // registration" and the catalog-change retry could register the batch a second time.
         long postIngestDone = System.nanoTime();
         dataPhaseNanos.accumulate(copyDone - start);
         postIngestPhaseNanos.accumulate(postIngestDone - copyDone);
@@ -308,18 +311,22 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         }
     }
 
-    /** The underlying failure of an attempt, without this class's registration wrapper. */
     /**
      * Whether a failed attempt is certainly not in the table, so the batch may be written again: it
      * failed before registration (e.g. the COPY), or registration rejected its files before
      * committing ({@link FilesNotRegisteredException}). Any other registration failure — a failed
      * commit above all — may have landed.
+     *
+     * <p>"Not a {@link RegistrationFailedException}" is read as "failed before registration", which
+     * holds only because nothing in {@link #writeAndRegister} after the post-ingestion step can
+     * throw.
      */
     static boolean nothingRegistered(Exception failure) {
         return !(failure instanceof RegistrationFailedException)
                 || failure.getCause() instanceof FilesNotRegisteredException;
     }
 
+    /** The underlying failure of an attempt, without this class's registration wrapper. */
     private static Exception unwrap(Exception e) {
         return e instanceof RegistrationFailedException && e.getCause() instanceof Exception cause ? cause : e;
     }
