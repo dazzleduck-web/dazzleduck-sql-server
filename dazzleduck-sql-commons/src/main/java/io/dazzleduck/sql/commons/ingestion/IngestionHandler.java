@@ -37,6 +37,16 @@ public interface IngestionHandler {
      */
     default WatermarkSpec getWatermarkSpec(String queueId) { return null; }
 
+    /**
+     * Re-reads, right now, whatever catalog-derived state the queue's writes depend on (its
+     * transformation and partitioning), ignoring any refresh interval. Called by
+     * {@link ParquetIngestionQueue} after a failed write, so a retry is built from the current
+     * catalog instead of the cached state that may have caused the failure — for example a
+     * partition spec changed by {@code ALTER TABLE ... SET PARTITIONED BY}, which makes
+     * registering files written under the old spec fail. A no-op for handlers without cached state.
+     */
+    default void refreshNow(String queueId) {}
+
     default boolean supportPartitionByHeader() { return true; }
 
     /** Whether ingested rows carry a {@value #CLAIMS_COLUMN} MAP column from the caller's JWT. */

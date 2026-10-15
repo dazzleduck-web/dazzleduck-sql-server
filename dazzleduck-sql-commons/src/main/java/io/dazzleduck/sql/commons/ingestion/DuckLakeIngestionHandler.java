@@ -344,6 +344,17 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     // -----------------------------------------------------------------------
 
     /**
+     * Re-checks {@code schema_version} now and rebuilds the queue's state if it changed, regardless
+     * of {@code refreshInterval}. When the schema is unchanged this is one catalog query.
+     */
+    @Override
+    public void refreshNow(String queueId) {
+        String key = resolveStateKey(queueId);
+        if (key == null) return;
+        stateCache.compute(key, this::computeRefreshedState);
+    }
+
+    /**
      * Returns the current (possibly just-refreshed) {@link QueueState} for {@code queueId},
      * or {@code null} if the ID is unknown.
      *

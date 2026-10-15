@@ -50,6 +50,30 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     private final java.util.concurrent.atomic.LongAccumulator rowsWritten =
             new java.util.concurrent.atomic.LongAccumulator(Long::sum, 0L);
 
+    /** Catalog-change retries and their failures; output files of failed attempts deleted / left behind. */
+    private final java.util.concurrent.atomic.LongAdder catalogRetries = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder catalogRetryFailures = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder orphanFilesDeleted = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder orphanFilesLeft = new java.util.concurrent.atomic.LongAdder();
+
+    /**
+     * What a write is built from that can change under a running queue: the transformation and the
+     * partitioning (from the batch header, or the handler's partition columns and projections).
+     * Captured once per attempt, so the attempt is built from one consistent view and a retry can
+     * tell whether the catalog changed since.
+     */
+    private record WriteInputs(String transformation, List<String> partitionBy, List<String> partitionProjections) {}
+
+    /** A write whose files were written but whose post-ingestion step (registration) failed. */
+    private static final class RegistrationFailedException extends RuntimeException {
+        private final List<String> files;
+
+        RegistrationFailedException(List<String> files, RuntimeException cause) {
+            super(cause.getMessage(), cause);
+            this.files = files;
+        }
+    }
+
     /**
      * @param applicationId    producer identifier
      * @param inputFormat      source file format (e.g. {@code "parquet"}, {@code "arrow"})
@@ -113,23 +137,15 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     public void write(WriteTask<String, IngestionResult> writeTask) {
         logger.debug("Ingestion queue '{}' received batch with {} files, outputPath={}",
                 queueId, writeTask.bucket().batches().size(), outputPath);
+        // The COPY of the most recent attempt, for the failure log: rebuilding it there would read the
+        // handler's state again, which after a catalog refresh is not what the failed attempt ran.
+        var lastAttemptSql = new java.util.concurrent.atomic.AtomicReference<String>();
         try {
-            long start = System.nanoTime();
-            IngestionResult ingestionResult = tryWrite(writeTask);
-            long copyDone = System.nanoTime();
-            var postIngestionTask = postIngestionHandler.createPostIngestionTask(ingestionResult);
-            postIngestionTask.execute();
-            long postIngestDone = System.nanoTime();
-            dataPhaseNanos.accumulate(copyDone - start);
-            postIngestPhaseNanos.accumulate(postIngestDone - copyDone);
-            rowsWritten.accumulate(ingestionResult.rowCount());
-            recordRowsWritten(ingestionResult.rowCount());
-            logger.debug("Queue '{}' commit phases: data(COPY)={}ms, postIngest(catalog)={}ms",
-                    queueId, (copyDone - start) / 1_000_000, (postIngestDone - copyDone) / 1_000_000);
+            IngestionResult ingestionResult = writeWithCatalogRetry(writeTask, lastAttemptSql);
             writeTask.bucket().futures().forEach(action -> action.complete(ingestionResult));
         } catch (Exception e) {
-            var sql = constructWriteQuery(writeTask);
-            logger.atError().setCause(e).log("Failed to write to queue {} sql {}", queueId, sql);
+            logger.atError().setCause(e).log("Failed to write to queue {} sql {}", queueId,
+                    lastAttemptSql.get() == null ? "(not built)" : lastAttemptSql.get());
             // Propagate instead of completing the futures here: BulkIngestQueue.processWriteQueue
             // must account this bucket as failed (pendingWrite stays truthful, failed-write
             // metrics accumulate) and roll back producer sequences BEFORE the futures complete,
@@ -143,6 +159,209 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         } finally {
             cleanupInputFiles(writeTask);
         }
+    }
+
+    /**
+     * Writes and registers the batch, retrying once if the failure was caused by a catalog change.
+     *
+     * <p>The handler caches catalog-derived state (partitioning, transformation) and normally
+     * re-reads it only every refresh interval. A batch written under a stale partition spec is
+     * rejected at registration, and without this the client's resend would be written with the same
+     * stale spec and rejected again until the cache expired. So after any failure the state is
+     * re-read immediately ({@link IngestionHandler#refreshNow}); if the inputs this batch was built
+     * from changed, the batch is written again from its input files (still present: they are only
+     * deleted after this method returns) and registered. The client sees no failure. If nothing
+     * changed, or the retry fails too, the original failure propagates as before.
+     *
+     * <p>Output files of a failed attempt are deleted when the post-ingestion step reports that it
+     * rejected them before committing ({@link FilesNotRegisteredException}); otherwise they are
+     * counted as orphans, for {@code ducklake_delete_orphaned_files} to reclaim.
+     */
+    private IngestionResult writeWithCatalogRetry(WriteTask<String, IngestionResult> writeTask,
+                                                  java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql)
+            throws Exception {
+        WriteInputs used = currentWriteInputs(writeTask);
+        try {
+            return writeAndRegister(writeTask, used, lastAttemptSql);
+        } catch (Exception first) {
+            discardOutput(first);
+            if (writeTask.isCancel()) {
+                throw unwrap(first);
+            }
+            WriteInputs current;
+            try {
+                postIngestionHandler.refreshNow(queueId);
+                current = currentWriteInputs(writeTask);
+            } catch (Exception refreshFailure) {
+                Exception original = unwrap(first);
+                original.addSuppressed(refreshFailure);
+                throw original;
+            }
+            if (current.equals(used)) {
+                throw unwrap(first);
+            }
+            if (!nothingRegistered(first)) {
+                // The failed attempt may be in the table (e.g. its commit failed after landing), so
+                // writing the batch again could register every row twice. Fail it as before; the
+                // refresh above still applies to the next batch.
+                logger.atWarn().setCause(unwrap(first)).log(
+                        "Queue '{}': write failed and the catalog has changed, but the failed attempt's "
+                                + "registration outcome is unknown; not retrying, to avoid registering the batch twice",
+                        queueId);
+                throw unwrap(first);
+            }
+            catalogRetries.increment();
+            logger.atInfo().setCause(unwrap(first)).log(
+                    "Queue '{}': write failed and the catalog has changed since it was built "
+                            + "(partitioning {} -> {}, transformation changed: {}); retrying once",
+                    queueId, used.partitionBy(), current.partitionBy(),
+                    !Objects.equals(used.transformation(), current.transformation()));
+            try {
+                return writeAndRegister(writeTask, current, lastAttemptSql);
+            } catch (Exception second) {
+                discardOutput(second);
+                catalogRetryFailures.increment();
+                Exception failure = unwrap(second);
+                failure.addSuppressed(unwrap(first));
+                throw failure;
+            }
+        }
+    }
+
+    /** One attempt: COPY the batch to output files, then run the post-ingestion step (registration). */
+    private IngestionResult writeAndRegister(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs,
+                                             java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql)
+            throws Exception {
+        long start = System.nanoTime();
+        IngestionResult ingestionResult = tryWrite(writeTask, inputs, lastAttemptSql);
+        long copyDone = System.nanoTime();
+        try {
+            postIngestionHandler.createPostIngestionTask(ingestionResult).execute();
+        } catch (RuntimeException e) {
+            throw new RegistrationFailedException(ingestionResult.filesCreated(), e);
+        }
+        long postIngestDone = System.nanoTime();
+        dataPhaseNanos.accumulate(copyDone - start);
+        postIngestPhaseNanos.accumulate(postIngestDone - copyDone);
+        rowsWritten.accumulate(ingestionResult.rowCount());
+        recordRowsWritten(ingestionResult.rowCount());
+        logger.debug("Queue '{}' commit phases: data(COPY)={}ms, postIngest(catalog)={}ms",
+                queueId, (copyDone - start) / 1_000_000, (postIngestDone - copyDone) / 1_000_000);
+        return ingestionResult;
+    }
+
+    /**
+     * Deals with the output files of a failed attempt: deletes them when the post-ingestion step
+     * says it rejected them before committing, otherwise counts them as orphans. A failure before
+     * any file was reported (e.g. the COPY itself) has nothing to clean up here.
+     */
+    private void discardOutput(Exception failure) {
+        if (!(failure instanceof RegistrationFailedException registration)) {
+            return;
+        }
+        List<String> files = registration.files == null ? List.of() : registration.files;
+        if (files.isEmpty()) {
+            return;
+        }
+        if (!(registration.getCause() instanceof FilesNotRegisteredException)) {
+            // The registration outcome is unknown (e.g. the commit failed): the files may be live.
+            orphanFilesLeft.add(files.size());
+            logger.warn("Queue '{}': left {} output file(s) of a failed write in place because their "
+                    + "registration outcome is unknown: {}", queueId, files.size(), files);
+            return;
+        }
+        List<String> left = new ArrayList<>();
+        for (String file : files) {
+            if (deleteLocalFile(file)) {
+                orphanFilesDeleted.increment();
+            } else {
+                left.add(file);
+            }
+        }
+        if (!left.isEmpty()) {
+            orphanFilesLeft.add(left.size());
+            logger.warn("Queue '{}': could not delete {} rejected output file(s); reclaim them with "
+                    + "ducklake_delete_orphaned_files: {}", queueId, left.size(), left);
+        }
+    }
+
+    /**
+     * Deletes {@code file} if it is on the local filesystem (a plain path or a {@code file:} URI).
+     * Returns {@code false} for object-store paths ({@code s3://} and the like), which this class
+     * has no client for, and for local files that could not be deleted.
+     */
+    static boolean deleteLocalFile(String file) {
+        String path = file;
+        if (path.startsWith("file://")) {
+            path = path.substring("file://".length());
+        } else if (path.startsWith("file:")) {
+            path = path.substring("file:".length());
+        } else if (path.contains("://")) {
+            return false;
+        }
+        try {
+            Files.deleteIfExists(Path.of(path));
+            return true;
+        } catch (Exception e) {
+            logger.warn("Failed to delete output file of a failed write: {}", file, e);
+            return false;
+        }
+    }
+
+    /** The underlying failure of an attempt, without this class's registration wrapper. */
+    /**
+     * Whether a failed attempt is certainly not in the table, so the batch may be written again: it
+     * failed before registration (e.g. the COPY), or registration rejected its files before
+     * committing ({@link FilesNotRegisteredException}). Any other registration failure — a failed
+     * commit above all — may have landed.
+     */
+    static boolean nothingRegistered(Exception failure) {
+        return !(failure instanceof RegistrationFailedException)
+                || failure.getCause() instanceof FilesNotRegisteredException;
+    }
+
+    private static Exception unwrap(Exception e) {
+        return e instanceof RegistrationFailedException && e.getCause() instanceof Exception cause ? cause : e;
+    }
+
+    /** Writes retried once after a failure revealed a catalog change. */
+    public long getCatalogRetries() {
+        return catalogRetries.sum();
+    }
+
+    /** Catalog-change retries that failed again. */
+    public long getCatalogRetryFailures() {
+        return catalogRetryFailures.sum();
+    }
+
+    /** Output files of failed attempts that were deleted. */
+    public long getOrphanFilesDeleted() {
+        return orphanFilesDeleted.sum();
+    }
+
+    /** Output files of failed attempts left in place (object store, or registration outcome unknown). */
+    public long getOrphanFilesLeft() {
+        return orphanFilesLeft.sum();
+    }
+
+    @Override
+    protected long catalogRetries() {
+        return getCatalogRetries();
+    }
+
+    @Override
+    protected long catalogRetryFailures() {
+        return getCatalogRetryFailures();
+    }
+
+    @Override
+    protected long orphanFilesDeleted() {
+        return getOrphanFilesDeleted();
+    }
+
+    @Override
+    protected long orphanFilesLeft() {
+        return getOrphanFilesLeft();
     }
 
     /** Cumulative nanoseconds spent in the data phase (DuckDB COPY to Parquet). */
@@ -239,43 +458,50 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * watermark rows are computed over — same schema, same rows as the written output, read
      * while the input files are still local.
      */
-    private String constructSourceRelation(WriteTask<String, IngestionResult> writeTask) {
+    private String constructSourceRelation(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) {
         var batches = writeTask.bucket().batches();
         // All Arrow files
         var arrowFiles = batches.stream().map(Batch::record).map("'%s'"::formatted).collect(Collectors.joining(","));
-        String[] batchPartitionBy = batches.get(0).partitionBy();
-        boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
         String sortOrderClause = getClause(batches.get(0).sortOrder(), "ORDER BY %s ");
 
         // Inner SQL reads from the temp Arrow files
         var innerSql = "SELECT * FROM read_%s([%s]) %s".formatted(this.inputFormat, arrowFiles, sortOrderClause);
 
-        // Fetch transformation fresh from the handler on every write so view-based
-        // and handler-refreshed transformations are always current without caching.
-        String transformation = postIngestionHandler.getTransformation(queueId);
-        var querySql = applyTransformation(innerSql, transformation);
+        // The transformation is fetched fresh from the handler on every write (currentWriteInputs)
+        // so view-based and handler-refreshed transformations are always current without caching.
+        var querySql = applyTransformation(innerSql, inputs.transformation());
 
         // Add handler-supplied derived-column projections (e.g. day(timestamp) AS day) so the
         // PARTITION_BY tokens resolve. Not needed for header-supplied partitionBy, which names
         // columns that already exist in the relation.
-        if (!hasBatchPartitionBy) {
-            String[] partitionProjections = postIngestionHandler.getPartitionProjections(queueId);
-            if (partitionProjections.length > 0) {
-                querySql = "SELECT *, %s FROM (%s)".formatted(
-                        String.join(", ", partitionProjections), querySql);
-            }
+        // (Empty when the batch header supplies partitionBy — see currentWriteInputs.)
+        if (!inputs.partitionProjections().isEmpty()) {
+            querySql = "SELECT *, %s FROM (%s)".formatted(
+                    String.join(", ", inputs.partitionProjections()), querySql);
         }
         return querySql;
     }
 
-    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask) {
-        var batches = writeTask.bucket().batches();
-        String[] batchPartitionBy = batches.get(0).partitionBy();
+    /** Reads the current {@link WriteInputs} for this batch from the batch header and the handler. */
+    private WriteInputs currentWriteInputs(WriteTask<String, IngestionResult> writeTask) {
+        String[] batchPartitionBy = writeTask.bucket().batches().get(0).partitionBy();
         boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
-        String[] effectivePartitionBy = hasBatchPartitionBy
-                ? batchPartitionBy
-                : postIngestionHandler.getPartitionBy(queueId);
-        String partitionByClause = getClause(effectivePartitionBy, ", PARTITION_BY(%s)");
+        String transformation = postIngestionHandler.getTransformation(queueId);
+        if (hasBatchPartitionBy) {
+            return new WriteInputs(transformation, List.of(batchPartitionBy), List.of());
+        }
+        return new WriteInputs(transformation,
+                nonNullList(postIngestionHandler.getPartitionBy(queueId)),
+                nonNullList(postIngestionHandler.getPartitionProjections(queueId)));
+    }
+
+    private static List<String> nonNullList(String[] values) {
+        return values == null ? List.of() : Arrays.asList(values);
+    }
+
+    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) {
+        var batches = writeTask.bucket().batches();
+        String partitionByClause = getClause(inputs.partitionBy().toArray(String[]::new), ", PARTITION_BY(%s)");
         // Last format
         var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
         String fullFilePath;
@@ -286,7 +512,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
             fullFilePath = this.outputPath;
         }
 
-        var querySql = constructSourceRelation(writeTask);
+        var querySql = constructSourceRelation(writeTask, inputs);
 
         String compressionClause = parquetCompression != null && "parquet".equalsIgnoreCase(outputFormat)
                 ? ", COMPRESSION %s".formatted(parquetCompression) : "";
@@ -320,8 +546,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 queueId, variables.size(), variables.keySet());
     }
 
-    private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask) throws Exception {
-        var sql = constructWriteQuery(writeTask);
+    private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs,
+                                     java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql) throws Exception {
+        var sql = constructWriteQuery(writeTask, inputs);
+        lastAttemptSql.set(sql);
         logger.debug("Executing COPY SQL: {}", sql);
         List<String> files = new ArrayList<>();
         long count = 0;
@@ -341,7 +569,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
             applyVariables(stmt);
 
             if (watermarkSpec != null) {
-                watermarkRows = watermarkSpec.computeRows(conn, constructSourceRelation(writeTask));
+                watermarkRows = watermarkSpec.computeRows(conn, constructSourceRelation(writeTask, inputs));
             }
 
             // Set up cancellation hook

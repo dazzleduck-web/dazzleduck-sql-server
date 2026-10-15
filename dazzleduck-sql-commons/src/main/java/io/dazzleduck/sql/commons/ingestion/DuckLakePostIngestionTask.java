@@ -79,6 +79,9 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         try {
             addFilesInTransaction(files);
             logger.info("Successfully added {} files to DuckLake table {}.{}.{}", files.size(), catalogName, schemaName, tableName);
+        } catch (FilesNotRegisteredException e) {
+            logger.error("DuckLake table {}.{}.{} rejected {} files", catalogName, schemaName, tableName, files.size(), e);
+            throw e;
         } catch (SQLException e) {
             logger.error("Failed to add files to DuckLake table {}.{}.{}", catalogName, schemaName, tableName, e);
             throw new RuntimeException("Failed to execute DuckLake post-ingestion task for table " + tableName, e);
@@ -100,13 +103,67 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         boolean hasWatermark = watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty();
         try (Connection conn = ConnectionPool.getConnection()) {
             if (!hasWatermark) {
-                ConnectionPool.executeBatchInTxn(conn, queries.toArray(String[]::new));
+                executeInTxn(conn, queries, files);
                 return;
             }
             long predictedSnapshotId = predictNextSnapshotId(conn);
             queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows, predictedSnapshotId));
-            ConnectionPool.executeBatchInTxn(conn, queries.toArray(String[]::new));
+            executeInTxn(conn, queries, files);
             verifySnapshotId(conn, files, predictedSnapshotId);
+        }
+    }
+
+    /**
+     * Runs {@code queries} in one transaction, telling apart a statement that failed (nothing
+     * registered: {@link FilesNotRegisteredException}, so the caller may delete the files) from a
+     * failed commit, whose outcome is unknown and which is rethrown as a plain {@link SQLException}.
+     *
+     * <p>The error that is thrown is always the one that decides that outcome. A rollback that fails
+     * after it, or restoring auto-commit afterwards, is attached as suppressed rather than replacing
+     * it: a statement failure is still {@code FilesNotRegisteredException} when its rollback fails
+     * (commit was never called, so nothing can have been registered), and a failed commit is still
+     * reported as itself.
+     */
+    static void executeInTxn(Connection conn, List<String> queries, List<String> files) throws SQLException {
+        boolean oldAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        Throwable primary = null;
+        try {
+            try (Statement statement = conn.createStatement()) {
+                for (String sql : queries) {
+                    statement.addBatch(sql);
+                }
+                statement.executeBatch();
+            } catch (SQLException e) {
+                var rejected = new FilesNotRegisteredException("Files were rejected before commit: " + e.getMessage(), files, e);
+                rollbackQuietly(conn, rejected);
+                throw rejected;
+            }
+            try {
+                conn.commit();
+            } catch (SQLException e) {
+                // The commit may or may not have landed; end whatever is left of the transaction.
+                rollbackQuietly(conn, e);
+                throw e;
+            }
+        } catch (Throwable t) {
+            primary = t;
+            throw t;
+        } finally {
+            try {
+                conn.setAutoCommit(oldAutoCommit);
+            } catch (SQLException e) {
+                if (primary == null) throw e;
+                primary.addSuppressed(e);
+            }
+        }
+    }
+
+    private static void rollbackQuietly(Connection conn, Throwable failure) {
+        try {
+            conn.rollback();
+        } catch (SQLException e) {
+            failure.addSuppressed(e);
         }
     }
 
