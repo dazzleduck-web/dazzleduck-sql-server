@@ -739,12 +739,31 @@ public class ParquetIngestionQueueTest {
         assertEquals("SELECT 1", ParquetIngestionQueue.applyTransformation("SELECT 1", "  "));
         assertEquals("WITH __this AS (SELECT 1) SELECT * FROM (SELECT * FROM __this\n)",
                 ParquetIngestionQueue.applyTransformation("SELECT 1", "SELECT * FROM __this"));
-        // A transformation without ';' or a comment is used verbatim.
+        // A transformation is used verbatim, minus its trailing terminators and comments.
         assertEquals("SELECT a FROM __this WHERE b = 'x'",
                 ParquetIngestionQueue.embeddable("SELECT a FROM __this WHERE b = 'x'"));
-        // One with them is re-rendered by DuckDB's parser: no terminator or comment survives.
-        String rendered = ParquetIngestionQueue.embeddable("SELECT * FROM __this; -- note");
-        assertFalse(rendered.contains(";") || rendered.contains("--"), rendered);
+        assertEquals("SELECT * FROM __this", ParquetIngestionQueue.embeddable("SELECT * FROM __this; -- note"));
+    }
+
+    @Test
+    public void testTransformationWithModernLambdaSyntaxRunsWhenArrowLambdasAreDisabled() throws Exception {
+        // The transformation must reach DuckDB as written. Re-rendering it through DuckDB's parser
+        // would turn `lambda y: ...` and list comprehensions into the deprecated `y -> ...` form,
+        // which fails to bind under DISABLE_SINGLE_ARROW. lambda_syntax is a GLOBAL setting, so
+        // this runs on a private in-memory database rather than the shared pool.
+        String transformation = "SELECT list_transform([a], lambda y: y * 10)[1] AS b, "
+                + "[x FOR x IN [a] IF x >= 0][1] AS c FROM __this; -- trailing note";
+        String sql = ParquetIngestionQueue.applyTransformation("SELECT range AS a FROM range(3)", transformation)
+                + " ORDER BY b";
+        try (var conn = java.sql.DriverManager.getConnection("jdbc:duckdb:");
+             var st = conn.createStatement()) {
+            st.execute("SET lambda_syntax = 'DISABLE_SINGLE_ARROW'");
+            var values = new java.util.ArrayList<Long>();
+            try (var rs = st.executeQuery(sql)) {
+                while (rs.next()) values.add(rs.getLong(1));
+            }
+            assertIterableEquals(java.util.List.of(0L, 10L, 20L), values);
+        }
     }
 
     @ParameterizedTest
@@ -762,6 +781,9 @@ public class ParquetIngestionQueueTest {
             "'-- leading comment\nSELECT a * 10 AS b FROM __this'",
             "SELECT a * 10 AS b FROM __this WHERE '--;' <> 'x'",
             "WITH __this AS (SELECT a * 10 AS b FROM __this) SELECT * FROM __this",
+            "SELECT a * 10 AS b FROM __this /* outer /* nested */ still */ ;",
+            "SELECT a * 10 AS b FROM __this WHERE E'\\';--' <> 'x'; -- note",
+            "SELECT a * 10 AS b FROM __this WHERE $$;--$$ <> 'x'; -- note",
     })
     public void testAppliedTransformationExecutes(String transformation) throws Exception {
         // Every form that ran when the transformation was appended after the __this CTE must still

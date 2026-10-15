@@ -79,6 +79,12 @@ public abstract class AbstractIngestionTaskFactoryProvider implements IngestionT
     }
 
     protected static void validateTransformation(String ingestionQueue, String transformation) {
+        // The transformation is embedded in the write's statement, so a second statement would make
+        // every write for the queue fail; only the first would be checked below.
+        if (TransformationText.hasMultipleStatements(transformation)) {
+            throw new IllegalArgumentException(
+                    "transformation for queue '%s' must be a single statement".formatted(ingestionQueue));
+        }
         try {
             var ast = Transformations.parseToTree(transformation);
             var statementNode = Transformations.getFirstStatementNode(ast);

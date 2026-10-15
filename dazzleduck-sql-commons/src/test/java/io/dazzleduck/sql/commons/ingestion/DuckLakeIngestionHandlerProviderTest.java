@@ -209,6 +209,37 @@ public class DuckLakeIngestionHandlerProviderTest {
     }
 
     @Test
+    public void testShorthandWithTrailingCommentOrSemicolonIsWrappedValidly() {
+        // Appended verbatim, a trailing comment swallowed " FROM __this" and a trailing ';' ended the
+        // statement before it; both are trimmed before wrapping.
+        var provider = providerFromHocon("""
+            ingestion_queue_table_mapping = [
+                { ingestion_queue = "a", catalog = "loglake", schema = "main", table = "a",
+                  transformation = "upper(level) AS lvl -- uppercase the level" },
+                { ingestion_queue = "b", catalog = "loglake", schema = "main", table = "b",
+                  transformation = "upper(level) AS lvl;" }
+            ]
+            """);
+        var mappings = provider.loadMappings();
+        assertEquals("SELECT *, upper(level) AS lvl FROM __this", mappings.get("a").transformation());
+        assertEquals("SELECT *, upper(level) AS lvl FROM __this", mappings.get("b").transformation());
+        assertDoesNotThrow(provider::validate);
+    }
+
+    @Test
+    public void testValidateRejectsMultipleStatements() {
+        // Only the first statement used to be checked, and the write then failed on every batch.
+        var provider = providerFromHocon("""
+            ingestion_queue_table_mapping = [{
+                ingestion_queue = "log", catalog = "loglake", schema = "main", table = "log"
+                transformation = "SELECT * FROM __this; SELECT 1"
+            }]
+            """);
+        var e = assertThrows(IllegalArgumentException.class, provider::validate);
+        assertTrue(e.getMessage().contains("single statement"), e.getMessage());
+    }
+
+    @Test
     public void testValidatePassesWithNoTransformation() {
         var provider = providerFromHocon("""
             ingestion_queue_table_mapping = [{

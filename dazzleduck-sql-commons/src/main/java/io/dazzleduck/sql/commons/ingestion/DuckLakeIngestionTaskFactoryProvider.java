@@ -64,7 +64,9 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             String transformation = c.hasPath(ConfigConstants.TRANSFORMATION_KEY)
                     ? c.getString(ConfigConstants.TRANSFORMATION_KEY) : null;
             if (transformation != null && !isFullQuery(transformation)) {
-                transformation = "SELECT *, " + transformation + " FROM __this";
+                // Trailing ';' or a trailing comment would otherwise end the statement early or
+                // swallow the appended FROM.
+                transformation = "SELECT *, " + TransformationText.stripTrailing(transformation) + " FROM __this";
             }
             String view       = c.hasPath(ConfigConstants.VIEW_KEY)        ? c.getString(ConfigConstants.VIEW_KEY)        : null;
             String inputTable = c.hasPath(ConfigConstants.INPUT_TABLE_KEY) ? c.getString(ConfigConstants.INPUT_TABLE_KEY) : null;
