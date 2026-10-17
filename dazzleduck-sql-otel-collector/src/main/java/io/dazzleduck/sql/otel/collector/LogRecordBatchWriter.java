@@ -24,11 +24,18 @@ public class LogRecordBatchWriter {
         write(entries, root, true);
     }
 
+    public static void write(List<LogEntry> entries, VectorSchemaRoot root, boolean stringCopy) {
+        write(entries, root, stringCopy, null);
+    }
+
     /**
      * @param stringCopy also write every non-string attribute value, as text, to the
      *                   {@code attributes} / {@code resource_attributes} string maps
+     * @param scan       collects the batch's attribute name/type mappings for
+     *                   {@link AttributeTypeRegistry}, or null to collect nothing
      */
-    public static void write(List<LogEntry> entries, VectorSchemaRoot root, boolean stringCopy) {
+    public static void write(List<LogEntry> entries, VectorSchemaRoot root, boolean stringCopy,
+                             AttributeTypeScan scan) {
         root.allocateNew();
 
         TimeStampMilliVector tsVec      = (TimeStampMilliVector) root.getVector(OtelLogSchema.COL_TIMESTAMP);
@@ -44,9 +51,11 @@ public class LogRecordBatchWriter {
         VarCharVector scopeVersionVec   = (VarCharVector)        root.getVector(OtelLogSchema.COL_SCOPE_VERSION);
 
         AttributeMapsWriter attrWriter = AttributeMapsWriter.of(root,
-                OtelLogSchema.COL_ATTRIBUTES, OtelLogSchema.COL_TYPED_ATTRIBUTES, stringCopy, entries.size());
+                OtelLogSchema.COL_ATTRIBUTES, OtelLogSchema.COL_TYPED_ATTRIBUTES, stringCopy, entries.size(),
+                AttributeTypeScan.cursorOf(scan, AttributeScope.ATTRIBUTE));
         AttributeMapsWriter resAttrWriter = AttributeMapsWriter.of(root,
-                OtelLogSchema.COL_RESOURCE_ATTRIBUTES, OtelLogSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy, entries.size());
+                OtelLogSchema.COL_RESOURCE_ATTRIBUTES, OtelLogSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy,
+                entries.size(), AttributeTypeScan.cursorOf(scan, AttributeScope.RESOURCE));
 
         for (int i = 0; i < entries.size(); i++) {
             LogEntry entry = entries.get(i);

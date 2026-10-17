@@ -266,12 +266,21 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         if (files.isEmpty()) {
             return;
         }
-        if (!(registration.getCause() instanceof FilesNotRegisteredException)) {
+        if (!(registration.getCause() instanceof FilesNotRegisteredException rejected)) {
             // The registration outcome is unknown (e.g. the commit failed): the files may be live.
             orphanFilesLeft.add(files.size());
             logger.warn("Queue '{}': left {} output file(s) of a failed write in place because their "
                     + "registration outcome is unknown: {}", queueId, files.size(), files);
             return;
+        }
+        // The rejecting task's own list is authoritative, not just this write's output: a post
+        // ingestion task may have written files the write path never saw — a sidecar's rows, for
+        // instance — and they are equally unreferenced once the registration is rejected. Unioned
+        // rather than replaced so a task that reports nothing still gets its output cleaned up.
+        if (!rejected.files().isEmpty()) {
+            List<String> union = new ArrayList<>(files);
+            rejected.files().stream().filter(f -> !union.contains(f)).forEach(union::add);
+            files = union;
         }
         List<String> left = new ArrayList<>();
         for (String file : files) {
@@ -612,6 +621,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
                 writeTask.bucket().getProducerMaxBatchId(),
                 count,
-                files, sql, watermarkRows);
+                files, sql, watermarkRows,
+                // The bucket's batches' sidecar rows, unioned: one COPY registers one set of files,
+                // so they commit together with it or not at all.
+                SidecarRows.union(writeTask.bucket().batches().stream().map(Batch::sidecarRows).toList()));
     }
 }

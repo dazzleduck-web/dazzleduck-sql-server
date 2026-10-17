@@ -34,6 +34,7 @@ public class OtelTraceService extends TraceServiceGrpc.TraceServiceImplBase impl
     private final OtelCollectorMetrics metrics;
     private final OtelServiceBase base;
     private final boolean attributesStringCopy;
+    private final AttributeTypeRegistry attributeTypes;
 
     public OtelTraceService(Path scratchDir, IngestionHandler handler, IngestionConfig ingestionConfig,
                             ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics) {
@@ -44,8 +45,16 @@ public class OtelTraceService extends TraceServiceGrpc.TraceServiceImplBase impl
     public OtelTraceService(Path scratchDir, IngestionHandler handler, IngestionConfig ingestionConfig,
                             ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics,
                             boolean attributesStringCopy) {
+        this(scratchDir, handler, ingestionConfig, flushScheduler, metrics, attributesStringCopy, null);
+    }
+
+    /** @param attributeTypes records the attribute name/type mappings seen; null records none */
+    public OtelTraceService(Path scratchDir, IngestionHandler handler, IngestionConfig ingestionConfig,
+                            ScheduledExecutorService flushScheduler, OtelCollectorMetrics metrics,
+                            boolean attributesStringCopy, AttributeTypeRegistry attributeTypes) {
         this.metrics = metrics;
         this.attributesStringCopy = attributesStringCopy;
+        this.attributeTypes = attributeTypes;
         this.base = new OtelServiceBase(scratchDir, handler, ingestionConfig, flushScheduler, metrics);
     }
 
@@ -71,10 +80,37 @@ public class OtelTraceService extends TraceServiceGrpc.TraceServiceImplBase impl
         var sample = metrics.startSample();
 
         try {
+            String typesTable = base.attributeTypesTable(queueId);
+            AttributeTypeScan scan = AttributeTypeRegistry.scanFor(attributeTypes, queueId, typesTable);
             Path arrowFile = base.writeArrowFile(queueId, entries, OtelTraceSchema.SCHEMA,
-                    (batch, root) -> SpanBatchWriter.write(batch, root, attributesStringCopy));
-            base.addBatch(queue, arrowFile).whenComplete(
-                    OtelServiceBase.batchCompleteHandler(arrowFile, spanCount, queueId,
+                    (batch, root) -> SpanBatchWriter.write(batch, root, attributesStringCopy, scan));
+            // The mappings this batch is the first to carry ride its registration transaction, so
+            // they are settled by its own outcome rather than written on a timer.
+            // Null rather than an empty claim when the queue records nothing: a claim is a thing
+            // to be settled exactly once, and there is nothing to settle here.
+            AttributeTypeRegistry.Claim claimed = scan == null ? null
+                    : attributeTypes.claim(queueId, Signal.TRACES, scan);
+            // addBatch can throw before it returns a future — a rejected queue, or sizing the
+            // file — and then nothing would ever settle the claim, so it would stay in flight for
+            // the life of the process. Only that call is guarded: the handler below settles on
+            // completion, and once it is attached a second settle here would decrement the gauge
+            // twice, since settle is not idempotent.
+            java.util.concurrent.CompletableFuture<Void> added;
+            try {
+                added = base.addBatch(queue, arrowFile,
+                        scan == null ? null : attributeTypes.sidecar(claimed, typesTable));
+            } catch (Throwable t) {
+                if (scan != null) {
+                    attributeTypes.settle(claimed, false);
+                }
+                throw t;
+            }
+            added.whenComplete((v, ex) -> {
+                        if (scan != null) {
+                            attributeTypes.settle(claimed, ex == null);
+                        }
+                    })
+                    .whenComplete(OtelServiceBase.batchCompleteHandler(arrowFile, spanCount, queueId,
                             sample, metrics,
                             responseObserver, ExportTraceServiceResponse.getDefaultInstance()));
         } catch (IOException e) {

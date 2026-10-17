@@ -66,6 +66,16 @@ public class CollectorProperties {
     private CompactionSettings compactionSettings =
             CompactionSettings.disabled();
 
+    private AttributeTypeSettings attributeTypeSettings = AttributeTypeSettings.defaults();
+
+    public AttributeTypeSettings getAttributeTypeSettings() {
+        return attributeTypeSettings;
+    }
+
+    public void setAttributeTypeSettings(AttributeTypeSettings attributeTypeSettings) {
+        this.attributeTypeSettings = attributeTypeSettings;
+    }
+
     private QuerySettings querySettings = QuerySettings.disabled();
 
     public QuerySettings getQuerySettings() {

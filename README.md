@@ -583,6 +583,39 @@ A malformed spec (partial keys, blanks, typos in `watermark_*` keys) fails at st
 than per batch. Watermarks are not available for queues registered via the dynamic SQLite
 provider, whose registry does not store `additional_parameters`.
 
+### Attribute type registry
+
+The OTel collector routes each attribute into the map column its OTLP value type selects, so a
+service that sends `x` as a string in one release and as an int in the next moves its values from
+`attributes` to `attributes_int`. A queue mapping can record that, in the **same transaction** as
+the DuckLake file registration, so a registered file always has its mappings committed. Configure
+under `additional_parameters`:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `attribute_types_table` | No | Registry table (same catalog/schema as the target table), created on first use. Omit it and this stream records nothing |
+
+Several streams may name the same table and share it — their rows stay apart by the
+`ingestion_queue` column — or each may name its own. The table holds one row per
+`(ingestion_queue, signal, attribute_scope, attribute_name, value_type)` with `first_seen` and the
+collector that wrote it, and rows reach it the way data does: written as a Parquet file and
+registered, never inserted. It is **append-only and tolerates duplicates**: a write reads nothing,
+so it cannot conflict with another process recording the same value, and two collectors seeing a
+mapping for the first time both record it — deduplicate when reading. Each process builds a cache
+of what is already there at startup, so a restart does not re-append it. Types are recorded, never
+enforced: a type change is written down, not rejected.
+
+```sql
+-- the current type of each attribute
+SELECT ingestion_queue, signal, attribute_scope, attribute_name,
+       arg_max(value_type, first_seen) AS current_type
+FROM otel_attribute_types GROUP BY ALL;
+```
+
+Process-wide settings (a global off switch and the in-memory cap) live under
+`otel_collector.attribute_types`. Like watermarks, this is DuckLake-only and unavailable for
+dynamically registered queues.
+
 ### The snapshot id column
 
 Every watermark row records the DuckLake snapshot its batch committed in, so the watermark table

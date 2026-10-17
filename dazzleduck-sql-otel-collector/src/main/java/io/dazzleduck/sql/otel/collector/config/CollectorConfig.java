@@ -336,6 +336,13 @@ public class CollectorConfig {
         return config.hasPath(path) ? CompactionSettings.from(config.getConfig(path)) : CompactionSettings.disabled();
     }
 
+    /** The {@code attribute_types} block, parsed strictly; disabled when the block is absent. */
+    public AttributeTypeSettings getAttributeTypeSettings() {
+        String path = CONFIG_PREFIX + ".attribute_types";
+        return config.hasPath(path)
+                ? AttributeTypeSettings.from(config.getConfig(path)) : AttributeTypeSettings.defaults();
+    }
+
     /** The {@code query} block, parsed strictly; disabled when the block is absent. */
     public QuerySettings getQuerySettings() {
         String path = CONFIG_PREFIX + ".query";
@@ -362,6 +369,7 @@ public class CollectorConfig {
         props.setAttributesStringCopy(getAttributesStringCopy());
         props.setCompactionSettings(getCompactionSettings());
         props.setQuerySettings(getQuerySettings());
+        props.setAttributeTypeSettings(getAttributeTypeSettings());
         return props;
     }
 
