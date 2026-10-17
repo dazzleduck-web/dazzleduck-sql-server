@@ -562,6 +562,66 @@ catalog's schema version changes (which includes view DDL), altering the view up
 transformation at runtime — no config change or restart needed. The dynamic SQLite provider
 supports the same pair via its `view_name` / `input_table` registry columns.
 
+### Data inlining must be off, and startup proves it
+
+DuckLake can keep a small write in the catalog database instead of writing a Parquet file, when
+`data_inlining_row_limit` is above zero — and **its default is 10**, so inlining is on unless
+something says otherwise. The row is real and queryable, but it lives in the catalog until
+`ducklake_flush_inlined_data` runs, and compaction is off by default, so on a default deployment it
+never reaches storage.
+
+That matters most where the catalog is shared. A production DuckLake catalog is Postgres or MySQL,
+and inlined rows are *data* in it — so every batch writes data rows into a remote transactional
+database on the insertion path, which is write amplification and contention on the one component
+every writer shares. Many small files are a solved problem (`ducklake_merge_adjacent_files`); data
+rows on every insert's critical path are not.
+
+So any server configuring DuckLake ingestion (the query server and the OTel collector alike),
+**when at least one of its queues configures a watermark table**:
+
+1. sets `ducklake_default_data_inlining_row_limit = 0` for its DuckDB instance at startup, and
+2. **checks the effective limit of every table it writes with SQL — the watermark tables — and
+   refuses to start** when any is above zero, naming the table, the source that set it, and the
+   statement that fixes it.
+
+The condition matters, because step 1 is **instance-wide**: it moves the default for every DuckLake
+attached to that DuckDB instance, including catalogs the server does not own, so every small
+`INSERT`, `UPDATE` or `DELETE` on them becomes its own file too. With no watermark configured there
+is nothing on the ingestion path to protect — target tables are registered files, which inlining
+cannot touch — so the setting is left alone rather than changing other people's writes for no
+benefit. It is logged when it is applied.
+
+Step 2 exists because step 1 guarantees nothing on its own: a table-, schema- or catalog-scoped
+option, and the `ATTACH` parameter, all override the instance setting. The check resolves all five
+sources per table, in DuckLake's own order (table → schema → catalog → `ATTACH` → setting), and the
+`ATTACH` parameter is **not** visible in `ducklake_options()` — it is read from
+`duckdb_databases().options`, which is the trap any reimplementation falls into.
+
+Target tables need no check: files are registered there, never inserted, and inlining cannot affect
+a registration. Only the watermark insert is SQL.
+
+```
+Data inlining is enabled for 'my_catalog.main.ingest_watermark' (10 rows, from the ATTACH
+parameter DATA_INLINING_ROW_LIMIT), so its rows would be written into the catalog database
+instead of storage, on the insertion path of every batch. Fix the source: remove
+DATA_INLINING_ROW_LIMIT from the ATTACH of 'my_catalog'. If that catalog is not yours to
+change, exempt this table instead:
+  CALL my_catalog.set_option('data_inlining_row_limit', 0, table_name => 'main.ingest_watermark');
+```
+
+The source's own fix comes first because a table option is stored in the shared catalog and so
+applies to every process touching that table, whereas an `ATTACH` parameter is one line in this
+server's startup script.
+
+Two consequences worth expecting. **More, smaller files**, until compaction merges them — a
+partition-pruning fixture in this repo went from 6 files to 9 when the rule landed, because its
+inserts had been collapsing into inlined data. And **the watermark table gains data files of its
+own**, in the same snapshot as the data it describes, so a query joining `ducklake_data_file` on
+`begin_snapshot` without restricting to a table will now match watermark rows too.
+
+Turning inlining off does not flush rows already inlined; that is
+`ducklake_flush_inlined_data`, a compaction concern.
+
 ### Watermarks
 
 A queue mapping can commit a watermark row per ingested batch, in the **same transaction** as

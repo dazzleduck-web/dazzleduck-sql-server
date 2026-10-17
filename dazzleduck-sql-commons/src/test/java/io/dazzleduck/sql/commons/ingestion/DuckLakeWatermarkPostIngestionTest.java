@@ -29,8 +29,20 @@ class DuckLakeWatermarkPostIngestionTest {
     @TempDir Path tempDir;
     static final String CATALOG = "watermark_lake";
 
+    /**
+     * Production runs with inlining off once the ingestion rule disables it, so this test does too
+     * — stated here rather than inherited. The setting belongs to the whole DuckDB instance, and
+     * these assertions previously passed in inlining-off mode only because another test happened to
+     * run first and leave it at 0. Remembered and restored, since leaving it moved is the same
+     * pollution in the other direction.
+     */
+    private String inliningBefore;
+
     @BeforeEach
     void setUp() throws Exception {
+        inliningBefore = ConnectionPool.collectFirst(
+                "SELECT current_setting('%s')::VARCHAR".formatted(DuckLakeInlining.SETTING), String.class);
+        ConnectionPool.execute("SET GLOBAL %s = 0".formatted(DuckLakeInlining.SETTING));
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.executeBatchInTxn(conn, new String[]{
                     "ATTACH 'ducklake:%s' AS %s (DATA_PATH '%s')".formatted(
@@ -45,6 +57,9 @@ class DuckLakeWatermarkPostIngestionTest {
     void tearDown() throws Exception {
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.execute(conn, "DETACH " + CATALOG);
+        }
+        if (inliningBefore != null) {
+            ConnectionPool.execute("SET GLOBAL %s = %s".formatted(DuckLakeInlining.SETTING, inliningBefore));
         }
     }
 
@@ -241,11 +256,22 @@ class DuckLakeWatermarkPostIngestionTest {
                     "SELECT count(DISTINCT min_commit_snapshot_id)::VARCHAR AS r FROM %s.main.ingest_watermark".formatted(CATALOG)));
             assertEquals(List.of("0"), collect(conn,
                     "SELECT count(*)::VARCHAR AS r FROM %s.main.ingest_watermark WHERE min_commit_snapshot_id IS NULL".formatted(CATALOG)));
-            // each row carries the snapshot of its own file
+            // The mode this test claims: watermark rows are data files, not inlined catalog rows.
+            assertEquals(List.of("true"), collect(conn, ("""
+                    SELECT (count(*) > 0)::VARCHAR AS r FROM __ducklake_metadata_%s.ducklake_data_file f
+                    JOIN __ducklake_metadata_%s.ducklake_table t
+                      ON t.table_id = f.table_id AND t.table_name = 'ingest_watermark'""")
+                    .formatted(CATALOG, CATALOG)),
+                    "with inlining off the watermark rows must be files, as they are in production");
+            // each row carries the snapshot of its own file. Restricted to the DATA table's files:
+            // with inlining off the watermark table has data files of its own, committed in the
+            // same snapshot, so an unrestricted join matches every row twice.
             assertEquals(List.of("king", "pierce"), collect(conn, ("""
                     SELECT w.county AS r FROM %s.main.ingest_watermark w
                     JOIN __ducklake_metadata_%s.ducklake_data_file f ON f.begin_snapshot = w.min_commit_snapshot_id
-                    ORDER BY w.county""").formatted(CATALOG, CATALOG)));
+                    JOIN __ducklake_metadata_%s.ducklake_table t
+                      ON t.table_id = f.table_id AND t.table_name = 'facts'
+                    ORDER BY w.county""").formatted(CATALOG, CATALOG, CATALOG)));
         }
     }
 

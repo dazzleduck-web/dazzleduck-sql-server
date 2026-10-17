@@ -14,9 +14,11 @@ public class DuckLakePartitionPruningTest {
 
     // Expected file counts after partition pruning.
     // DuckDB 1.5.2+ stores INSERTs as inlined data; ducklake_flush_inlined_data materialises them into
-    // parquet files. The 7 inserts collapse into 4 parquet files (grouped by partition) + 2 manual = 6.
+    // parquet files. With inlining off (see setup) each of the 7 inserts writes its own file, so
+    // there is nothing to collapse: 7 from inserts + 2 manual = 9. They were previously inlined and
+    // then flushed, which grouped them by partition into 4.
     private static final int EXPECTED_FILES_WITH_FILTER = 2; // Files matching key = 'k52' filter
-    private static final int EXPECTED_FILES_NO_FILTER = 6; // Total parquet files after flush (4 from inserts + 2 manual)
+    private static final int EXPECTED_FILES_NO_FILTER = 9;
 
     @TempDir
     static Path WORKSPACE;
@@ -28,20 +30,38 @@ public class DuckLakePartitionPruningTest {
     public static final String QUALIFIED_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, PARTITIONED_TABLE);
     public static final String QUALIFIED_NON_PARTITIONED_TABLE = "%s.%s".formatted(DATABASE, NON_PARTITIONED_TABLE);
 
+    private static String settingBefore;
+
+    @AfterAll
+    public static void tearDown() {
+        if (settingBefore != null) {
+            ConnectionPool.execute("SET GLOBAL ducklake_default_data_inlining_row_limit = " + settingBefore);
+        }
+    }
+
     @BeforeAll
-    public static void setup() throws IOException {
+    public static void setup() throws Exception {
         String workspacePath = WORKSPACE.toString();
         ConnectionPool.executeBatch(new String[]{
                 "INSTALL ducklake",
                 "LOAD ducklake",
                 "ATTACH 'ducklake:%s/metadata' AS %s (DATA_PATH '%s/data')".formatted(workspacePath, DATABASE, workspacePath),
         });
+        // Pruning reads ducklake_data_file, so every row has to be IN a file. Inlining keeps small
+        // inserts in the catalog instead, and its limit belongs to the whole DuckDB instance —
+        // which other tests in this JVM also move — so this fixture states what it needs rather
+        // than inheriting whatever ran before it.
+        // Remembered and restored in tearDown: setting it and leaving it is the same pollution in
+        // the other direction, changing how many files later tests' inserts produce.
+        settingBefore = ConnectionPool.collectFirst(
+                "SELECT current_setting('ducklake_default_data_inlining_row_limit')::VARCHAR", String.class);
+        ConnectionPool.execute("SET GLOBAL ducklake_default_data_inlining_row_limit = 0");
         DuckLakeTestFixture.createTestTable(QUALIFIED_PARTITIONED_TABLE, true);
         DuckLakeTestFixture.addDataFile(DATABASE, workspacePath + "/data/main/" + PARTITIONED_TABLE, PARTITIONED_TABLE, true);
         DuckLakeTestFixture.createTestTable(QUALIFIED_NON_PARTITIONED_TABLE, false);
         DuckLakeTestFixture.addDataFile(DATABASE, workspacePath + "/data/main/" + NON_PARTITIONED_TABLE, NON_PARTITIONED_TABLE, false);
-        // DuckDB 1.5.2+ stores INSERTs as inlined metadata; flush materialises them as parquet files
-        // so that ducklake_data_file reflects all data and partition pruning can apply file-level stats.
+        // A no-op now that inlining is off above, but kept: it is still correct if anything lands
+        // inlined, and pruning can only see rows that are in a file.
         ConnectionPool.execute("CALL ducklake_flush_inlined_data('" + DATABASE + "')");
     }
 

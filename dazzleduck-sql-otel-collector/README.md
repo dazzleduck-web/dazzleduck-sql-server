@@ -444,6 +444,14 @@ otel_collector {
                 # editing the view updates the transformation at runtime, no restart:
                 # view        = "my_catalog.main.logs_transform"
                 # input_table = "my_catalog.main.raw_logs"
+                # NOTE: configuring a watermark table means DuckLake data inlining must be off
+                # for it. The collector sets the instance limit to 0 at startup and then CHECKS
+                # each watermark table's effective limit — a table-, schema- or catalog-scoped
+                # option, or the ATTACH parameter, overrides that setting — and REFUSES TO START
+                # when any is above zero, naming the table and the statement that fixes it. An
+                # inlined row waits in the catalog database for ducklake_flush_inlined_data, which
+                # a deployment without compaction never runs. See the root README,
+                # "Data inlining must be off", for the five sources and the remedy.
                 # additional_parameters {   # optional per-batch watermark row, committed
                 #     watermark_table                = "ingest_watermark"   # with the file registration
                 #     watermark_timestamp_column     = "timestamp"

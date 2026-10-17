@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import com.typesafe.config.ConfigFactory;
+import io.dazzleduck.sql.commons.ConnectionPool;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -164,6 +165,33 @@ class DynamicDuckLakeIngestionTaskFactoryProviderTest {
                 "SELECT id, ts FROM __this");
 
         assertDoesNotThrow(() -> providerFor(dbPath).validate());
+    }
+
+    /**
+     * The inlining rule's instance-wide {@code SET GLOBAL} must not fire when nothing here writes
+     * with SQL. A dynamic queue cannot configure a watermark — its registry stores no
+     * {@code additional_parameters} — so every write of this provider's queues is a registered
+     * file, which inlining cannot touch. Zeroing the setting anyway would change every small
+     * {@code INSERT} on every DuckLake attached to the instance, including a user's own, for no
+     * benefit on this path.
+     */
+    @Test
+    void validateLeavesTheInliningSettingAloneWhenNoQueueWritesWatermarkRows() throws Exception {
+        String dbPath = tempDir.resolve("test.db").toString();
+        initDb(dbPath);
+        insertQueue(dbPath, "logs", "loglake", "main", "logs", null);
+
+        String before = ConnectionPool.collectFirst(
+                "SELECT current_setting('%s')::VARCHAR".formatted(DuckLakeInlining.SETTING), String.class);
+        try {
+            ConnectionPool.execute("SET GLOBAL %s = 7".formatted(DuckLakeInlining.SETTING));
+            assertDoesNotThrow(() -> providerFor(dbPath).validate());
+            assertEquals("7", ConnectionPool.collectFirst(
+                    "SELECT current_setting('%s')::VARCHAR".formatted(DuckLakeInlining.SETTING), String.class),
+                    "no watermark table is configured, so the rule has nothing here to protect");
+        } finally {
+            ConnectionPool.execute("SET GLOBAL %s = %s".formatted(DuckLakeInlining.SETTING, before));
+        }
     }
 
     @Test
