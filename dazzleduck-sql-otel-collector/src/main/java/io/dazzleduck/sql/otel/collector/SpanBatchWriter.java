@@ -5,7 +5,7 @@ import io.opentelemetry.proto.resource.v1.Resource;
 import io.opentelemetry.proto.trace.v1.Span;
 import io.opentelemetry.proto.trace.v1.Status;
 import org.apache.arrow.vector.BigIntVector;
-import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 
@@ -37,8 +37,8 @@ public class SpanBatchWriter {
         VarCharVector parentSpanIdVec   = (VarCharVector)        root.getVector(OtelTraceSchema.COL_PARENT_SPAN_ID);
         VarCharVector nameVec           = (VarCharVector)        root.getVector(OtelTraceSchema.COL_NAME);
         VarCharVector kindVec           = (VarCharVector)        root.getVector(OtelTraceSchema.COL_KIND);
-        TimeStampMilliVector startVec   = (TimeStampMilliVector) root.getVector(OtelTraceSchema.COL_START_TIME_MS);
-        TimeStampMilliVector endVec     = (TimeStampMilliVector) root.getVector(OtelTraceSchema.COL_END_TIME_MS);
+        TimeStampMilliTZVector startVec   = (TimeStampMilliTZVector) root.getVector(OtelTraceSchema.COL_START_TIME_MS);
+        TimeStampMilliTZVector endVec     = (TimeStampMilliTZVector) root.getVector(OtelTraceSchema.COL_END_TIME_MS);
         BigIntVector durationVec        = (BigIntVector)         root.getVector(OtelTraceSchema.COL_DURATION_MS);
         VarCharVector statusCodeVec     = (VarCharVector)        root.getVector(OtelTraceSchema.COL_STATUS_CODE);
         VarCharVector statusMsgVec      = (VarCharVector)        root.getVector(OtelTraceSchema.COL_STATUS_MESSAGE);

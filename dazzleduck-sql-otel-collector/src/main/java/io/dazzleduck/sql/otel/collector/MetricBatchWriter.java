@@ -11,7 +11,7 @@ import io.opentelemetry.proto.resource.v1.Resource;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.Float8Vector;
-import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.ListVector;
@@ -48,8 +48,8 @@ public class MetricBatchWriter {
         VarCharVector descVec           = (VarCharVector)        root.getVector(OtelMetricSchema.COL_DESCRIPTION);
         VarCharVector unitVec           = (VarCharVector)        root.getVector(OtelMetricSchema.COL_UNIT);
         VarCharVector typeVec           = (VarCharVector)        root.getVector(OtelMetricSchema.COL_METRIC_TYPE);
-        TimeStampMilliVector startVec   = (TimeStampMilliVector) root.getVector(OtelMetricSchema.COL_START_TIME_MS);
-        TimeStampMilliVector timeVec    = (TimeStampMilliVector) root.getVector(OtelMetricSchema.COL_TIME_MS);
+        TimeStampMilliTZVector startVec   = (TimeStampMilliTZVector) root.getVector(OtelMetricSchema.COL_START_TIME_MS);
+        TimeStampMilliTZVector timeVec    = (TimeStampMilliTZVector) root.getVector(OtelMetricSchema.COL_TIME_MS);
         VarCharVector scopeNameVec      = (VarCharVector)        root.getVector(OtelMetricSchema.COL_SCOPE_NAME);
         VarCharVector scopeVersionVec   = (VarCharVector)        root.getVector(OtelMetricSchema.COL_SCOPE_VERSION);
         Float8Vector valueDoubleVec     = (Float8Vector)         root.getVector(OtelMetricSchema.COL_VALUE_DOUBLE);
@@ -193,7 +193,7 @@ public class MetricBatchWriter {
                                   String metricType, long startNanos, long timeNanos,
                                   List<KeyValue> attributes,
                                   VarCharVector nameVec, VarCharVector descVec, VarCharVector unitVec,
-                                  VarCharVector typeVec, TimeStampMilliVector startVec, TimeStampMilliVector timeVec,
+                                  VarCharVector typeVec, TimeStampMilliTZVector startVec, TimeStampMilliTZVector timeVec,
                                   AttributeMapsWriter attrWriter, AttributeMapsWriter resAttrWriter,
                                   VarCharVector scopeNameVec, VarCharVector scopeVersionVec) {
         writeVarChar(nameVec, row, metric.getName());

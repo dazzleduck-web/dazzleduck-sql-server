@@ -254,12 +254,30 @@ and its export ack returned rather than the call being cut off mid-RPC.
 
 All schemas flatten the OTLP 3-level hierarchy (Resource → Scope → Record). Resource and scope fields are promoted to top-level columns. Queues with `extract_claims = true` additionally get a trailing `claims` map column (see [JWT Claims Column](#jwt-claims-column)); the tables below show the base schemas.
 
+### Timestamps
+
+Every timestamp column is written as `Timestamp(ms, UTC)`: OTLP times are instants (nanoseconds since the Unix epoch),
+written at millisecond precision and marked as UTC. DuckDB reads them as `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ`), so
+`timestamp >= now() - INTERVAL 1 DAY` compares instants directly and is pushed down to the scan.
+
+- **The collector's DuckDB instance defaults to `TimeZone = 'UTC'`**, set before `ingestion.connection_settings` and
+  the startup script (either can override it). DuckDB turns an instant into calendar parts in the session's time zone,
+  so transformations like `CAST(timestamp AS DATE)`, partition expressions and DuckLake time partitions keep giving UTC
+  results whatever the host's zone.
+- **Readers:** a bare literal such as `'2026-10-18 00:00:00'` is read in the reader's session time zone; write an
+  offset (`'2026-10-18 00:00:00+00'`) or run the session in UTC.
+- **Existing DuckLake tables:** DuckLake registers a file only if its column types match the table's, so a target table
+  (or watermark table) whose timestamp columns are `TIMESTAMP` rejects the new files. Create those columns as
+  `TIMESTAMPTZ`. Do not convert an existing column with `ALTER COLUMN … TYPE TIMESTAMPTZ`: old values would then be
+  converted in each reader's time zone, and files still in flight with `TIMESTAMP` are rejected. Use a new table, or
+  copy the data with `timezone('UTC', ts)`.
+
 ### Logs
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `timestamp` | Timestamp(ms) | |
-| `observed_timestamp` | Timestamp(ms) | |
+| `timestamp` | Timestamp(ms, UTC) | |
+| `observed_timestamp` | Timestamp(ms, UTC) | |
 | `severity_number` | Int32 | |
 | `severity_text` | Utf8 | |
 | `body` | Utf8 | |
@@ -283,8 +301,8 @@ All schemas flatten the OTLP 3-level hierarchy (Resource → Scope → Record). 
 | `parent_span_id` | Utf8 | |
 | `name` | Utf8 | |
 | `kind` | Utf8 | INTERNAL / SERVER / CLIENT / PRODUCER / CONSUMER |
-| `start_time_ms` | Timestamp(ms) | |
-| `end_time_ms` | Timestamp(ms) | |
+| `start_time_ms` | Timestamp(ms, UTC) | |
+| `end_time_ms` | Timestamp(ms, UTC) | |
 | `duration_ms` | Int64 | |
 | `status_code` | Utf8 | |
 | `status_message` | Utf8 | |
@@ -307,8 +325,8 @@ Wide-table design — all metric types (GAUGE, SUM, HISTOGRAM, EXPONENTIAL_HISTO
 | `description` | Utf8 | NULL unless `metrics.write_description = true` |
 | `unit` | Utf8 | |
 | `metric_type` | Utf8 | GAUGE / SUM / HISTOGRAM / etc. |
-| `start_time_ms` | Timestamp(ms) | |
-| `time_ms` | Timestamp(ms) | |
+| `start_time_ms` | Timestamp(ms, UTC) | |
+| `time_ms` | Timestamp(ms, UTC) | |
 | `attributes` | Map(Utf8, Utf8) | |
 | `resource_attributes` | Map(Utf8, Utf8) | |
 | `scope_name` | Utf8 | |

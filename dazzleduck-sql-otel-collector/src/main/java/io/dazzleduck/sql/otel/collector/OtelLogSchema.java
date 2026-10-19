@@ -36,9 +36,9 @@ public class OtelLogSchema {
     public static final Schema SCHEMA = new Schema(OtelSchemaFields.withTypedAttributes(List.of(
             // LogRecord fields
             new Field("timestamp",
-                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MILLISECOND, null)), null),
+                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MILLISECOND, OtelSchemaFields.UTC)), null),
             new Field("observed_timestamp",
-                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MILLISECOND, null)), null),
+                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MILLISECOND, OtelSchemaFields.UTC)), null),
             new Field("severity_number",
                     FieldType.nullable(new ArrowType.Int(32, true)), null),
             new Field("severity_text",

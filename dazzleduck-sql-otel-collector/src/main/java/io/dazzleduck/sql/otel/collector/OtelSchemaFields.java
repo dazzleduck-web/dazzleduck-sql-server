@@ -17,6 +17,14 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 class OtelSchemaFields {
 
+    /**
+     * Time zone of every timestamp column. OTLP times are instants (nanoseconds since the Unix epoch), so they are
+     * written as UTC-adjusted timestamps, which DuckDB reads as {@code TIMESTAMP WITH TIME ZONE}. Without a zone they
+     * would read as a plain {@code TIMESTAMP}: a wall-clock value that is UTC only by convention, against which
+     * {@code now() - INTERVAL ...} (a {@code TIMESTAMPTZ}) forces a cast of the column and stops filter pushdown.
+     */
+    static final String UTC = "UTC";
+
     private static final Map<Schema, Schema> WITH_CLAIMS = new ConcurrentHashMap<>();
 
     /**

@@ -4,7 +4,7 @@ import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.logs.v1.LogRecord;
 import io.opentelemetry.proto.resource.v1.Resource;
 import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 
@@ -31,8 +31,8 @@ public class LogRecordBatchWriter {
     public static void write(List<LogEntry> entries, VectorSchemaRoot root, boolean stringCopy) {
         root.allocateNew();
 
-        TimeStampMilliVector tsVec      = (TimeStampMilliVector) root.getVector(OtelLogSchema.COL_TIMESTAMP);
-        TimeStampMilliVector obsTsVec   = (TimeStampMilliVector) root.getVector(OtelLogSchema.COL_OBSERVED_TIMESTAMP);
+        TimeStampMilliTZVector tsVec      = (TimeStampMilliTZVector) root.getVector(OtelLogSchema.COL_TIMESTAMP);
+        TimeStampMilliTZVector obsTsVec   = (TimeStampMilliTZVector) root.getVector(OtelLogSchema.COL_OBSERVED_TIMESTAMP);
         IntVector severityNumVec        = (IntVector)            root.getVector(OtelLogSchema.COL_SEVERITY_NUMBER);
         VarCharVector severityTextVec   = (VarCharVector)        root.getVector(OtelLogSchema.COL_SEVERITY_TEXT);
         VarCharVector bodyVec           = (VarCharVector)        root.getVector(OtelLogSchema.COL_BODY);
