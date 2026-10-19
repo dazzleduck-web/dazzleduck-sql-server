@@ -4,6 +4,9 @@ import com.typesafe.config.Config;
 import io.dazzleduck.sql.commons.Transformations;
 
 import java.util.Map;
+import java.util.Objects;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 /**
  * Base class for {@link IngestionTaskFactoryProvider} implementations.
@@ -31,10 +34,26 @@ public abstract class AbstractIngestionTaskFactoryProvider implements IngestionT
      * Validates transformation SQL, and the session variables, for every mapping returned by
      * {@link #loadMappings()}. Only entries with a non-null {@code transformation} or {@code view}
      * are checked for SQL.
+     *
+     * <p>Also fails startup when DuckLake data inlining is enabled for a catalog a watermark table is
+     * written to; see {@link DuckLakeInlining}.
      */
     @Override
     public void validate() {
-        loadMappings().values().forEach(mapping -> {
+        Map<String, QueueIdToTableMapping> mappings = loadMappings();
+        // Only catalogs a watermark table writes to: the watermark INSERT is the only SQL write on the ingest
+        // path, and target tables are registered files, which inlining cannot affect. With no watermark
+        // configured nothing is checked and the instance-wide setting is left alone.
+        var watermarkCatalogs = mappings.values().stream()
+                .filter(m -> m.catalog() != null
+                        && WatermarkSpec.fromParameters(m.ingestionQueue(), m.additionalParameters()) != null)
+                .map(QueueIdToTableMapping::catalog)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(TreeSet::new));
+        if (!watermarkCatalogs.isEmpty()) {
+            DuckLakeInlining.requireDisabled(watermarkCatalogs);
+        }
+        mappings.values().forEach(mapping -> {
             if (mapping.transformation() != null) {
                 validateTransformation(mapping.ingestionQueue(), mapping.transformation());
             }

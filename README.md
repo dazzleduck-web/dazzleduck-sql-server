@@ -713,6 +713,35 @@ recovered at any time by reading `begin_snapshot` from `ducklake_data_file` for 
 Never predict this id yourself without the verification step: a lost race commits silently, with
 no error.
 
+### Data inlining must be off
+
+DuckLake can keep a small write (ten rows or fewer by default) in the catalog database instead of
+writing a Parquet file, until `ducklake_flush_inlined_data` runs. The watermark table is written with
+`INSERT`, one row per batch, so with inlining on its rows would pile up in the catalog database.
+Target tables are unaffected: their files are registered, and inlining only applies to inserts.
+
+So when any queue configures a watermark table, startup checks each catalog those queues write to
+and **fails if inlining is enabled anywhere in it**:
+
+- the `ATTACH` parameter `DATA_INLINING_ROW_LIMIT` is above 0, or
+- a `data_inlining_row_limit` option above 0 is stored in the catalog, at catalog, schema or table scope.
+
+Stored options override the `ATTACH` parameter, so a connection attached with
+`DATA_INLINING_ROW_LIMIT 0` is not enough on its own. The check is strict: an option on any table in
+the catalog fails it, not only one on the watermark table. The error lists every source with the
+statement that turns it off, for example:
+
+```
+catalog 'lake': ATTACH parameter DATA_INLINING_ROW_LIMIT 10. Remove it from the ATTACH, or set it to 0
+catalog 'lake': table 'main.ingest_watermark' option data_inlining_row_limit = 10. CALL lake.set_option('data_inlining_row_limit', 0, schema => 'main', table_name => 'ingest_watermark')
+```
+
+An explicit 0 is fine. When the check passes, `ducklake_default_data_inlining_row_limit` is set to 0
+for the DuckDB instance, which covers the default of 10. With no watermark configured, nothing is
+checked or changed. Checking at startup is enough: DuckLake reads a catalog's options when it is
+attached, so a change made while the server runs only takes effect at the next start, which checks
+again.
+
 ## Publishing
 
 Tagged releases (`v*`) publish all modules to Maven Central via the GitHub Actions release
