@@ -184,7 +184,10 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         String groupBy = groups.isEmpty() ? "" : " GROUP BY " + groups;
         // Aggregate order must match the column order in insertSql and the read order in
         // computeRows: groups, MIN, MAX, COUNT.
-        String aggregates = "MIN(%s) AS %s, MAX(%s) AS %s, COUNT(*) AS %s".formatted(
+        // MIN/MAX are rendered as text by DuckDB, not by JDBC getString: the driver renders a
+        // TIMESTAMP WITH TIME ZONE through java.time, which drops zero seconds ("12:00+09:00") in a
+        // form DuckDB cannot parse back, and uses the JVM's zone. DuckDB's own text always round-trips.
+        String aggregates = "CAST(MIN(%s) AS VARCHAR) AS %s, CAST(MAX(%s) AS VARCHAR) AS %s, COUNT(*) AS %s".formatted(
                 tsColumn, HeaderUtils.quoteIdentifier(minTimestampColumn),
                 tsColumn, HeaderUtils.quoteIdentifier(maxTimestampColumn),
                 HeaderUtils.quoteIdentifier(rowCountColumn));
@@ -197,9 +200,12 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
     }
 
     /**
-     * Executes {@link #aggregationSql} and returns the rows as DuckDB-rendered strings
-     * (group values in declared order, MIN timestamp last; NULL stays null). String values
-     * round-trip through DuckDB's implicit VARCHAR cast on INSERT.
+     * Executes {@link #aggregationSql} and returns the rows as strings (group values in declared
+     * order, then MIN, MAX and the row count; NULL stays null). String values round-trip through
+     * DuckDB's implicit VARCHAR cast on INSERT. MIN/MAX are DuckDB's own rendering: a
+     * {@code TIMESTAMP WITH TIME ZONE} carries an offset in DuckDB's session zone, so a watermark
+     * column of that type gets the exact instant, while a plain {@code TIMESTAMP} column would drop the
+     * offset (which {@code DuckLakeIngestionHandler} rejects).
      */
     public List<List<String>> computeRows(Connection connection, String relationSql) throws SQLException {
         List<List<String>> rows = new ArrayList<>();

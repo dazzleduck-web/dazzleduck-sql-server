@@ -145,6 +145,51 @@ class DuckLakeWatermarkPostIngestionTest {
         }
     }
 
+    /**
+     * A TIMESTAMPTZ source with TIMESTAMPTZ watermark columns stores the exact instants whatever the
+     * zones (here a Tokyo JVM and a Los Angeles DuckDB). The rows travel as DuckDB-rendered text with an
+     * offset that is applied when it is cast back, so nothing shifts. Whole-minute values matter: the
+     * JDBC driver's own rendering drops zero seconds in a form DuckDB cannot parse.
+     */
+    @Test
+    void timestampTzWatermarkIsExactInAnyZone() throws Exception {
+        String f = tempDir.resolve("tz.parquet").toString();
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    "CREATE TABLE %s.main.facts_tz (county VARCHAR, state VARCHAR, ts TIMESTAMPTZ, v DOUBLE)".formatted(CATALOG),
+                    "CREATE TABLE %s.main.watermark_tz (county VARCHAR, state VARCHAR, min_ts TIMESTAMPTZ, max_ts TIMESTAMPTZ, row_count BIGINT, min_commit_snapshot_id BIGINT, batch_id UUID)".formatted(CATALOG)
+            });
+            ConnectionPool.execute(conn, ("COPY (SELECT * FROM (VALUES "
+                    + "('king', 'wa', TIMESTAMPTZ '2026-08-01 03:00:00+00', 1.0::DOUBLE), "
+                    + "('king', 'wa', TIMESTAMPTZ '2026-08-01 22:30:00+00', 2.0::DOUBLE)"
+                    + ") AS t(county, state, ts, v)) TO '%s' (FORMAT parquet)").formatted(f));
+        }
+        java.util.TimeZone jvmZone = java.util.TimeZone.getDefault();
+        String duckDbZone = ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class);
+        try {
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Asia/Tokyo"));
+            ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'America/Los_Angeles'");
+            List<List<String>> rows;
+            try (Connection conn = ConnectionPool.getConnection()) {
+                rows = SPEC.computeRows(conn, "SELECT * FROM read_parquet(['%s'])".formatted(f));
+            }
+            // DuckDB's rendering, in DuckDB's zone, seconds included.
+            assertEquals("2026-07-31 20:00:00-07", rows.get(0).get(2));
+            new DuckLakePostIngestionTask(result(List.of(f), rows), CATALOG, "facts_tz", "main",
+                    watermarkParams("watermark_tz")).execute();
+
+            try (Connection conn = ConnectionPool.getConnection()) {
+                assertEquals(List.of("king|wa|2026-08-01 03:00|2026-08-01 22:30|2"), collect(conn,
+                        ("SELECT county || '|' || state || '|' || strftime(timezone('UTC', min_ts), '%%Y-%%m-%%d %%H:%%M')"
+                                + " || '|' || strftime(timezone('UTC', max_ts), '%%Y-%%m-%%d %%H:%%M')"
+                                + " || '|' || row_count::VARCHAR AS r FROM %s.main.watermark_tz").formatted(CATALOG)));
+            }
+        } finally {
+            java.util.TimeZone.setDefault(jvmZone);
+            ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(duckDbZone));
+        }
+    }
+
     @Test
     void watermarkFailureRollsBackFileRegistration() throws Exception {
         List<String> files = writeBatchFiles();
