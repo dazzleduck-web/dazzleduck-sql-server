@@ -4,6 +4,9 @@ import io.dazzleduck.sql.commons.util.HeaderUtils;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -184,10 +187,7 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
         String groupBy = groups.isEmpty() ? "" : " GROUP BY " + groups;
         // Aggregate order must match the column order in insertSql and the read order in
         // computeRows: groups, MIN, MAX, COUNT.
-        // MIN/MAX are rendered as text by DuckDB, not by JDBC getString: the driver renders a
-        // TIMESTAMP WITH TIME ZONE through java.time, which drops zero seconds ("12:00+09:00") in a
-        // form DuckDB cannot parse back, and uses the JVM's zone. DuckDB's own text always round-trips.
-        String aggregates = "CAST(MIN(%s) AS VARCHAR) AS %s, CAST(MAX(%s) AS VARCHAR) AS %s, COUNT(*) AS %s".formatted(
+        String aggregates = "MIN(%s) AS %s, MAX(%s) AS %s, COUNT(*) AS %s".formatted(
                 tsColumn, HeaderUtils.quoteIdentifier(minTimestampColumn),
                 tsColumn, HeaderUtils.quoteIdentifier(maxTimestampColumn),
                 HeaderUtils.quoteIdentifier(rowCountColumn));
@@ -199,28 +199,47 @@ public record WatermarkSpec(String table, String timestampColumn, List<String> g
                 .formatted(selectPrefix, aggregates, relationSql, groupBy);
     }
 
+    /** DuckDB's JDBC type name for {@code TIMESTAMPTZ}. */
+    private static final String TIMESTAMP_TZ_TYPE = "TIMESTAMP WITH TIME ZONE";
+
+    /** UTC text DuckDB parses back as the same instant (always with seconds; microsecond precision). */
+    private static final DateTimeFormatter UTC_TEXT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS'+00'");
+
     /**
      * Executes {@link #aggregationSql} and returns the rows as strings (group values in declared
      * order, then MIN, MAX and the row count; NULL stays null). String values round-trip through
-     * DuckDB's implicit VARCHAR cast on INSERT. MIN/MAX are DuckDB's own rendering: a
-     * {@code TIMESTAMP WITH TIME ZONE} carries an offset in DuckDB's session zone, so a watermark
-     * column of that type gets the exact instant, while a plain {@code TIMESTAMP} column would drop the
-     * offset (which {@code DuckLakeIngestionHandler} rejects).
+     * DuckDB's implicit VARCHAR cast on INSERT.
+     *
+     * <p>A {@code TIMESTAMP WITH TIME ZONE} value is rendered in UTC with a {@code +00} offset, never
+     * through {@code getString}: the driver renders it via {@code java.time} in the JVM's zone and drops
+     * zero seconds ({@code 12:00+09:00}), a form DuckDB cannot parse. In UTC the text means the same
+     * thing to either column type: a {@code TIMESTAMPTZ} watermark column gets the exact instant, and a
+     * {@code TIMESTAMP} column, which drops the offset, gets the UTC clock time. So neither depends on the
+     * JVM's or DuckDB's time zone.
      */
     public List<List<String>> computeRows(Connection connection, String relationSql) throws SQLException {
         List<List<String>> rows = new ArrayList<>();
         int columns = valueColumnCount();
         try (var statement = connection.createStatement();
              var resultSet = statement.executeQuery(aggregationSql(relationSql))) {
+            var metaData = resultSet.getMetaData();
+            boolean[] timestampTz = new boolean[columns + 1];
+            for (int i = 1; i <= columns; i++) {
+                timestampTz[i] = TIMESTAMP_TZ_TYPE.equalsIgnoreCase(metaData.getColumnTypeName(i));
+            }
             while (resultSet.next()) {
                 List<String> row = new ArrayList<>(columns);
                 for (int i = 1; i <= columns; i++) {
-                    row.add(resultSet.getString(i));
+                    row.add(timestampTz[i] ? utcText(resultSet.getObject(i, OffsetDateTime.class)) : resultSet.getString(i));
                 }
                 rows.add(row);
             }
         }
         return rows;
+    }
+
+    private static String utcText(OffsetDateTime value) {
+        return value == null ? null : value.withOffsetSameInstant(ZoneOffset.UTC).format(UTC_TEXT);
     }
 
     /**

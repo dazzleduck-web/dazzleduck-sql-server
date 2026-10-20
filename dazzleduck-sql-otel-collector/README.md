@@ -277,11 +277,9 @@ Unix epoch), written at millisecond precision and marked as UTC. The one nested 
   whose timestamp columns are `TIMESTAMP` rejects the new files. Create those columns as `TIMESTAMPTZ`. Do not convert an existing column with `ALTER COLUMN … TYPE TIMESTAMPTZ`: old values would then be
   converted in each reader's time zone, and files still in flight with `TIMESTAMP` are rejected. Use a new table, or
   copy the data with `timezone('UTC', ts)`.
-- **Watermark tables:** the watermark's MIN and MAX columns must be `TIMESTAMPTZ`, the same type as the source column.
-  Watermark rows are written as text with an offset, which a `TIMESTAMPTZ` column turns back into the exact instant;
-  a `TIMESTAMP` column would drop the offset and store a shifted value. So a queue whose watermark table still has
-  `TIMESTAMP` columns has its writes rejected, with an error naming the column, until the columns are changed to
-  `TIMESTAMPTZ`.
+- **Watermark tables:** create the watermark's MIN and MAX columns as `TIMESTAMPTZ`, the same type as the source
+  column. The MIN and MAX are written in UTC, so a `TIMESTAMPTZ` column gets the exact instants whatever the JVM's or
+  DuckDB's time zone. An existing `TIMESTAMP` watermark column keeps working: it stores the UTC clock time, as before.
 
 ### Logs
 
@@ -476,7 +474,7 @@ otel_collector {
                 # additional_parameters {   # optional per-batch watermark row, committed
                 #     watermark_table                = "ingest_watermark"   # with the file registration
                 #     watermark_timestamp_column     = "timestamp"
-                #     watermark_min_timestamp_column = "min_timestamp"   # TIMESTAMPTZ, like the source
+                #     watermark_min_timestamp_column = "min_timestamp"   # TIMESTAMPTZ, like the source (TIMESTAMP stores UTC clock time)
                 #     watermark_max_timestamp_column = "max_timestamp"   # TIMESTAMPTZ, like the source
                 #     watermark_row_count_column     = "row_count"
                 #     watermark_snapshot_id_column   = "min_commit_snapshot_id"   # required; BIGINT, lower bound on the commit snapshot

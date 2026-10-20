@@ -572,8 +572,8 @@ row count. Configure under `additional_parameters`:
 |-----|----------|-------------|
 | `watermark_table` | Yes | Watermark table (same catalog/schema as the target table) |
 | `watermark_timestamp_column` | Yes | Source column both MIN and MAX are computed from |
-| `watermark_min_timestamp_column` | Yes | Destination column for the MIN timestamp; must match the source column on time zone (`TIMESTAMPTZ` for `TIMESTAMPTZ`), or the queue's writes are rejected |
-| `watermark_max_timestamp_column` | Yes | Destination column for the MAX timestamp; same type rule as the MIN column |
+| `watermark_min_timestamp_column` | Yes | Destination column for the MIN timestamp; use the source column's type. A `TIMESTAMPTZ` source is written in UTC, so a `TIMESTAMP` column gets the UTC clock time |
+| `watermark_max_timestamp_column` | Yes | Destination column for the MAX timestamp; same type advice as the MIN column |
 | `watermark_row_count_column` | Yes | Destination column for the batch row count |
 | `watermark_group_columns` | No | Comma-separated grouping columns; empty = one global row per batch |
 | `watermark_snapshot_id_column` | Yes | Destination column for a lower bound on the DuckLake snapshot the batch committed in |

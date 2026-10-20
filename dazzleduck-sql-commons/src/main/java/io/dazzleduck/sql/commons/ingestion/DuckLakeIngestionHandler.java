@@ -76,13 +76,11 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * {@code refreshedAt} is the clock instant when this state was last confirmed/rebuilt.
      * {@code partitionError} is non-null when the table's partitioning cannot be reproduced by the
      * COPY path (see {@link UnsupportedPartitionTransformException}); only this queue is affected.
-     * {@code watermarkError} is non-null when the watermark table's MIN/MAX columns disagree with the
-     * source timestamp column on time zone (see {@link #checkWatermarkTypes}); only this queue is affected.
      */
     private record QueueState(String targetPath, String transformation, String[] partitionColumns,
                                String[] partitionProjections, Map<String, String> variables,
                                long schemaChangeId, Instant refreshedAt,
-                               String partitionError, String watermarkError) {}
+                               String partitionError) {}
 
     /**
      * A resolved partition column: {@code token} is the identifier placed in COPY's
@@ -207,17 +205,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     @Override
     public WatermarkSpec getWatermarkSpec(String queueId) {
         QueueIdToTableMapping mapping = mappingFor(queueId);
-        if (mapping == null) return null;
-        WatermarkSpec spec = WatermarkSpec.fromParameters(queueId, mapping.additionalParameters());
-        if (spec != null) {
-            // Called on every write, so a mismatched watermark table rejects the batch with a clear
-            // message instead of storing shifted MIN/MAX values. Rebuilt on the next schema change.
-            QueueState s = getOrRefreshState(queueId);
-            if (s != null && s.watermarkError() != null) {
-                throw new IllegalStateException(s.watermarkError());
-            }
-        }
-        return spec;
+        return mapping == null ? null : WatermarkSpec.fromParameters(queueId, mapping.additionalParameters());
     }
 
     @Override
@@ -364,8 +352,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                     : existing.variables();
             return new QueueState(existing.targetPath(), existing.transformation(),
                     existing.partitionColumns(), existing.partitionProjections(), variables,
-                    existing.schemaChangeId(), clock.instant(), existing.partitionError(),
-                    existing.watermarkError());
+                    existing.schemaChangeId(), clock.instant(), existing.partitionError());
         }
         return buildState(mapping, currentSchemaChangeId, clock.instant(), existing == null);
     }
@@ -383,7 +370,6 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         if (firstBuild) {
             warnIfClaimsColumnMissing(mapping, transformation);
         }
-        String watermarkError = checkWatermarkTypes(mapping);
         List<ResolvedPartition> partitions;
         try {
             partitions = fetchPartitions(mapping.catalog(), mapping.schema(), mapping.table());
@@ -392,13 +378,13 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             logger.error("Queue '{}' ({}.{}.{}) cannot be ingested until its partitioning is changed: {}",
                     mapping.ingestionQueue(), mapping.catalog(), mapping.schema(), mapping.table(), e.getMessage());
             return new QueueState(path, transformation, new String[0], new String[0], variables,
-                    schemaChangeId, refreshedAt, e.getMessage(), watermarkError);
+                    schemaChangeId, refreshedAt, e.getMessage());
         }
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
                 .filter(java.util.Objects::nonNull).toArray(String[]::new);
         return new QueueState(path, transformation, tokens, projections, variables, schemaChangeId,
-                refreshedAt, null, watermarkError);
+                refreshedAt, null);
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
@@ -471,66 +457,6 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         } catch (SQLException e) {
             logger.atDebug().setCause(e).log("Could not verify '{}' column on {}.{}.{}",
                     CLAIMS_COLUMN, mapping.catalog(), mapping.schema(), mapping.table());
-        }
-    }
-
-    /**
-     * Checks that the watermark table's MIN/MAX columns agree with the source timestamp column on
-     * time zone, returning an error message when they do not, or {@code null}.
-     *
-     * <p>Watermark rows travel as text: {@link WatermarkSpec#computeRows} has DuckDB render MIN/MAX,
-     * so a {@code TIMESTAMP WITH TIME ZONE} carries an offset in DuckDB's session zone. Into a
-     * {@code TIMESTAMP WITH TIME ZONE} column that text casts back to the exact instant, but a
-     * {@code TIMESTAMP} column keeps the clock time and drops the offset, so the stored value is
-     * shifted by the session zone and nothing reports it. The reverse (a zone-less source into a
-     * {@code TIMESTAMP WITH TIME ZONE} column) is read in DuckDB's session zone, equally silently.
-     *
-     * <p>The source column is looked up in the target table, which holds the transformed columns the
-     * watermark is computed over. If either table or column cannot be found the check is skipped:
-     * a missing column fails on its own when the rows are inserted.
-     */
-    static String checkWatermarkTypes(QueueIdToTableMapping mapping) {
-        WatermarkSpec spec = WatermarkSpec.fromParameters(mapping.ingestionQueue(), mapping.additionalParameters());
-        if (spec == null) return null;
-        try {
-            String sourceType = columnType(mapping.catalog(), mapping.schema(), mapping.table(), spec.timestampColumn());
-            if (sourceType == null) return null;
-            for (String column : List.of(spec.minTimestampColumn(), spec.maxTimestampColumn())) {
-                String watermarkType = columnType(mapping.catalog(), mapping.schema(), spec.table(), column);
-                if (watermarkType != null && isTimestampTz(sourceType) != isTimestampTz(watermarkType)) {
-                    String message = ("Queue '%s': watermark column %s.%s.%s.%s is %s but the source column '%s' of"
-                            + " %s.%s.%s is %s, so MIN/MAX would be stored shifted by a time zone. Change the"
-                            + " watermark column to %s.").formatted(mapping.ingestionQueue(), mapping.catalog(),
-                            mapping.schema(), spec.table(), column, watermarkType, spec.timestampColumn(),
-                            mapping.catalog(), mapping.schema(), mapping.table(), sourceType, sourceType);
-                    logger.error(message);
-                    return message;
-                }
-            }
-            return null;
-        } catch (SQLException e) {
-            logger.atDebug().setCause(e).log("Could not verify watermark column types for queue '{}'",
-                    mapping.ingestionQueue());
-            return null;
-        }
-    }
-
-    private static boolean isTimestampTz(String type) {
-        return type.toUpperCase(Locale.ROOT).equals("TIMESTAMP WITH TIME ZONE");
-    }
-
-    /** The column's {@code data_type}, matched case-insensitively, or {@code null} if absent. */
-    private static String columnType(String catalog, String schema, String table, String column) throws SQLException {
-        try (var conn = ConnectionPool.getConnection();
-             var ps = conn.prepareStatement("SELECT data_type FROM information_schema.columns"
-                     + " WHERE table_catalog = ? AND table_schema = ? AND table_name = ? AND lower(column_name) = lower(?)")) {
-            ps.setString(1, catalog);
-            ps.setString(2, schema);
-            ps.setString(3, table);
-            ps.setString(4, column);
-            try (var rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
         }
     }
 

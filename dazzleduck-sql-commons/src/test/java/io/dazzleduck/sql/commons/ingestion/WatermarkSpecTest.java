@@ -189,8 +189,8 @@ class WatermarkSpecTest {
             // JDBC renders TIMESTAMP via java.sql.Timestamp.toString (trailing ".0"); the string
             // round-trips through DuckDB's implicit VARCHAR cast on INSERT.
             // group, MIN, MAX, COUNT
-            assertEquals(List.of("cook", "il", "2026-08-02 05:00:00", "2026-08-02 05:00:00", "1"), rows.get(0));
-            assertEquals(List.of("king", "wa", "2026-08-01 01:00:00", "2026-08-01 03:00:00", "2"), rows.get(1));
+            assertEquals(List.of("cook", "il", "2026-08-02 05:00:00.0", "2026-08-02 05:00:00.0", "1"), rows.get(0));
+            assertEquals(List.of("king", "wa", "2026-08-01 01:00:00.0", "2026-08-01 03:00:00.0", "2"), rows.get(1));
             // all timestamps NULL: no min/max, but the rows still happened and are counted
             assertEquals(Arrays.asList("null", "nv", null, null, "1"), rows.get(2));
         }
@@ -212,7 +212,7 @@ class WatermarkSpecTest {
 
             String real = relationOver(conn, "('x','y',TIMESTAMP '2026-01-01 08:00')",
                     tempDir.resolve("real.parquet").toString());
-            assertEquals(List.of(List.of("2026-01-01 08:00:00", "2026-01-01 08:00:00", "1")),
+            assertEquals(List.of(List.of("2026-01-01 08:00:00.0", "2026-01-01 08:00:00.0", "1")),
                     spec.computeRows(conn, real));
         }
     }
@@ -234,8 +234,7 @@ class WatermarkSpecTest {
     @Test
     void aggregationAlwaysIncludesMinMaxAndCount() {
         WatermarkSpec spec = new WatermarkSpec("wm", "ts", List.of("county"), "min_ts", "max_ts", "rows", "min_commit_snapshot_id", "batch_id");
-        assertEquals("SELECT \"county\", CAST(MIN(\"ts\") AS VARCHAR) AS \"min_ts\","
-                + " CAST(MAX(\"ts\") AS VARCHAR) AS \"max_ts\","
+        assertEquals("SELECT \"county\", MIN(\"ts\") AS \"min_ts\", MAX(\"ts\") AS \"max_ts\","
                 + " COUNT(*) AS \"rows\" FROM (SELECT 1) GROUP BY \"county\""
                 + " HAVING COUNT(*) > 0",
                 spec.aggregationSql("SELECT 1"));

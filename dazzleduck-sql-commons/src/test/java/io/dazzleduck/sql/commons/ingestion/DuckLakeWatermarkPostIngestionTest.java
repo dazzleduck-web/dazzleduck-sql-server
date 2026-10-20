@@ -146,18 +146,21 @@ class DuckLakeWatermarkPostIngestionTest {
     }
 
     /**
-     * A TIMESTAMPTZ source with TIMESTAMPTZ watermark columns stores the exact instants whatever the
-     * zones (here a Tokyo JVM and a Los Angeles DuckDB). The rows travel as DuckDB-rendered text with an
-     * offset that is applied when it is cast back, so nothing shifts. Whole-minute values matter: the
-     * JDBC driver's own rendering drops zero seconds in a form DuckDB cannot parse.
+     * A TIMESTAMPTZ source's MIN/MAX are rendered in UTC, so whatever the zones (here a Tokyo JVM and a
+     * Los Angeles DuckDB) a TIMESTAMPTZ watermark column stores the exact instant and a TIMESTAMP column
+     * the UTC clock time. Whole-minute values matter: the JDBC driver's own rendering drops zero seconds
+     * in a form DuckDB cannot parse.
      */
     @Test
-    void timestampTzWatermarkIsExactInAnyZone() throws Exception {
+    void timestampTzSourceIsWrittenInUtcInAnyZone() throws Exception {
         String f = tempDir.resolve("tz.parquet").toString();
+        String watermarkColumns = "county VARCHAR, state VARCHAR, min_ts %1$s, max_ts %1$s, row_count BIGINT,"
+                + " min_commit_snapshot_id BIGINT, batch_id UUID";
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.executeBatchInTxn(conn, new String[]{
                     "CREATE TABLE %s.main.facts_tz (county VARCHAR, state VARCHAR, ts TIMESTAMPTZ, v DOUBLE)".formatted(CATALOG),
-                    "CREATE TABLE %s.main.watermark_tz (county VARCHAR, state VARCHAR, min_ts TIMESTAMPTZ, max_ts TIMESTAMPTZ, row_count BIGINT, min_commit_snapshot_id BIGINT, batch_id UUID)".formatted(CATALOG)
+                    "CREATE TABLE %s.main.watermark_tz (%s)".formatted(CATALOG, watermarkColumns.formatted("TIMESTAMPTZ")),
+                    "CREATE TABLE %s.main.watermark_plain (%s)".formatted(CATALOG, watermarkColumns.formatted("TIMESTAMP"))
             });
             ConnectionPool.execute(conn, ("COPY (SELECT * FROM (VALUES "
                     + "('king', 'wa', TIMESTAMPTZ '2026-08-01 03:00:00+00', 1.0::DOUBLE), "
@@ -173,16 +176,28 @@ class DuckLakeWatermarkPostIngestionTest {
             try (Connection conn = ConnectionPool.getConnection()) {
                 rows = SPEC.computeRows(conn, "SELECT * FROM read_parquet(['%s'])".formatted(f));
             }
-            // DuckDB's rendering, in DuckDB's zone, seconds included.
-            assertEquals("2026-07-31 20:00:00-07", rows.get(0).get(2));
+            assertEquals(List.of(List.of("king", "wa", "2026-08-01 03:00:00.000000+00", "2026-08-01 22:30:00.000000+00", "2")),
+                    rows);
+
+            // Each batch registers its own copy of the file, so the two tasks don't share one.
+            String f2 = tempDir.resolve("tz2.parquet").toString();
+            java.nio.file.Files.copy(Path.of(f), Path.of(f2));
             new DuckLakePostIngestionTask(result(List.of(f), rows), CATALOG, "facts_tz", "main",
                     watermarkParams("watermark_tz")).execute();
+            new DuckLakePostIngestionTask(result(List.of(f2), rows), CATALOG, "facts_tz", "main",
+                    watermarkParams("watermark_plain")).execute();
 
             try (Connection conn = ConnectionPool.getConnection()) {
                 assertEquals(List.of("king|wa|2026-08-01 03:00|2026-08-01 22:30|2"), collect(conn,
                         ("SELECT county || '|' || state || '|' || strftime(timezone('UTC', min_ts), '%%Y-%%m-%%d %%H:%%M')"
                                 + " || '|' || strftime(timezone('UTC', max_ts), '%%Y-%%m-%%d %%H:%%M')"
-                                + " || '|' || row_count::VARCHAR AS r FROM %s.main.watermark_tz").formatted(CATALOG)));
+                                + " || '|' || row_count::VARCHAR AS r FROM %s.main.watermark_tz").formatted(CATALOG)),
+                        "TIMESTAMPTZ column: the exact instants");
+                assertEquals(List.of("king|wa|2026-08-01 03:00|2026-08-01 22:30|2"), collect(conn,
+                        ("SELECT county || '|' || state || '|' || strftime(min_ts, '%%Y-%%m-%%d %%H:%%M')"
+                                + " || '|' || strftime(max_ts, '%%Y-%%m-%%d %%H:%%M')"
+                                + " || '|' || row_count::VARCHAR AS r FROM %s.main.watermark_plain").formatted(CATALOG)),
+                        "TIMESTAMP column: the UTC clock time");
             }
         } finally {
             java.util.TimeZone.setDefault(jvmZone);
