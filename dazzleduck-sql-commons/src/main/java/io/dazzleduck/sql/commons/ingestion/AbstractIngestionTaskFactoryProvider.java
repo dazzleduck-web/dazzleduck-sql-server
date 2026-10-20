@@ -3,10 +3,9 @@ package io.dazzleduck.sql.commons.ingestion;
 import com.typesafe.config.Config;
 import io.dazzleduck.sql.commons.Transformations;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.TreeSet;
-import java.util.stream.Collectors;
 
 /**
  * Base class for {@link IngestionTaskFactoryProvider} implementations.
@@ -35,23 +34,25 @@ public abstract class AbstractIngestionTaskFactoryProvider implements IngestionT
      * {@link #loadMappings()}. Only entries with a non-null {@code transformation} or {@code view}
      * are checked for SQL.
      *
-     * <p>Also fails startup unless each catalog a watermark table is written to is attached with
-     * DuckLake data inlining disabled; see {@link DuckLakeInlining}.
+     * <p>Also fails startup unless DuckLake data inlining is disabled for every watermark table, by the
+     * catalog's ATTACH and by any option stored with set_option; see {@link DuckLakeInlining}.
      */
     @Override
     public void validate() {
         Map<String, QueueIdToTableMapping> mappings = loadMappings();
-        // Only catalogs a watermark table writes to: the watermark INSERT is the only SQL write on the ingest
-        // path, and target tables are registered files, which inlining cannot affect. With no watermark
-        // configured nothing is checked.
-        var watermarkCatalogs = mappings.values().stream()
-                .filter(m -> m.catalog() != null
-                        && WatermarkSpec.fromParameters(m.ingestionQueue(), m.additionalParameters()) != null)
-                .map(QueueIdToTableMapping::catalog)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(TreeSet::new));
-        if (!watermarkCatalogs.isEmpty()) {
-            DuckLakeInlining.requireDisabled(watermarkCatalogs);
+        // Only watermark tables: the watermark INSERT is the only SQL write on the ingest path, and target
+        // tables are registered files, which inlining cannot affect. With no watermark configured nothing is
+        // checked. The watermark table lives in the target table's catalog and schema.
+        List<DuckLakeInlining.WatermarkTable> watermarkTables = new ArrayList<>();
+        for (QueueIdToTableMapping m : mappings.values()) {
+            WatermarkSpec spec = m.catalog() == null ? null
+                    : WatermarkSpec.fromParameters(m.ingestionQueue(), m.additionalParameters());
+            if (spec != null) {
+                watermarkTables.add(new DuckLakeInlining.WatermarkTable(m.catalog(), m.schema(), spec.table()));
+            }
+        }
+        if (!watermarkTables.isEmpty()) {
+            DuckLakeInlining.requireDisabled(watermarkTables);
         }
         mappings.values().forEach(mapping -> {
             if (mapping.transformation() != null) {

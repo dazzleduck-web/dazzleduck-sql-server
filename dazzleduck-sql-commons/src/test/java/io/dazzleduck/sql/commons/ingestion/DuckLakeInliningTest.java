@@ -38,7 +38,15 @@ public class DuckLakeInliningTest {
         ConnectionPool.execute("ATTACH 'ducklake:%s' AS %s (DATA_PATH '%s'%s)".formatted(
                 dir.resolve("catalog"), name, dir.resolve("data"),
                 attachLimit == null ? "" : ", DATA_INLINING_ROW_LIMIT " + attachLimit));
+        ConnectionPool.execute("CREATE SCHEMA %s.other".formatted(name));
         ConnectionPool.execute("CREATE TABLE %s.main.wm (a INT)".formatted(name));
+        ConnectionPool.execute("CREATE TABLE %s.other.t (a INT)".formatted(name));
+    }
+
+    /** {@code CALL catalog.set_option(...)}, with {@code scope} the named arguments that narrow it, if any. */
+    private void setOption(int limit, String scope) {
+        ConnectionPool.execute("CALL %s.set_option('%s', %d%s)".formatted(
+                catalog, DuckLakeInlining.OPTION, limit, scope == null ? "" : ", " + scope));
     }
 
     private DuckLakeIngestionTaskFactoryProvider provider(boolean withWatermark) {
@@ -105,6 +113,62 @@ public class DuckLakeInliningTest {
         attach("inl_case", 10);
         var e = assertThrows(IllegalStateException.class, () -> provider(true, "INL_Case").validate());
         assertTrue(e.getMessage().contains("ATTACH parameter DATA_INLINING_ROW_LIMIT 10"), e.getMessage());
+    }
+
+    /**
+     * A stored option takes precedence over the ATTACH parameter, so an ATTACH at zero is not enough: the insert on
+     * another table shows the row really is inlined, not written as a file.
+     */
+    @Test
+    void failsOnACatalogOption() throws Exception {
+        attach("inl_opt_catalog", 0);
+        setOption(10, null);
+        ConnectionPool.execute("INSERT INTO %s.other.t VALUES (1)".formatted(catalog));
+        assertEquals(0, dataFiles("t"), "the catalog option of 10 beats the ATTACH parameter of 0");
+        var e = assertThrows(IllegalStateException.class, () -> provider(true).validate());
+        assertTrue(e.getMessage().contains("the catalog option data_inlining_row_limit = 10"), e.getMessage());
+        assertTrue(e.getMessage().contains(
+                "CALL \"inl_opt_catalog\".set_option('data_inlining_row_limit', 0, schema => 'main', table_name => 'wm')"),
+                e.getMessage());
+    }
+
+    @Test
+    void failsOnTheWatermarkSchemasOption() throws Exception {
+        attach("inl_opt_schema", 0);
+        setOption(5, "schema => 'main'");
+        var e = assertThrows(IllegalStateException.class, () -> provider(true).validate());
+        assertTrue(e.getMessage().contains("schema 'main' option data_inlining_row_limit = 5"), e.getMessage());
+    }
+
+    @Test
+    void failsOnTheWatermarkTablesOwnOption() throws Exception {
+        attach("inl_opt_table", 0);
+        setOption(3, "schema => 'main', table_name => 'wm'");
+        var e = assertThrows(IllegalStateException.class, () -> provider(true).validate());
+        assertTrue(e.getMessage().contains("its own option data_inlining_row_limit = 3"), e.getMessage());
+    }
+
+    /**
+     * The most specific scope wins: the table's own zero overrides the catalog's ten. An insert really writes a file,
+     * so the check agrees with what DuckLake does.
+     */
+    @Test
+    void passesWhenTheTablesOwnZeroOverridesTheCatalog() throws Exception {
+        attach("inl_opt_override", 0);
+        setOption(10, null);
+        setOption(0, "schema => 'main', table_name => 'wm'");
+        assertDoesNotThrow(() -> provider(true).validate());
+        ConnectionPool.execute("INSERT INTO %s.main.wm VALUES (1)".formatted(catalog));
+        assertEquals(1, dataFiles("wm"), "the table's own zero applies, so a one-row insert is a Parquet file");
+    }
+
+    /** Options on other schemas and tables do not apply to the watermark table, so they do not fail startup. */
+    @Test
+    void ignoresOptionsOnOtherTables() throws Exception {
+        attach("inl_opt_other", 0);
+        setOption(5, "schema => 'other'");
+        setOption(3, "schema => 'other', table_name => 't'");
+        assertDoesNotThrow(() -> provider(true).validate());
     }
 
     /** No watermark table: nothing to protect, so no check. */

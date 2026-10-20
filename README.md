@@ -720,22 +720,29 @@ writing a Parquet file, until `ducklake_flush_inlined_data` runs. The watermark 
 `INSERT`, one row per batch, so with inlining on its rows would pile up in the catalog database.
 Target tables are unaffected: their files are registered, and inlining only applies to inserts.
 
-So when any queue configures a watermark table, startup checks each catalog those queues write to
-and **fails unless it was attached with `DATA_INLINING_ROW_LIMIT 0`**:
+So when any queue configures a watermark table, startup checks each watermark table and **fails
+unless inlining is disabled for it**:
 
-```sql
-ATTACH 'ducklake:catalog.ducklake' AS lake (DATA_PATH 'data/', DATA_INLINING_ROW_LIMIT 0);
-```
+- its catalog must be attached with `DATA_INLINING_ROW_LIMIT 0`. Leaving the parameter out fails too,
+  because the default limit is 10:
 
-Leaving the parameter out fails too, because the default limit is 10. The error lists every catalog
-that is not attached this way, for example:
+  ```sql
+  ATTACH 'ducklake:catalog.ducklake' AS lake (DATA_PATH 'data/', DATA_INLINING_ROW_LIMIT 0);
+  ```
+
+- an option stored with `set_option` takes precedence over the `ATTACH` parameter, the most specific
+  scope winning: the table's own, else its schema's, else the catalog's. The one that applies to the
+  watermark table must not be above 0. Options on other tables and schemas are not checked.
+
+The error lists every problem with its fix, for example:
 
 ```
 catalog 'lake': ATTACH parameter DATA_INLINING_ROW_LIMIT 10. Set it to 0
-catalog 'other': attached without DATA_INLINING_ROW_LIMIT, so the default of 10 applies. Add DATA_INLINING_ROW_LIMIT 0 to its ATTACH
+catalog 'lake', watermark table 'main.ingest_watermark': the catalog option data_inlining_row_limit = 10 takes precedence over the ATTACH parameter. CALL "lake".set_option('data_inlining_row_limit', 0, schema => 'main', table_name => 'ingest_watermark')
 ```
 
-With no watermark configured, nothing is checked.
+The suggested `set_option` is on the watermark table itself, so it overrides the wider scopes without
+changing any other table. With no watermark configured, nothing is checked.
 
 ## Publishing
 
