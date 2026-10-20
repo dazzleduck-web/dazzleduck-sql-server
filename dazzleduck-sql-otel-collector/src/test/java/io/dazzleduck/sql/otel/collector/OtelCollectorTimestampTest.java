@@ -79,6 +79,7 @@ public class OtelCollectorTimestampTest {
         props.setIngestionConfig(smallBucketConfig());
         props.setAuthentication("jwt");
         props.setSecretKey(SECRET_KEY_BASE64);
+        props.setTimeZone("UTC");
         server = new OtelCollectorServer(props);
         server.start();
         channel = ManagedChannelBuilder.forAddress("localhost", props.getGrpcPort()).usePlaintext().build();
@@ -165,13 +166,23 @@ public class OtelCollectorTimestampTest {
     }
 
     /**
-     * Starting the server sets the instance to UTC on every pooled connection, not only the singleton, so
+     * With {@code time_zone = "UTC"}, starting the server sets the instance to UTC on every pooled connection, not only the singleton, so
      * {@code CAST(timestamp AS DATE)} and similar transformations give the UTC date regardless of the host's zone.
      */
     @Test
-    void serverStartSetsUtcOnEveryConnection() throws Exception {
+    void configuredTimeZoneReachesEveryConnection() throws Exception {
         assertEquals("UTC", ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
         assertEquals("2023-11-14", ConnectionPool.collectFirst(
                 "SELECT CAST(make_timestamptz(" + MILLIS * 1000 + "::BIGINT) AS DATE)::VARCHAR", String.class));
+    }
+
+    /** By default the collector leaves DuckDB's zone alone; only a configured time_zone changes it. */
+    @Test
+    void defaultLeavesTimeZoneUnchanged() throws Exception {
+        assertEquals(null, new CollectorProperties().getTimeZone());
+        assertEquals("", new io.dazzleduck.sql.otel.collector.config.CollectorConfig().getTimeZone());
+        OtelCollectorServer.applyTimeZone(null);
+        OtelCollectorServer.applyTimeZone("");
+        assertEquals("UTC", ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
     }
 }

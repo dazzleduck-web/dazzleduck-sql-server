@@ -237,9 +237,9 @@ public class CollectorConfig {
                 Path.of(System.getProperty("java.io.tmpdir"), DEFAULT_TEMP_SUBDIRECTORY).toString());
     }
 
-    /** DuckDB {@code TimeZone} the server applies instance-wide at start; blank leaves the instance's zone alone. */
+    /** DuckDB {@code TimeZone} the server applies instance-wide at start; blank (the default) leaves it alone. */
     public String getTimeZone() {
-        return getString("time_zone", "UTC");
+        return getString("time_zone", "");
     }
 
     public String getServiceName() {

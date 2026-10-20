@@ -71,12 +71,12 @@ public class OtelCollectorServer implements Closeable {
     }
 
     /**
-     * Sets DuckDB's {@code TimeZone} for the whole instance. Timestamp columns are {@code TIMESTAMP WITH TIME ZONE},
-     * and DuckDB turns an instant into calendar parts in the session's time zone, so {@code CAST(timestamp AS DATE)},
-     * partition expressions and DuckLake's time partition transforms would otherwise follow the host's zone.
-     * {@code SET GLOBAL}, because ingestion writes on pooled duplicates of the singleton, which read the global value
-     * rather than the singleton's session. Done here rather than in {@code Main} so an embedded server gets it too.
-     * A null or blank zone leaves the instance unchanged.
+     * Sets DuckDB's {@code TimeZone} for the whole instance when {@code time_zone} is configured. Timestamp columns
+     * are {@code TIMESTAMP WITH TIME ZONE}, and DuckDB turns an instant into calendar parts in the session's time
+     * zone, so {@code CAST(timestamp AS DATE)}, partition expressions and DuckLake's time partition transforms follow
+     * it. {@code SET GLOBAL}, because ingestion writes on pooled duplicates of the singleton, which read the global
+     * value rather than the singleton's session. Done here rather than in {@code Main} so an embedded server gets it
+     * too. A null or blank zone (the default) leaves the instance unchanged.
      */
     static void applyTimeZone(String zone) {
         if (zone == null || zone.isBlank()) {
