@@ -444,6 +444,7 @@ otel_collector {
                 # editing the view updates the transformation at runtime, no restart:
                 # view        = "my_catalog.main.logs_transform"
                 # input_table = "my_catalog.main.raw_logs"
+                # (the catalog must be ATTACHed with DATA_INLINING_ROW_LIMIT 0, or startup fails)
                 # additional_parameters {   # optional per-batch watermark row, committed
                 #     watermark_table                = "ingest_watermark"   # with the file registration
                 #     watermark_timestamp_column     = "timestamp"

@@ -721,26 +721,21 @@ writing a Parquet file, until `ducklake_flush_inlined_data` runs. The watermark 
 Target tables are unaffected: their files are registered, and inlining only applies to inserts.
 
 So when any queue configures a watermark table, startup checks each catalog those queues write to
-and **fails if inlining is enabled anywhere in it**:
+and **fails unless it was attached with `DATA_INLINING_ROW_LIMIT 0`**:
 
-- the `ATTACH` parameter `DATA_INLINING_ROW_LIMIT` is above 0, or
-- a `data_inlining_row_limit` option above 0 is stored in the catalog, at catalog, schema or table scope.
-
-Stored options override the `ATTACH` parameter, so a connection attached with
-`DATA_INLINING_ROW_LIMIT 0` is not enough on its own. The check is strict: an option on any table in
-the catalog fails it, not only one on the watermark table. The error lists every source with the
-statement that turns it off, for example:
-
-```
-catalog 'lake': ATTACH parameter DATA_INLINING_ROW_LIMIT 10. Remove it from the ATTACH, or set it to 0
-catalog 'lake': table 'main.ingest_watermark' option data_inlining_row_limit = 10. CALL lake.set_option('data_inlining_row_limit', 0, schema => 'main', table_name => 'ingest_watermark')
+```sql
+ATTACH 'ducklake:catalog.ducklake' AS lake (DATA_PATH 'data/', DATA_INLINING_ROW_LIMIT 0);
 ```
 
-An explicit 0 is fine. When the check passes, `ducklake_default_data_inlining_row_limit` is set to 0
-for the DuckDB instance, which covers the default of 10. With no watermark configured, nothing is
-checked or changed. Checking at startup is enough: DuckLake reads a catalog's options when it is
-attached, so a change made while the server runs only takes effect at the next start, which checks
-again.
+Leaving the parameter out fails too, because the default limit is 10. The error lists every catalog
+that is not attached this way, for example:
+
+```
+catalog 'lake': ATTACH parameter DATA_INLINING_ROW_LIMIT 10. Set it to 0
+catalog 'other': attached without DATA_INLINING_ROW_LIMIT, so the default of 10 applies. Add DATA_INLINING_ROW_LIMIT 0 to its ATTACH
+```
+
+With no watermark configured, nothing is checked.
 
 ## Publishing
 

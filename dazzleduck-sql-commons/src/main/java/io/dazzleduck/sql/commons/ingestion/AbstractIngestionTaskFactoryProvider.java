@@ -35,15 +35,15 @@ public abstract class AbstractIngestionTaskFactoryProvider implements IngestionT
      * {@link #loadMappings()}. Only entries with a non-null {@code transformation} or {@code view}
      * are checked for SQL.
      *
-     * <p>Also fails startup when DuckLake data inlining is enabled for a catalog a watermark table is
-     * written to; see {@link DuckLakeInlining}.
+     * <p>Also fails startup unless each catalog a watermark table is written to is attached with
+     * DuckLake data inlining disabled; see {@link DuckLakeInlining}.
      */
     @Override
     public void validate() {
         Map<String, QueueIdToTableMapping> mappings = loadMappings();
         // Only catalogs a watermark table writes to: the watermark INSERT is the only SQL write on the ingest
         // path, and target tables are registered files, which inlining cannot affect. With no watermark
-        // configured nothing is checked and the instance-wide setting is left alone.
+        // configured nothing is checked.
         var watermarkCatalogs = mappings.values().stream()
                 .filter(m -> m.catalog() != null
                         && WatermarkSpec.fromParameters(m.ingestionQueue(), m.additionalParameters()) != null)

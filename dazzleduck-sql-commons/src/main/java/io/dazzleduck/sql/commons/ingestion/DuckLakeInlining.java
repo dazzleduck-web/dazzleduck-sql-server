@@ -2,52 +2,41 @@ package io.dazzleduck.sql.commons.ingestion;
 
 import io.dazzleduck.sql.commons.ConnectionPool;
 
-import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
 /**
- * Startup check that DuckLake data inlining is off for every catalog a watermark table is written to.
+ * Startup check that every catalog a watermark table is written to is attached with DuckLake data inlining disabled.
  *
  * <p>With inlining on, DuckLake keeps a small write (ten rows or fewer by default) in the catalog database instead of
  * writing a Parquet file, until {@code ducklake_flush_inlined_data} runs. The watermark table is the one table the
  * ingestion path writes with {@code INSERT}, one row per batch, so its rows would accumulate in the catalog database.
  * Registered data files are not affected: inlining only applies to inserts.
  *
- * <p>The check is deliberately strict rather than precise. Inlining can be enabled by the {@code ATTACH} parameter
- * {@code DATA_INLINING_ROW_LIMIT}, or by an option stored in the catalog at catalog, schema or table scope; the stored
- * options override the {@code ATTACH} parameter, so checking only the connection is not enough. Instead of resolving
- * the effective limit for each table, startup fails if any of these is above zero anywhere in the catalog, and the
- * message lists each one with the statement that turns it off. An explicit zero is fine.
- *
- * <p>Checking once at startup is sufficient: DuckLake reads a catalog's options when it is attached, so an option
- * changed while the process runs only takes effect at the next start, which runs this check again.
+ * <p>The catalog must be attached with {@code DATA_INLINING_ROW_LIMIT 0}. Leaving the parameter out is not enough,
+ * because the default limit is 10.
  */
 public final class DuckLakeInlining {
 
-    /** The DuckDB setting holding the default limit (10) when nothing else sets one. */
-    public static final String SETTING = "ducklake_default_data_inlining_row_limit";
-    /** The {@code ATTACH} parameter and the DuckLake option name. */
+    /** The {@code ATTACH} parameter, as {@code duckdb_databases().options} names it. */
     public static final String OPTION = "data_inlining_row_limit";
 
     private DuckLakeInlining() {
     }
 
-    /** One stored option row, as {@code ducklake_options()} reports it. */
-    record StoredOption(String scope, String scopeEntry, String value) {
-    }
-
     /**
-     * Fails if inlining is enabled anywhere in any of {@code catalogs}, then sets {@link #SETTING} to zero for this
-     * DuckDB instance, which covers the default when nothing else sets a limit.
+     * Fails unless each of {@code catalogs} was attached with {@code DATA_INLINING_ROW_LIMIT 0}.
      *
-     * @throws IllegalStateException listing every source that enables inlining, with its fix
+     * @throws IllegalStateException listing every catalog that was not, with its fix
      */
     public static void requireDisabled(Collection<String> catalogs) {
         List<String> problems = new ArrayList<>();
         for (String catalog : catalogs) {
-            problems.addAll(enabledSources(catalog));
+            String problem = problem(catalog);
+            if (problem != null) {
+                problems.add(problem);
+            }
         }
         if (!problems.isEmpty()) {
             throw new IllegalStateException("DuckLake data inlining must be off for the catalogs that watermark tables"
@@ -55,12 +44,10 @@ public final class DuckLakeInlining {
                     + " as Parquet, until ducklake_flush_inlined_data runs. Found:\n  - "
                     + String.join("\n  - ", problems));
         }
-        ConnectionPool.executeOnSingleton("SET GLOBAL %s = 0".formatted(SETTING));
     }
 
-    /** Every source that enables inlining for {@code catalog}, each with the statement that turns it off. */
-    static List<String> enabledSources(String catalog) {
-        List<String> found = new ArrayList<>();
+    /** Why {@code catalog} does not have inlining disabled, with the fix, or null when it does. */
+    static String problem(String catalog) {
         String attached;
         try {
             // Case-insensitive, as DuckDB resolves catalog names: a config naming "Lake" writes to a catalog
@@ -72,46 +59,15 @@ public final class DuckLakeInlining {
             throw new IllegalStateException("Cannot read the ATTACH options of catalog '%s': %s"
                     .formatted(catalog, e.getMessage()), e);
         }
-        if (attached != null && !isZero(attached)) {
-            found.add("catalog '%s': ATTACH parameter DATA_INLINING_ROW_LIMIT %s. Remove it from the ATTACH, or set it to 0"
-                    .formatted(catalog, attached.trim()));
+        if (attached == null) {
+            return "catalog '%s': attached without DATA_INLINING_ROW_LIMIT, so the default of 10 applies."
+                    .formatted(catalog) + " Add DATA_INLINING_ROW_LIMIT 0 to its ATTACH";
         }
-        String sql = ("SELECT scope, scope_entry, value FROM ducklake_options('%s')"
-                + " WHERE option_name = '%s' AND coalesce(TRY_CAST(value AS BIGINT), 1) <> 0"
-                + " ORDER BY scope, scope_entry").formatted(literal(catalog), OPTION);
-        try (Connection connection = ConnectionPool.getConnection()) {
-            for (StoredOption option : ConnectionPool.collectAll(connection, sql,
-                    rs -> new StoredOption(rs.getString(1), rs.getString(2), rs.getString(3)))) {
-                found.add(describe(catalog, option));
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException("Cannot read the DuckLake options of catalog '%s': %s"
-                    .formatted(catalog, e.getMessage()), e);
+        if (!isZero(attached)) {
+            return "catalog '%s': ATTACH parameter DATA_INLINING_ROW_LIMIT %s. Set it to 0"
+                    .formatted(catalog, attached.trim());
         }
-        return found;
-    }
-
-    private static String describe(String catalog, StoredOption option) {
-        String fix = "CALL %s.set_option('%s', 0".formatted(catalog, OPTION);
-        String where;
-        switch (option.scope() == null ? "" : option.scope().toUpperCase()) {
-            case "SCHEMA" -> {
-                where = "schema '%s'".formatted(option.scopeEntry());
-                fix += ", schema => '%s')".formatted(option.scopeEntry());
-            }
-            case "TABLE" -> {
-                where = "table '%s'".formatted(option.scopeEntry());
-                String entry = option.scopeEntry();
-                int dot = entry.indexOf('.');
-                fix += dot < 0 ? ", table_name => '%s')".formatted(entry)
-                        : ", schema => '%s', table_name => '%s')".formatted(entry.substring(0, dot), entry.substring(dot + 1));
-            }
-            default -> {
-                where = "the catalog";
-                fix += ")";
-            }
-        }
-        return "catalog '%s': %s option %s = %s. %s".formatted(catalog, where, OPTION, option.value(), fix);
+        return null;
     }
 
     private static boolean isZero(String value) {
