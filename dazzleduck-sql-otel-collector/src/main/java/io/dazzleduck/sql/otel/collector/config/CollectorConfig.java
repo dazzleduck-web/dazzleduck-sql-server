@@ -237,6 +237,11 @@ public class CollectorConfig {
                 Path.of(System.getProperty("java.io.tmpdir"), DEFAULT_TEMP_SUBDIRECTORY).toString());
     }
 
+    /** DuckDB {@code TimeZone} the server applies instance-wide at start; blank leaves the instance's zone alone. */
+    public String getTimeZone() {
+        return getString("time_zone", "UTC");
+    }
+
     public String getServiceName() {
         return getString("service_name", "open-telemetry-collector");
     }
@@ -358,6 +363,7 @@ public class CollectorConfig {
         props.setIngestionConfig(getIngestionConfig());
         props.setVerifySignature(getVerifySignature());
         props.setTempWriteLocation(getTempWriteLocation());
+        props.setTimeZone(getTimeZone());
         props.setMetricsWriteDescription(getMetricsWriteDescription());
         props.setAttributesStringCopy(getAttributesStringCopy());
         props.setCompactionSettings(getCompactionSettings());

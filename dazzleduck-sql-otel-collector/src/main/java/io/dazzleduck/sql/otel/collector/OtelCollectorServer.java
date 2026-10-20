@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.otel.collector;
 
+import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.auth.Validator;
 import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.otel.collector.auth.JwtServerInterceptor;
@@ -69,6 +70,21 @@ public class OtelCollectorServer implements Closeable {
         this.props = props;
     }
 
+    /**
+     * Sets DuckDB's {@code TimeZone} for the whole instance. Timestamp columns are {@code TIMESTAMP WITH TIME ZONE},
+     * and DuckDB turns an instant into calendar parts in the session's time zone, so {@code CAST(timestamp AS DATE)},
+     * partition expressions and DuckLake's time partition transforms would otherwise follow the host's zone.
+     * {@code SET GLOBAL}, because ingestion writes on pooled duplicates of the singleton, which read the global value
+     * rather than the singleton's session. Done here rather than in {@code Main} so an embedded server gets it too.
+     * A null or blank zone leaves the instance unchanged.
+     */
+    static void applyTimeZone(String zone) {
+        if (zone == null || zone.isBlank()) {
+            return;
+        }
+        ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(zone.replace("'", "''")));
+    }
+
     public void start() throws IOException {
         try {
             // Resolved once, before anything is allocated: this validates and creates operator
@@ -77,6 +93,7 @@ public class OtelCollectorServer implements Closeable {
             // and flush scheduler are built, and the three services share one checked directory
             // instead of each re-creating and re-validating it.
             Path tempWriteDir = ConfigConstants.getTempWriteDir(props.getTempWriteLocation());
+            applyTimeZone(props.getTimeZone());
 
             handler = props.getIngestionHandler();
             var ingestionConfig = props.getIngestionConfig();

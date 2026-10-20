@@ -57,6 +57,7 @@ public class OtelCollectorTimestampTest {
     static final long MILLIS = 1_700_000_000_123L;
     static final String UTC_TEXT = "2023-11-14 22:13:20.123";
 
+    String zoneBefore;
     Path outputRoot;
     OtelCollectorServer server;
     ManagedChannel channel;
@@ -64,6 +65,9 @@ public class OtelCollectorTimestampTest {
     @BeforeAll
     void setup() throws Exception {
         ConnectionPool.executeBatch(new String[]{"INSTALL arrow FROM community", "LOAD arrow"});
+        // A non-UTC instance zone that start() must replace.
+        zoneBefore = ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class);
+        ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'America/Los_Angeles'");
         outputRoot = Files.createTempDirectory("otel-timestamp-test");
         for (String q : new String[]{"logs", "traces", "metrics"}) {
             Files.createDirectories(outputRoot.resolve(q));
@@ -99,7 +103,11 @@ public class OtelCollectorTimestampTest {
         try {
             if (channel != null) { channel.shutdown(); channel.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS); }
         } finally {
-            if (server != null) server.close();
+            try {
+                if (server != null) server.close();
+            } finally {
+                ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(zoneBefore));
+            }
         }
     }
 
@@ -157,20 +165,13 @@ public class OtelCollectorTimestampTest {
     }
 
     /**
-     * The collector's DuckDB instance defaults to UTC on every pooled connection, not only the singleton, so
+     * Starting the server sets the instance to UTC on every pooled connection, not only the singleton, so
      * {@code CAST(timestamp AS DATE)} and similar transformations give the UTC date regardless of the host's zone.
      */
     @Test
-    void duckDbDefaultsToUtcOnEveryConnection() throws Exception {
-        String before = ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class);
-        try {
-            ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'America/Los_Angeles'");
-            Main.applyDuckDbDefaults();
-            assertEquals("UTC", ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
-            assertEquals("2023-11-14", ConnectionPool.collectFirst(
-                    "SELECT CAST(make_timestamptz(" + MILLIS * 1000 + "::BIGINT) AS DATE)::VARCHAR", String.class));
-        } finally {
-            ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(before));
-        }
+    void serverStartSetsUtcOnEveryConnection() throws Exception {
+        assertEquals("UTC", ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
+        assertEquals("2023-11-14", ConnectionPool.collectFirst(
+                "SELECT CAST(make_timestamptz(" + MILLIS * 1000 + "::BIGINT) AS DATE)::VARCHAR", String.class));
     }
 }

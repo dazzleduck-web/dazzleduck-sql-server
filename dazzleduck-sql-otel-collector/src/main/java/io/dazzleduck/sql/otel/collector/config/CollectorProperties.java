@@ -40,6 +40,18 @@ public class CollectorProperties {
     private String tempWriteLocation =
             java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "dazzleduck-writes").toString();
 
+    // DuckDB TimeZone set instance-wide (SET GLOBAL) when the server starts; null or blank leaves it unchanged.
+    // See time_zone in reference.conf.
+    private String timeZone = "UTC";
+
+    public String getTimeZone() {
+        return timeZone;
+    }
+
+    public void setTimeZone(String timeZone) {
+        this.timeZone = timeZone;
+    }
+
     // Whether metric rows carry the OTLP description; see metrics.write_description in reference.conf.
     private boolean metricsWriteDescription = false;
 

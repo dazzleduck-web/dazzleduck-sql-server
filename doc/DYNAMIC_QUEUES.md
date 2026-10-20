@@ -154,9 +154,13 @@ otel_collector {
 
 How the columns are derived: for each managed queue the collector materialises the row's
 `input_schema` (a DuckDB column-definition fragment, e.g.
-`timestamp TIMESTAMP, severity_text VARCHAR, body VARCHAR`) as the `__this` input, applies the
+`timestamp TIMESTAMPTZ, severity_text VARCHAR, body VARCHAR`) as the `__this` input, applies the
 queue's `transformation`, and describes the result — exactly the schema real ingestion would produce.
 So a row must set `input_schema` to be managed (rows without one are skipped).
+
+The collector writes every timestamp column as `TIMESTAMPTZ` (a UTC instant), so declare timestamp
+columns in `input_schema` as `TIMESTAMPTZ`, not `TIMESTAMP`. DuckLake registers a file only if its
+column types match the table's, so a table created with a `TIMESTAMP` column rejects every batch.
 
 Reconciliation runs whenever the registry reloads (i.e. on each `schema_version` bump):
 
@@ -167,6 +171,9 @@ Reconciliation runs whenever the registry reloads (i.e. on each `schema_version`
 Constraints: columns are only **added or removed** — existing columns are never re-typed or
 re-ordered (a DuckDB `ALTER` limitation) — and **tables are never dropped**. Deleting a queue only
 stops ingestion; its table and data are left intact.
+
+So correcting `input_schema` from `TIMESTAMP` to `TIMESTAMPTZ` does not fix a table that already
+exists; point the queue at a new table instead (see "Timestamps" in the collector README).
 
 ## Queue Lifecycle Operations
 
@@ -182,7 +189,7 @@ INSERT INTO ingestion_queues
     (ingestion_queue, catalog, schema_name, table_name, input_schema)
 VALUES
     ('app-logs', 'my_catalog', 'main', 'app_logs',
-     'timestamp TIMESTAMP, severity_number INTEGER, severity_text VARCHAR, body VARCHAR');
+     'timestamp TIMESTAMPTZ, severity_number INTEGER, severity_text VARCHAR, body VARCHAR');
 UPDATE schema_version SET version = version + 1 WHERE id = 1;
 COMMIT;
 ```
@@ -243,7 +250,7 @@ SELECT * FROM reg.ingestion_queues;
 BEGIN;
 INSERT INTO reg.ingestion_queues
     (ingestion_queue, catalog, schema_name, table_name, input_schema)
-VALUES ('audit-logs', 'my_catalog', 'main', 'audit_logs', 'timestamp TIMESTAMP, body VARCHAR');
+VALUES ('audit-logs', 'my_catalog', 'main', 'audit_logs', 'timestamp TIMESTAMPTZ, body VARCHAR');
 UPDATE reg.schema_version SET version = version + 1 WHERE id = 1;
 COMMIT;
 
@@ -279,7 +286,7 @@ def bump(con):
 con.execute("""
     INSERT INTO ingestion_queues (ingestion_queue, catalog, schema_name, table_name, input_schema)
     VALUES (?, ?, ?, ?, ?)
-""", ("audit-logs", "my_catalog", "main", "audit_logs", "timestamp TIMESTAMP, body VARCHAR"))
+""", ("audit-logs", "my_catalog", "main", "audit_logs", "timestamp TIMESTAMPTZ, body VARCHAR"))
 bump(con)
 con.commit()
 

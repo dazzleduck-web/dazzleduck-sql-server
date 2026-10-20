@@ -51,9 +51,6 @@ public class Main {
         // ducklake and arrow are loaded before DuckLakeIngestionHandler queries DuckLake metadata.
         CollectorConfig config = new CollectorConfig(args.configFile);
 
-        // UTC first, so operator connection_settings and the startup script can still override it.
-        applyDuckDbDefaults();
-
         // DuckDB settings for the ingestion instance. The default (disabling the external-file
         // cache) is declared in reference.conf rather than here, so it is visible to operators
         // and overridable per deployment - the ingest path stages each batch to an Arrow file,
@@ -80,17 +77,4 @@ public class Main {
         server.blockUntilShutdown();
     }
 
-    /**
-     * Instance-wide DuckDB defaults the collector relies on, applied before {@code connection_settings} and the
-     * startup script so either can override them.
-     *
-     * <p>{@code TimeZone = 'UTC'}: timestamp columns are {@code TIMESTAMP WITH TIME ZONE}, and DuckDB turns an instant
-     * into calendar parts in the session's time zone. Transformations such as {@code CAST(timestamp AS DATE)},
-     * partition expressions, and DuckLake's time partition transforms would otherwise depend on the host's zone, and a
-     * bare literal like {@code '2026-10-18 00:00:00'} would be read in it. {@code SET GLOBAL} so every pooled
-     * connection, not only the singleton, starts in UTC.
-     */
-    static void applyDuckDbDefaults() {
-        ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'UTC'");
-    }
 }

@@ -260,10 +260,12 @@ Every timestamp column is written as `Timestamp(ms, UTC)`: OTLP times are instan
 written at millisecond precision and marked as UTC. DuckDB reads them as `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ`), so
 `timestamp >= now() - INTERVAL 1 DAY` compares instants directly and is pushed down to the scan.
 
-- **The collector's DuckDB instance defaults to `TimeZone = 'UTC'`**, set before `ingestion.connection_settings` and
-  the startup script (either can override it). DuckDB turns an instant into calendar parts in the session's time zone,
-  so transformations like `CAST(timestamp AS DATE)`, partition expressions and DuckLake time partitions keep giving UTC
-  results whatever the host's zone.
+- **The collector's DuckDB instance runs in UTC.** When the server starts it runs `SET GLOBAL TimeZone` with the
+  `time_zone` setting (default `"UTC"`). DuckDB turns an instant into calendar parts in the session's time zone, so
+  transformations like `CAST(timestamp AS DATE)`, partition expressions and DuckLake time partitions give UTC results
+  whatever the host's zone. To use another zone, set `time_zone`; `""` leaves DuckDB's zone unchanged. A
+  `SET TimeZone` in `ingestion.connection_settings` or the startup script does not work: it runs before the server
+  starts, and a plain `SET` only changes the singleton connection, not the pooled connections that write the data.
 - **Readers:** a bare literal such as `'2026-10-18 00:00:00'` is read in the reader's session time zone; write an
   offset (`'2026-10-18 00:00:00+00'`) or run the session in UTC.
 - **Existing DuckLake tables:** DuckLake registers a file only if its column types match the table's, so a target table
