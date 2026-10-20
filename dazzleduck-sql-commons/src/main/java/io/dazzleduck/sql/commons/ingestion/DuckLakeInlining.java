@@ -63,8 +63,10 @@ public final class DuckLakeInlining {
         List<String> found = new ArrayList<>();
         String attached;
         try {
+            // Case-insensitive, as DuckDB resolves catalog names: a config naming "Lake" writes to a catalog
+            // attached as lake, and an exact match would skip its ATTACH parameter.
             attached = ConnectionPool.collectFirst(
-                    "SELECT max(options['%s']) FROM duckdb_databases() WHERE database_name = '%s'"
+                    "SELECT max(options['%s']) FROM duckdb_databases() WHERE lower(database_name) = lower('%s')"
                             .formatted(OPTION, literal(catalog)), String.class);
         } catch (Exception e) {
             throw new IllegalStateException("Cannot read the ATTACH options of catalog '%s': %s"

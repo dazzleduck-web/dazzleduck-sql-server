@@ -81,6 +81,11 @@ public class DuckLakeInliningTest {
     }
 
     private DuckLakeIngestionTaskFactoryProvider provider(boolean withWatermark) {
+        return provider(withWatermark, catalog);
+    }
+
+    /** @param configCatalog the catalog name as the config file spells it */
+    private DuckLakeIngestionTaskFactoryProvider provider(boolean withWatermark, String configCatalog) {
         var provider = new DuckLakeIngestionTaskFactoryProvider();
         provider.setConfig(com.typesafe.config.ConfigFactory.parseString("""
                 ingestion_queue_table_mapping = [{
@@ -90,7 +95,7 @@ public class DuckLakeInliningTest {
                     table   = "t"
                     %s
                 }]
-                """.formatted(catalog, withWatermark ? """
+                """.formatted(configCatalog, withWatermark ? """
                     additional_parameters {
                         watermark_table                = "wm"
                         watermark_timestamp_column     = "ts"
@@ -130,6 +135,14 @@ public class DuckLakeInliningTest {
     void failsOnTheAttachParameter() throws Exception {
         attach("inl_attach", 10);
         var e = assertThrows(IllegalStateException.class, () -> provider(true).validate());
+        assertTrue(e.getMessage().contains("ATTACH parameter DATA_INLINING_ROW_LIMIT 10"), e.getMessage());
+    }
+
+    /** DuckDB resolves catalog names case-insensitively, so a config spelling them differently writes to the same one. */
+    @Test
+    void failsOnTheAttachParameterWhenTheConfigSpellsTheCatalogInAnotherCase() throws Exception {
+        attach("inl_case", 10);
+        var e = assertThrows(IllegalStateException.class, () -> provider(true, "INL_Case").validate());
         assertTrue(e.getMessage().contains("ATTACH parameter DATA_INLINING_ROW_LIMIT 10"), e.getMessage());
     }
 
