@@ -256,8 +256,10 @@ All schemas flatten the OTLP 3-level hierarchy (Resource → Scope → Record). 
 
 ### Timestamps
 
-Every timestamp column is written as `Timestamp(ms, UTC)`: OTLP times are instants (nanoseconds since the Unix epoch),
-written at millisecond precision and marked as UTC. DuckDB reads them as `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ`), so
+Every top-level timestamp column is written as `Timestamp(ms, UTC)`: OTLP times are instants (nanoseconds since the
+Unix epoch), written at millisecond precision and marked as UTC. The one nested time, `time_ms` inside a span's
+`events`, is still an `Int64` count of epoch milliseconds; convert it with `to_timestamp(time_ms / 1000)` or
+`make_timestamptz(time_ms * 1000)`. DuckDB reads them as `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ`), so
 `timestamp >= now() - INTERVAL 1 DAY` compares instants directly and is pushed down to the scan.
 
 - **Calendar parts follow DuckDB's time zone.** Writing the data does not depend on it, but DuckDB turns an instant
@@ -272,10 +274,13 @@ written at millisecond precision and marked as UTC. DuckDB reads them as `TIMEST
 - **Readers:** a bare literal such as `'2026-10-18 00:00:00'` is read in the reader's session time zone; write an
   offset (`'2026-10-18 00:00:00+00'`) or run the session in UTC.
 - **Existing DuckLake tables:** DuckLake registers a file only if its column types match the table's, so a target table
-  (or watermark table) whose timestamp columns are `TIMESTAMP` rejects the new files. Create those columns as
-  `TIMESTAMPTZ`. Do not convert an existing column with `ALTER COLUMN … TYPE TIMESTAMPTZ`: old values would then be
+  whose timestamp columns are `TIMESTAMP` rejects the new files. Create those columns as `TIMESTAMPTZ`. Do not convert an existing column with `ALTER COLUMN … TYPE TIMESTAMPTZ`: old values would then be
   converted in each reader's time zone, and files still in flight with `TIMESTAMP` are rejected. Use a new table, or
   copy the data with `timezone('UTC', ts)`.
+- **Watermark tables:** a `TIMESTAMP` watermark column is not rejected, so nothing reports the mismatch. Watermark rows
+  are written with `INSERT … VALUES` of text, the MIN and MAX rendered with an offset in the writing connection's
+  zone, and casting that text to `TIMESTAMP` keeps the clock time and drops the offset. The stored value is then UTC
+  only when that zone is UTC. Create watermark timestamp columns as `TIMESTAMPTZ`.
 
 ### Logs
 
@@ -315,7 +320,7 @@ written at millisecond precision and marked as UTC. DuckDB reads them as `TIMEST
 | `resource_attributes` | Map(Utf8, Utf8) | |
 | `scope_name` | Utf8 | |
 | `scope_version` | Utf8 | |
-| `events` | List(Struct(name, time_ms, attributes, attributes_int … attributes_json)) | |
+| `events` | List(Struct(name, time_ms, attributes, attributes_int … attributes_json)) | `time_ms` is Int64 epoch millis |
 | `links` | List(Struct(trace_id, span_id, attributes, attributes_int … attributes_json)) | |
 | `attributes_int` … `attributes_json` | typed maps | see [Typed attributes](#typed-attributes) |
 | `resource_attributes_int` … `resource_attributes_json` | typed maps | |

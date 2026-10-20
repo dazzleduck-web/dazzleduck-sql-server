@@ -64,9 +64,10 @@ public class OtelCollectorTimestampTest {
 
     @BeforeAll
     void setup() throws Exception {
+        // Read first, so cleanup() can restore it whatever fails later in setup().
+        zoneBefore = ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class);
         ConnectionPool.executeBatch(new String[]{"INSTALL arrow FROM community", "LOAD arrow"});
         // A non-UTC instance zone that start() must replace.
-        zoneBefore = ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class);
         ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'America/Los_Angeles'");
         outputRoot = Files.createTempDirectory("otel-timestamp-test");
         for (String q : new String[]{"logs", "traces", "metrics"}) {
@@ -107,7 +108,10 @@ public class OtelCollectorTimestampTest {
             try {
                 if (server != null) server.close();
             } finally {
-                ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(zoneBefore));
+                // Null only if setup() failed before reading it; then the zone was never changed.
+                if (zoneBefore != null) {
+                    ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = '%s'".formatted(zoneBefore));
+                }
             }
         }
     }
@@ -166,8 +170,9 @@ public class OtelCollectorTimestampTest {
     }
 
     /**
-     * With {@code time_zone = "UTC"}, starting the server sets the instance to UTC on every pooled connection, not only the singleton, so
-     * {@code CAST(timestamp AS DATE)} and similar transformations give the UTC date regardless of the host's zone.
+     * With {@code time_zone = "UTC"}, starting the server sets the instance to UTC on every pooled connection, not
+     * only the singleton, so {@code CAST(timestamp AS DATE)} and similar transformations give the UTC date
+     * regardless of the host's zone.
      */
     @Test
     void configuredTimeZoneReachesEveryConnection() throws Exception {
@@ -181,8 +186,16 @@ public class OtelCollectorTimestampTest {
     void defaultLeavesTimeZoneUnchanged() throws Exception {
         assertEquals(null, new CollectorProperties().getTimeZone());
         assertEquals("", new io.dazzleduck.sql.otel.collector.config.CollectorConfig().getTimeZone());
-        OtelCollectorServer.applyTimeZone(null);
-        OtelCollectorServer.applyTimeZone("");
-        assertEquals("UTC", ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
+        // Start from a non-UTC zone, so applying UTC by mistake would show.
+        ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'America/Los_Angeles'");
+        try {
+            OtelCollectorServer.applyTimeZone(null);
+            OtelCollectorServer.applyTimeZone("");
+            assertEquals("America/Los_Angeles",
+                    ConnectionPool.collectFirst("SELECT current_setting('TimeZone')", String.class));
+        } finally {
+            // Back to what setup() configured, which configuredTimeZoneReachesEveryConnection asserts.
+            ConnectionPool.executeOnSingleton("SET GLOBAL TimeZone = 'UTC'");
+        }
     }
 }
