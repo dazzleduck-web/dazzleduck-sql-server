@@ -60,6 +60,8 @@ import java.util.stream.Collectors;
  *   -Dbenchmark.clients=32        concurrent requests; must cover rate x request latency
  *   -Dbenchmark.attributes=realistic
  *   -Dbenchmark.string_copy=false  otel_collector.attributes.string_copy (default true)
+ *   -Dbenchmark.attribute_types=true  record attribute name/type mappings (default off), to measure
+ *                                  what AttributeTypeScan's per-row layout check costs
  *   -Dbenchmark.signal=traces      steady mode only: send spans instead of log records
  * </pre>
  * {@code benchmark.attributes=realistic} gives each record 40 attributes of every OTLP value type
@@ -132,6 +134,11 @@ public class OtelCollectorBenchmark {
             }
             @Override public String getTargetPath(String id) { return signalPaths.getOrDefault(id, "./" + id); }
             @Override public String[] getPartitionBy(String id) { return new String[0]; }
+            // -Dbenchmark.attribute_types=true makes every queue name a registry table, which is
+            // what turns detection on; the rows themselves go nowhere (see below).
+            @Override public String getAttributeTypesTable(String id) {
+                return Boolean.getBoolean("benchmark.attribute_types") ? "benchmark_attribute_types" : null;
+            }
 
             // Cache one queue per id, as the DuckLake handlers do. The interface default builds a
             // new queue (and writer thread) on EVERY export and never closes it, so requests never
@@ -252,11 +259,27 @@ public class OtelCollectorBenchmark {
         // Epoch-ms markers bound the measured window, so a JFR summary can drop the warmup.
         System.out.println("STEADY-START " + System.currentTimeMillis());
         long t0 = System.nanoTime();
+        long cpu0 = processCpuNanos();
         long[] result = steadyLoop(sender, channels.size(), Duration.ofSeconds(STEADY_SEC));
         double seconds = (System.nanoTime() - t0) / 1e9;
+        long cpuNanos = processCpuNanos() - cpu0;
         System.out.println("STEADY-END " + System.currentTimeMillis());
         System.out.printf("  sent %,d records in %.1fs = %,.0f rec/s; errors %d; requests behind schedule %d%n",
                 result[0], seconds, result[0] / seconds, result[1], result[2]);
+        // At a FIXED offered rate the interesting number is not rec/s — both builds deliver the
+        // rate until they saturate — but the CPU spent delivering it. This process runs the clients
+        // too, so the absolute figure is not the collector's alone; the DIFFERENCE between two runs
+        // of the same profile is, since the client work is identical.
+        if (cpuNanos > 0) {
+            System.out.printf("  process CPU %.1fs over the window = %.0f ns/record (clients included)%n",
+                    cpuNanos / 1e9, cpuNanos / (double) Math.max(1, result[0]));
+        }
+    }
+
+    /** Whole-process CPU time, or -1 where the JDK does not expose it. */
+    private static long processCpuNanos() {
+        var os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        return os instanceof com.sun.management.OperatingSystemMXBean sun ? sun.getProcessCpuTime() : -1L;
     }
 
     /** Sends pooled request {@code index} on client {@code client}; {@code done} gets success. */

@@ -25,11 +25,18 @@ public class SpanBatchWriter {
         write(entries, root, true);
     }
 
+    public static void write(List<SpanEntry> entries, VectorSchemaRoot root, boolean stringCopy) {
+        write(entries, root, stringCopy, null);
+    }
+
     /**
      * @param stringCopy also write every non-string attribute value, as text, to the string
      *                   attribute maps — the span's, its resource's, and its events' and links'
+     * @param scan       collects the batch's attribute name/type mappings for
+     *                   {@link AttributeTypeRegistry}, or null to collect nothing
      */
-    public static void write(List<SpanEntry> entries, VectorSchemaRoot root, boolean stringCopy) {
+    public static void write(List<SpanEntry> entries, VectorSchemaRoot root, boolean stringCopy,
+                             AttributeTypeScan scan) {
         root.allocateNew();
 
         VarCharVector traceIdVec        = (VarCharVector)        root.getVector(OtelTraceSchema.COL_TRACE_ID);
@@ -46,11 +53,15 @@ public class SpanBatchWriter {
         VarCharVector scopeVersionVec   = (VarCharVector)        root.getVector(OtelTraceSchema.COL_SCOPE_VERSION);
 
         AttributeMapsWriter attrWriter = AttributeMapsWriter.of(root,
-                OtelTraceSchema.COL_ATTRIBUTES, OtelTraceSchema.COL_TYPED_ATTRIBUTES, stringCopy, entries.size());
+                OtelTraceSchema.COL_ATTRIBUTES, OtelTraceSchema.COL_TYPED_ATTRIBUTES, stringCopy, entries.size(),
+                AttributeTypeScan.cursorOf(scan, AttributeScope.ATTRIBUTE));
         AttributeMapsWriter resAttrWriter = AttributeMapsWriter.of(root,
-                OtelTraceSchema.COL_RESOURCE_ATTRIBUTES, OtelTraceSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy, entries.size());
-        SpanListWriter<Span.Event> eventsWriter = SpanListWriter.events(root, stringCopy);
-        SpanListWriter<Span.Link> linksWriter = SpanListWriter.links(root, stringCopy);
+                OtelTraceSchema.COL_RESOURCE_ATTRIBUTES, OtelTraceSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy,
+                entries.size(), AttributeTypeScan.cursorOf(scan, AttributeScope.RESOURCE));
+        SpanListWriter<Span.Event> eventsWriter = SpanListWriter.events(root, stringCopy,
+                AttributeTypeScan.cursorOf(scan, AttributeScope.EVENT));
+        SpanListWriter<Span.Link> linksWriter = SpanListWriter.links(root, stringCopy,
+                AttributeTypeScan.cursorOf(scan, AttributeScope.LINK));
 
         for (int i = 0; i < entries.size(); i++) {
             SpanEntry entry = entries.get(i);

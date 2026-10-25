@@ -9,6 +9,7 @@ import io.dazzleduck.sql.commons.ingestion.IngestionHandler;
 import io.dazzleduck.sql.commons.ingestion.ParquetIngestionQueue;
 import io.dazzleduck.sql.commons.ingestion.PartitionedIngestionQueue;
 import io.dazzleduck.sql.commons.ingestion.PendingWriteExceededException;
+import io.dazzleduck.sql.commons.ingestion.SidecarRows;
 import io.dazzleduck.sql.otel.collector.auth.JwtServerInterceptor;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -160,10 +161,33 @@ class OtelServiceBase implements Closeable {
 
     /** Submits an Arrow file to the queue as a single batch. */
     CompletableFuture<Void> addBatch(ParquetIngestionQueue queue, Path arrowFile) throws IOException {
+        return addBatch(queue, arrowFile, null);
+    }
+
+    /**
+     * Submits an Arrow file to the queue as a single batch, with rows to be appended beside the
+     * target table in the transaction that registers the batch's files — the attribute type
+     * registry's mappings (see {@link AttributeTypeRegistry}). The returned future therefore
+     * completes successfully only once those rows have committed with the data.
+     */
+    CompletableFuture<Void> addBatch(ParquetIngestionQueue queue, Path arrowFile, SidecarRows sidecarRows)
+            throws IOException {
         long fileSize = Files.size(arrowFile);
         Batch<String> batch = new Batch<>(new String[0], new String[0],
-                arrowFile.toString(), null, 0, fileSize, "parquet", Instant.now());
+                arrowFile.toString(), null, 0, fileSize, "parquet", Instant.now(), sidecarRows);
         return queue.add(batch).thenApply(ignored -> null);
+    }
+
+    /**
+     * The queue's attribute type registry table, or null when it records none.
+     *
+     * <p>Read per export, but that does not make the parameter hot-swappable: the table and its
+     * data directory are created by {@link AttributeTypeRegistry#start}, so a queue that gains the
+     * parameter while running has nowhere to write until the collector restarts. Losing it does
+     * take effect without one — the stream simply stops being scanned.
+     */
+    String attributeTypesTable(String queueId) {
+        return handler.getAttributeTypesTable(queueId);
     }
 
     /** Verified JWT claims for the queue, or {@code null} when it does not extract claims. */

@@ -38,6 +38,36 @@ public interface IngestionHandler {
     default WatermarkSpec getWatermarkSpec(String queueId) { return null; }
 
     /**
+     * The queue's attribute type registry table ({@link QueueIdToTableMapping#attributeTypesTable()}),
+     * or {@code null} when the queue records none. Unqualified: the post-ingestion task resolves it
+     * in the queue's own catalog and schema. Queues naming the same table in the same schema share
+     * it; that is the configuration's choice, not a rule of this interface.
+     */
+    default String getAttributeTypesTable(String queueId) { return null; }
+
+    /**
+     * The same table as {@link #getAttributeTypesTable}, fully qualified as
+     * {@code catalog.schema.table}, or {@code null} when the queue records none. This is how a
+     * producer finds the table to READ — to build its cache of what is already recorded at startup
+     * — since the name is otherwise resolved only once a batch is in flight.
+     */
+    default String getAttributeTypesTableRef(String queueId) { return null; }
+
+    /**
+     * The directory that table's data files live in, or {@code null} when the queue records none.
+     * A producer needs it because its rows are written as a Parquet file and registered in place
+     * (see {@link SidecarRows}), so the file has to land under that table's own path. Resolvable
+     * only once the table exists in the catalog.
+     */
+    default String getAttributeTypesTablePath(String queueId) { return null; }
+
+    /**
+     * The queue's own cap on held attribute type mappings, or null to use the process-wide default.
+     * See {@code QueueIdToTableMapping#attributeTypesMaxEntries()}.
+     */
+    default Integer getAttributeTypesMaxEntries(String queueId) { return null; }
+
+    /**
      * Re-reads, right now, whatever catalog-derived state the queue's writes depend on (its
      * transformation and partitioning), ignoring any refresh interval. Called by
      * {@link ParquetIngestionQueue} after a failed write, so a retry is built from the current

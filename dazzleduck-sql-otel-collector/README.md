@@ -58,6 +58,10 @@ otel_collector {
     # "Typed attributes"); on by default
     attributes { string_copy = true }
 
+    # Attribute type registry (see "Attribute type registry"). Which streams record, and into which
+    # table, is set per queue by `attribute_types_table`; these are the global switch and cap.
+    attribute_types { enabled = true, max_entries = 100000, max_entries_per_stream = 10000 }
+
     # Startup SQL run before any queue is created (load extensions, ATTACH DuckLake catalogs)
     startup_script_provider {
         content = "INSTALL arrow FROM community; LOAD arrow;"
@@ -393,6 +397,123 @@ attributes are stored in it, e.g.:
 ALTER TABLE logs ADD COLUMN attributes_int MAP(VARCHAR, BIGINT);
 ```
 
+### Attribute type registry
+
+Because each attribute goes to the map its value type selects, a service that sends `x` as a string
+in one release and as an int in the next moves its values from `attributes` to `attributes_int` —
+and nothing in the data says so, leaving a reader to search all six maps. The registry records it.
+
+A stream records mappings only if its queue mapping names a table:
+
+```hocon
+additional_parameters { attribute_types_table = "otel_attribute_types" }
+```
+
+The name is unqualified and resolved in that queue's own catalog and schema — so the table sits
+beside the tables it describes and can be joined to them — and it is created on first use. Streams
+sharing a schema may name one table and share it, their rows kept apart by `ingestion_queue`, or
+each name its own. A stream that names none is not even scanned.
+
+| Column | Holds |
+|--------|-------|
+| `ingestion_queue` | the stream the attribute arrived on |
+| `signal` | `logs`, `traces` or `metrics` |
+| `attribute_scope` | `attribute`, `resource`, `event` or `link` — the last two being span events' and links' attributes |
+| `attribute_name` | the OTLP key, exactly as received |
+| `value_type` | `string`, `int`, `double`, `bool`, `bytes`, `array`, `kvlist` or `empty`. `array` and `kvlist` both land in `attributes_json` but are kept apart here |
+| `first_seen` | when the collector noticed the mapping — not when the data was produced |
+| `collector_id` | `HOSTNAME` / `CONTAINER_ID` of the collector that wrote the row |
+
+Rows reach the table the way data does — **written as a Parquet file and registered**, never
+inserted. The file is `COPY`ed before the transaction, exactly as the batch's own data file is, and
+`ducklake_add_data_files` registers both in the **same transaction**, so a registered data file
+always has its mappings committed. Because that call references a file in place, the mapping file is
+written into the registry table's own data directory, which startup creates along with the table.
+
+The trade-off of that atomicity: a statement the database rejects fails the batch, where a
+background writer would have retried it. One small file is written per *first appearance* of a
+mapping — none in steady state — and ordinary compaction merges them. DuckLake queues only; a
+plain-Parquet queue has no transaction to join, and its mappings are counted as dropped.
+
+The table and its data directory are created by the collector **at startup**, before the gRPC
+server accepts traffic: `CREATE TABLE IF NOT EXISTS` for each distinct table its streams name,
+which both creates a missing one and checks that it can exist. **A failure fails startup**, with a message naming the table — so
+an unattached catalog, a missing schema or a name already taken is a startup error rather than a
+batch that fails at commit once traffic arrives and then fails forever. Nothing has to be
+provisioned to turn the feature on, and the ingestion transaction carries no DDL. A table dropped
+under a running collector is not silently recreated: that stream's batches fail until it is
+restored, the same as dropping its target table.
+
+It is **append-only and tolerates duplicates**. A write reads, updates and deletes nothing, so it
+cannot conflict with another process appending the same value and adds no scan to the transaction —
+two collectors recording a mapping for the first time both append it. Deduplicate when reading,
+which the queries below do. Within one process the repeats are kept down by a cache it builds **at
+startup** from the tables its own queues record into, so a restart does not re-append what it
+already recorded; a table that does not exist yet is the normal state before the first batch and
+never fails startup.
+
+Every batch carries every mapping that is not yet **committed**, including one another in-flight
+batch is already carrying. Skipping it would lose a mapping whenever the batch that carried it
+fails while another commits — registered files with nothing to explain them — so the rule is the
+invariant instead: a batch that does not carry a mapping its data contains is one whose mapping was
+already committed. The cost is a duplicate row per overlapping batch on a mapping's first
+appearance.
+
+Types are recorded, never enforced — ingestion stays schema-on-read, so a type change is written
+down, not rejected.
+
+```sql
+-- the current type of each attribute
+SELECT ingestion_queue, signal, attribute_scope, attribute_name,
+       arg_max(value_type, first_seen) AS current_type
+FROM otel_attribute_types GROUP BY ALL;
+
+-- the ones that have had more than one
+SELECT ingestion_queue, signal, attribute_scope, attribute_name,
+       list(DISTINCT value_type) AS types
+FROM otel_attribute_types GROUP BY ALL
+HAVING count(DISTINCT value_type) > 1;
+
+-- the deduplicated history, earliest sighting across collectors
+SELECT ingestion_queue, signal, attribute_scope, attribute_name, value_type,
+       min(first_seen) AS first_seen
+FROM otel_attribute_types GROUP BY ALL;
+```
+
+Detection runs per batch, not per record: each attribute set keeps the previous row's key list and
+value kinds, and a row that repeats it is skipped without hashing anything — which matters because
+hashing attribute keys once per record was measured at 11.8% of collector CPU in this same loop.
+
+The cache is built for a process running thousands of streams rather than as a set of mappings: one
+entry per stream and signal, one per attribute name within it holding an `int` bitmask over the
+(scope, type) pairs that name has been seen with, and one shared instance of each name across every
+stream. So a name's second scope or type costs a bit rather than an entry, and a name common to a
+thousand streams is stored once.
+
+Two caps bound it. **`max_entries`** (default 100,000) caps the mappings held across all queues — the
+heap bound. **`max_entries_per_stream`** (default 10,000, overridable per queue with
+`attribute_types_max_entries`) caps one queue's own, and is what makes a bad producer diagnosable:
+under a single global cap, one queue whose attribute *names* embed ids (`user.8f21ac.action`)
+consumes the whole budget and every other queue silently stops recording, which punishes the wrong
+streams and tells you only that it happened somewhere. Past either cap new mappings are counted
+(`otel.attribute_types.dropped`, tagged with the queue) and logged, but not recorded.
+
+**Once a queue is at a cap it is no longer scanned at all**, since nothing a scan collected there
+could be recorded — and the stream the cap exists for is also the one a scan costs most on. That
+decides which counter to watch:
+
+- `otel.attribute_types.dropped` counts mappings not recorded **in the batch that crossed the cap**,
+  and then goes flat for that queue, because nothing is collected any more. A flat line after a
+  spike does *not* mean the stream recovered.
+- `otel.attribute_types.capped_batches` counts every batch **skipped because the queue is at a cap**.
+  This is the steady-state signal of a capped stream, and it also names queues stopped by the
+  process-wide `max_entries` that never dropped anything themselves.
+
+The log warns **once per queue, then at most once every five minutes**, naming which cap it hit; the
+rest go to debug, so a capped stream does not bury everything else. With thousands
+of streams the per-stream default times the stream count far exceeds the global cap, so
+`max_entries` remains what protects the heap; a queue raising its own cannot escape it.
+
 ## Micrometer Metrics
 
 `OtelCollectorMetrics` publishes the following meters. When no `MeterRegistry` is configured, a `SimpleMeterRegistry` is used (metrics are active but not published externally).
@@ -434,6 +555,20 @@ Registered per queue when the queue is created, and unregistered when the queue 
 | `dazzleduck.otel.writer.post_ingest_phase_ms` | FunctionCounter |
 | `dazzleduck.otel.writer.pending_batches` | Gauge |
 | `dazzleduck.otel.writer.pending_buckets` | Gauge |
+
+### Attribute Type Registry Metrics
+
+Per queue, except the last two, which are process-wide.
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `otel.attribute_types.new` | FunctionCounter | mappings seen for the first time |
+| `otel.attribute_types.persisted` | FunctionCounter | mappings committed with a batch's files |
+| `otel.attribute_types.rollbacks` | FunctionCounter | mappings released because their batch did not commit; a later batch carries them again |
+| `otel.attribute_types.dropped` | FunctionCounter | mappings not recorded — past either cap, or a name that cannot be written as a SQL literal — in batches that were still scanned; flat once a queue is capped |
+| `otel.attribute_types.capped_batches` | FunctionCounter | batches not scanned because the queue is at its own cap or the process is at `max_entries` — the steady-state signal of a capped stream |
+| `otel.attribute_types.in_flight` | Gauge | mappings on a batch that has not committed yet |
+| `otel.attribute_types.known` | Gauge | mappings held in memory |
 
 ### Registering a Real Registry
 
@@ -482,6 +617,13 @@ otel_collector {
                 #     watermark_group_columns        = "county,state"      # optional
                 #     watermark_batch_id_column      = "batch_id"          # required; UUID, carries the exact
                 #                                                         # commit snapshot (appended, not updated)
+                #
+                #     # Optional per-stream attribute type registry, written in that same
+                #     # transaction. Unqualified, same catalog/schema as the target table,
+                #     # created on first use. Omit it and this stream records nothing; several
+                #     # streams may name the same table and share it.
+                #     attribute_types_table          = "otel_attribute_types"
+                #     attribute_types_max_entries    = 50000   # optional; this stream's own cap
                 # }
             }
         ]

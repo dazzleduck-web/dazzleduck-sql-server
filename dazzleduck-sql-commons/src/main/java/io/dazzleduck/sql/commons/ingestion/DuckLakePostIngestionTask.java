@@ -24,6 +24,14 @@ import java.util.UUID;
  * registration and watermark commit or roll back together. This task never re-reads the written
  * files.
  *
+ * <p>{@link IngestionResult#sidecarRows()} joins the same transaction the same way — rows a
+ * producer derived from the batch, for a table beside the target in its own catalog and schema
+ * (see {@link SidecarRows}). They are written the same way the batch's own data is — a Parquet file
+ * {@code COPY}ed before the transaction, then registered inside it — so the transaction only ever
+ * registers files. This is where that table is resolved, because this is the only place that knows
+ * which catalog and schema the batch went to; the table and its data directory must already exist,
+ * created by the producer at its own startup.
+ *
  * <p>The snapshot id ({@code watermark_snapshot_id_column}) is written by that same INSERT, so it
  * commits with the rows rather than being patched in afterwards. DuckLake assigns a snapshot id at
  * COMMIT and does not expose the pending one, so what is written is
@@ -106,17 +114,86 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
                 .toList());
         List<List<String>> watermarkRows = ingestionResult.watermarkRows();
         boolean hasWatermark = watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty();
+        // Written as Parquet and registered, exactly as the batch's own data file is: the COPY
+        // happens here, outside the transaction, and only the registration joins it. Before the
+        // watermark's snapshot-id prediction below, which must be the last thing read before the
+        // transaction opens; writing this file does not touch snapshots.
+        SidecarRows sidecar = ingestionResult.sidecarRows();
+        // Every file this task wrote, which is what the queue deletes if registration is rejected.
+        // The batch's own data files plus the sidecar's, since that one is equally an orphan then,
+        // and a catalog retry writes a fresh one rather than reusing it.
+        List<String> written = files;
+        if (sidecar != null && !sidecar.isEmpty()) {
+            String sidecarFile;
+            try {
+                sidecarFile = writeSidecarFile(sidecar);
+            } catch (SQLException e) {
+                // The COPY runs before the transaction opens, so a failure here registered
+                // NOTHING. Reported as such: a plain SQLException would be read as "outcome
+                // unknown", which leaves the batch's data files behind as orphans and skips the
+                // retry that would have succeeded.
+                throw new FilesNotRegisteredException(
+                        "Sidecar rows for '%s' could not be written, so nothing was registered: %s"
+                                .formatted(sidecar.table(), e.getMessage()), files, e);
+            }
+            written = new ArrayList<>(files);
+            written.add(sidecarFile);
+            queries.add(ADD_FILE_QUERY.formatted(escapeLiteral(catalogName), escapeLiteral(sidecar.table()),
+                    escapeLiteral(sidecarFile), escapeLiteral(schemaName)));
+        }
         try (Connection conn = ConnectionPool.getConnection()) {
             if (!hasWatermark) {
-                executeInTxn(conn, queries, files);
+                executeInTxn(conn, queries, written);
                 return;
             }
             long predictedSnapshotId = predictNextSnapshotId(conn);
             UUID batchId = UUID.randomUUID();
             queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows, predictedSnapshotId, batchId));
-            executeInTxn(conn, queries, files);
+            executeInTxn(conn, queries, written);
+            // The data table's own file, not the sidecar's: its begin_snapshot is the batch's.
             verifySnapshotId(conn, files, predictedSnapshotId, batchId);
         }
+    }
+
+    /**
+     * Writes one batch's sidecar rows to a Parquet file in the sidecar table's own data directory,
+     * and returns its path.
+     *
+     * <p>It has to be that directory: {@code ducklake_add_data_files} records the path it is given
+     * and reads the file there forever, so a scratch location would leave the table pointing at a
+     * file that is about to be deleted. The directory is the producer's to create, at its startup,
+     * along with the table.
+     *
+     * <p>Written BEFORE the transaction, so a failure here has registered nothing — the caller
+     * reports it as {@link FilesNotRegisteredException} rather than as an unknown outcome. A file
+     * whose registration is then rejected is handed to the queue for deletion alongside the
+     * batch's own data files, which is the only way it gets cleaned up: a catalog retry writes a
+     * fresh one rather than reusing this path.
+     */
+    private String writeSidecarFile(SidecarRows sidecar) throws SQLException {
+        String directory = DuckLakeIngestionHandler.tableDataPath(catalogName, schemaName, sidecar.table());
+        if (directory == null) {
+            throw new SQLException(("Sidecar table '%s.%s.%s' is not in the catalog, so there is nowhere to"
+                    + " write its rows; it is created at the producer's startup")
+                    .formatted(catalogName, schemaName, sidecar.table()));
+        }
+        String file = directory.endsWith("/") ? directory + sidecar.fileName()
+                : directory + "/" + sidecar.fileName();
+        try (Connection conn = ConnectionPool.getConnection();
+             Statement statement = conn.createStatement()) {
+            statement.execute(sidecar.copySql(file));
+        } catch (SQLException e) {
+            // A COPY that fails partway can leave a partial file, and nothing will ever reference
+            // it: the caller reports "nothing registered" and does not know this path. Best effort,
+            // because the batch's failure is the thing worth reporting.
+            try {
+                java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(file));
+            } catch (Exception cleanup) {
+                e.addSuppressed(cleanup);
+            }
+            throw e;
+        }
+        return file;
     }
 
     /**

@@ -73,15 +73,27 @@ re-read what was just written.
 
 ## The commit
 
-Registering the written files and appending the watermark row happen in the **same transaction**:
+Registering the written files, appending the watermark row and appending the batch's sidecar rows
+all happen in the **same transaction**:
 
 ```
-ducklake_add_data_files(...)   +   INSERT INTO watermark_table VALUES (...)
+ducklake_add_data_files(...)                      -- the batch's data file
+  + INSERT INTO watermark_table VALUES (...)
+  + ducklake_add_data_files(... sidecar table ...) -- the batch's sidecar file
 ```
 
-Either the data becomes visible together with its watermark, or nothing lands and the Parquet files
+Either the data becomes visible together with its accounting, or nothing lands and the Parquet files
 are left unregistered for `ducklake_cleanup_old_files` to remove. There is never a registered file
 without its accounting, and never a watermark for data that is not there.
+
+The two appended things differ in where they come from, and in how they land. A watermark row is
+**computed** from the batch inside the write path, and appended with an `INSERT`. A sidecar row is
+**carried** by the batch, derived by whoever produced it from something the write path never sees —
+the OTel collector's attribute type registry is the case it exists for, since which OTLP value type
+an attribute arrived with is visible only while the OTLP message is being read — and it is written
+the way data is, as a Parquet file `COPY`ed before the transaction and registered inside it. Both
+are resolved against the target table's own catalog and schema, so each lands beside the data it
+describes. See `SidecarRows`.
 
 Watermark rows are computed **before** the `COPY`, from the same pre-COPY relation the output is
 written from. That means the transformation is already applied, partition columns are real typed

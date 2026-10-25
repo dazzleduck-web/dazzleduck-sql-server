@@ -41,18 +41,22 @@ abstract sealed class SpanListWriter<T> permits SpanListWriter.Events, SpanListW
     private int rows;
     private int elements;
 
-    private SpanListWriter(ListVector list, boolean stringCopy) {
+    private SpanListWriter(ListVector list, boolean stringCopy, AttributeTypeScan.Cursor scan) {
         this.list = list;
         this.struct = (StructVector) list.getDataVector();
-        this.attributes = AttributeMapsWriter.of(struct, stringCopy);
+        this.attributes = AttributeMapsWriter.of(struct, stringCopy, scan);
     }
 
-    static SpanListWriter<Span.Event> events(VectorSchemaRoot root, boolean stringCopy) {
-        return new Events((ListVector) root.getVector(OtelTraceSchema.COL_EVENTS), stringCopy);
+    /** @param scan collects the events' attribute name/type mappings, or null to collect nothing */
+    static SpanListWriter<Span.Event> events(VectorSchemaRoot root, boolean stringCopy,
+                                             AttributeTypeScan.Cursor scan) {
+        return new Events((ListVector) root.getVector(OtelTraceSchema.COL_EVENTS), stringCopy, scan);
     }
 
-    static SpanListWriter<Span.Link> links(VectorSchemaRoot root, boolean stringCopy) {
-        return new Links((ListVector) root.getVector(OtelTraceSchema.COL_LINKS), stringCopy);
+    /** @param scan collects the links' attribute name/type mappings, or null to collect nothing */
+    static SpanListWriter<Span.Link> links(VectorSchemaRoot root, boolean stringCopy,
+                                           AttributeTypeScan.Cursor scan) {
+        return new Links((ListVector) root.getVector(OtelTraceSchema.COL_LINKS), stringCopy, scan);
     }
 
     /** Buffers span {@code row}'s elements; rows must arrive in order from 0 with no gaps. */
@@ -105,8 +109,8 @@ abstract sealed class SpanListWriter<T> permits SpanListWriter.Events, SpanListW
         private final VarWidth names = new VarWidth();
         private final BigInts times = new BigInts();
 
-        private Events(ListVector list, boolean stringCopy) {
-            super(list, stringCopy);
+        private Events(ListVector list, boolean stringCopy, AttributeTypeScan.Cursor scan) {
+            super(list, stringCopy, scan);
         }
 
         @Override
@@ -136,8 +140,8 @@ abstract sealed class SpanListWriter<T> permits SpanListWriter.Events, SpanListW
         private final VarWidth traceIds = new VarWidth();
         private final VarWidth spanIds = new VarWidth();
 
-        private Links(ListVector list, boolean stringCopy) {
-            super(list, stringCopy);
+        private Links(ListVector list, boolean stringCopy, AttributeTypeScan.Cursor scan) {
+            super(list, stringCopy, scan);
         }
 
         @Override

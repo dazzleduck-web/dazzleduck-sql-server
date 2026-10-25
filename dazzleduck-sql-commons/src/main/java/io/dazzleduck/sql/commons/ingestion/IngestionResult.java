@@ -17,13 +17,19 @@ import java.util.Map;
  *                      relation (group values in {@link WatermarkSpec#groupColumns()} order,
  *                      timestamp last, as DuckDB-rendered strings); null when the queue has no
  *                      watermark configured
+ * @param sidecarRows The bucket's batches' {@link SidecarRows}, unioned; null when none of them
+ *                    carried any
  */
-public record IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query, List<List<String>> watermarkRows) {
+public record IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query, List<List<String>> watermarkRows, SidecarRows sidecarRows) {
     IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated) {
-        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, null, null);
+        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, null, null, null);
     }
 
     public IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query) {
-        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, query, null);
+        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, query, null, null);
+    }
+
+    public IngestionResult(String queueName, long ingestionBatchId, String applicationId, Map<String, Long> maxProducerIds, long rowCount, List<String> filesCreated, String query, List<List<String>> watermarkRows) {
+        this(queueName, ingestionBatchId, applicationId, maxProducerIds, rowCount, filesCreated, query, watermarkRows, null);
     }
 }

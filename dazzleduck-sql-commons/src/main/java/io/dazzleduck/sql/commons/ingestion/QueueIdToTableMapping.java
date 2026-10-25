@@ -54,6 +54,15 @@ public record QueueIdToTableMapping(
         String partitionExpression,
         IngestionVariables variables) {
 
+    /**
+     * {@code additional_parameters} key naming this queue's attribute type registry table —
+     * unqualified, resolved in the queue's own catalog and schema. Several queues may name the
+     * same table to share it.
+     */
+    public static final String ATTRIBUTE_TYPES_TABLE_KEY = "attribute_types_table";
+    public static final String ATTRIBUTE_TYPES_MAX_ENTRIES_KEY = "attribute_types_max_entries";
+
+
     /** Validates invariants on every construction path. */
     public QueueIdToTableMapping {
         if (variables == null) {
@@ -82,6 +91,78 @@ public record QueueIdToTableMapping(
         // Fail at config load, not per batch: a malformed watermark spec (partial/blank/typo'd
         // keys) would otherwise write each batch's output and then orphan it at post-ingestion.
         WatermarkSpec.fromParameters(ingestionQueue, additionalParameters);
+        // Same reason: the attribute type table goes into DDL and INSERT text, and a bad name
+        // would now fail every batch rather than just itself.
+        attributeTypesTable(ingestionQueue, additionalParameters);
+        attributeTypesMaxEntries(ingestionQueue, additionalParameters);
+        // The table is resolved in this queue's own catalog and schema, so without them there is
+        // nowhere to put it. Rejected here rather than at startup, where it surfaced as a
+        // reference to 'null.null.<table>' and a message about attaching the catalog.
+        if (attributeTypesTable(ingestionQueue, additionalParameters) != null
+                && (catalog == null || schema == null)) {
+            throw new IllegalArgumentException(("Queue '%s': '%s' needs a catalog and schema to resolve the"
+                    + " table in, but this queue has catalog=%s, schema=%s")
+                    .formatted(ingestionQueue, ATTRIBUTE_TYPES_TABLE_KEY, catalog, schema));
+        }
+    }
+
+    /**
+     * The queue's attribute type registry table ({@value #ATTRIBUTE_TYPES_TABLE_KEY}), or null when
+     * the queue records none. Unqualified, like {@link WatermarkSpec#table()}: it is resolved in
+     * this queue's own catalog and schema, so queues sharing a schema can name one table and share
+     * it — their rows stay apart by the {@code ingestion_queue} column.
+     */
+    public String attributeTypesTable() {
+        return attributeTypesTable(ingestionQueue, additionalParameters);
+    }
+
+    /**
+     * This queue's own cap on mappings held for it ({@value #ATTRIBUTE_TYPES_MAX_ENTRIES_KEY}), or
+     * null to use the process-wide default. It contains one stream's attribute-name cardinality to
+     * that stream; the process-wide {@code max_entries} still bounds the heap, and a queue cannot
+     * raise itself past it.
+     */
+    public Integer attributeTypesMaxEntries() {
+        return attributeTypesMaxEntries(ingestionQueue, additionalParameters);
+    }
+
+    private static Integer attributeTypesMaxEntries(String queueName, Map<String, String> parameters) {
+        if (parameters == null) {
+            return null;
+        }
+        String value = parameters.get(ATTRIBUTE_TYPES_MAX_ENTRIES_KEY);
+        if (value == null) {
+            return null;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Queue '%s': '%s' must be a positive integer, got '%s'"
+                    .formatted(queueName, ATTRIBUTE_TYPES_MAX_ENTRIES_KEY, value), e);
+        }
+        if (parsed <= 0) {
+            throw new IllegalArgumentException("Queue '%s': '%s' must be positive, got %d"
+                    .formatted(queueName, ATTRIBUTE_TYPES_MAX_ENTRIES_KEY, parsed));
+        }
+        return parsed;
+    }
+
+    private static String attributeTypesTable(String queueName, Map<String, String> parameters) {
+        if (parameters == null) {
+            return null;
+        }
+        String table = parameters.get(ATTRIBUTE_TYPES_TABLE_KEY);
+        if (table == null) {
+            return null;
+        }
+        String trimmed = table.trim();
+        if (!trimmed.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+            throw new IllegalArgumentException(("Queue '%s': '%s' must be a single plain identifier — it is"
+                    + " resolved in the queue's own catalog and schema — got '%s'")
+                    .formatted(queueName, ATTRIBUTE_TYPES_TABLE_KEY, table));
+        }
+        return trimmed;
     }
 
     /** Backward-compatible constructor without outputPath/inputSchema (DuckLake-managed entries). */

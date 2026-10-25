@@ -209,6 +209,33 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     @Override
+    public String getAttributeTypesTable(String queueId) {
+        QueueIdToTableMapping mapping = mappingFor(queueId);
+        return mapping == null ? null : mapping.attributeTypesTable();
+    }
+
+    @Override
+    public String getAttributeTypesTableRef(String queueId) {
+        QueueIdToTableMapping mapping = mappingFor(queueId);
+        String table = mapping == null ? null : mapping.attributeTypesTable();
+        return table == null ? null
+                : "%s.%s.%s".formatted(mapping.catalog(), mapping.schema(), table);
+    }
+
+    @Override
+    public Integer getAttributeTypesMaxEntries(String queueId) {
+        QueueIdToTableMapping mapping = mappingFor(queueId);
+        return mapping == null ? null : mapping.attributeTypesMaxEntries();
+    }
+
+    @Override
+    public String getAttributeTypesTablePath(String queueId) {
+        QueueIdToTableMapping mapping = mappingFor(queueId);
+        String table = mapping == null ? null : mapping.attributeTypesTable();
+        return table == null ? null : tableDataPath(mapping.catalog(), mapping.schema(), table);
+    }
+
+    @Override
     public boolean extractClaims(String queueId) {
         QueueIdToTableMapping mapping = mappingFor(queueId);
         return mapping != null && mapping.extractClaims();
@@ -403,6 +430,17 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     // -----------------------------------------------------------------------
     // DuckLake metadata queries
     // -----------------------------------------------------------------------
+
+    /**
+     * The directory a DuckLake table's data files live in, from the catalog's own metadata. Public
+     * because a file written for a table other than a queue's own — a sidecar table, see
+     * {@link SidecarRows} — has to land in that table's directory to be registered in place.
+     *
+     * @return null when the table is not in the catalog
+     */
+    public static String tableDataPath(String catalogName, String schema, String table) {
+        return fetchPath(catalogName, schema, table);
+    }
 
     private static String fetchPath(String catalogName, String schema, String table) {
         String metadataDatabase = "__ducklake_metadata_" + catalogName;

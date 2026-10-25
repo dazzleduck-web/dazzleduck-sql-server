@@ -60,6 +60,7 @@ public class OtelCollectorServer implements Closeable {
     private HealthServer healthServer;
     private CollectorCompactor compactor;
     private QueryServer queryServer;
+    private AttributeTypeRegistry attributeTypes;
     // Scratch directories created by start(); tracked so close() can remove them even when
     // startup fails after creating some but before the corresponding service exists.
     private final List<Path> scratchDirs = new ArrayList<>();
@@ -118,21 +119,29 @@ public class OtelCollectorServer implements Closeable {
                 return t;
             });
 
+            // Before the services, which hold it. start() creates each configured queue's
+            // registry table and its data directory, then builds the cache from what those tables
+            // already hold, on the instance whose catalogs the startup script has attached. It
+            // FAILS startup if a table cannot be created or read, rather than leaving a stream to
+            // fail every batch at commit. A no-op unless attribute_types.enabled is true.
+            attributeTypes = new AttributeTypeRegistry(props.getAttributeTypeSettings(), collectorMetrics);
+            attributeTypes.start(handler);
+
             // Directories are created here rather than in the service constructors: constructor
             // I/O forced an IOException on every caller and left a window where the allocator
             // existed but could never be closed if creation failed.
             logService     = new OtelLogService(
                     createScratchDir(tempWriteDir, OtelLogService.SCRATCH_PREFIX),
                     handler, ingestionConfig, flushScheduler, collectorMetrics,
-                    props.isAttributesStringCopy());
+                    props.isAttributesStringCopy(), attributeTypes);
             traceService   = new OtelTraceService(
                     createScratchDir(tempWriteDir, OtelTraceService.SCRATCH_PREFIX),
                     handler, ingestionConfig, flushScheduler, collectorMetrics,
-                    props.isAttributesStringCopy());
+                    props.isAttributesStringCopy(), attributeTypes);
             metricsService = new OtelMetricsService(
                     createScratchDir(tempWriteDir, OtelMetricsService.SCRATCH_PREFIX),
                     handler, ingestionConfig, flushScheduler, collectorMetrics,
-                    props.isMetricsWriteDescription(), props.isAttributesStringCopy());
+                    props.isMetricsWriteDescription(), props.isAttributesStringCopy(), attributeTypes);
 
             if (!"jwt".equals(props.getAuthentication())) {
                 throw new IllegalStateException(

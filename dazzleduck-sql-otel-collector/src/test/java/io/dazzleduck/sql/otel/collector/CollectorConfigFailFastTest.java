@@ -154,4 +154,53 @@ class CollectorConfigFailFastTest {
         assertThrows(IllegalArgumentException.class,
                 () -> config("otel_collector.login_url = \"not a url\"").toProperties());
     }
+
+    // --- attribute_types -------------------------------------------------------------------
+
+    /**
+     * Whether a stream records anything is set per queue, by its {@code attribute_types_table}
+     * parameter — not here. This block only has the global off switch and the memory cap.
+     */
+    @Test
+    void theAttributeTypeBlockDefaultsToAvailableWithTheStandardCap() {
+        var settings = withReferenceConf("").getAttributeTypeSettings();
+        assertTrue(settings.enabled());
+        assertEquals(100_000, settings.maxEntries());
+    }
+
+    @Test
+    void anAbsentAttributeTypesBlockKeepsThoseDefaults() {
+        var settings = config("otel_collector { grpc_port = 4317 }").getAttributeTypeSettings();
+        assertTrue(settings.enabled());
+        assertEquals(100_000, settings.maxEntries());
+    }
+
+    @Test
+    void theAttributeTypeRegistryCanBeTurnedOffEverywhereAtOnce() {
+        assertFalse(config("otel_collector.attribute_types.enabled = false")
+                .getAttributeTypeSettings().enabled());
+    }
+
+    @Test
+    void aNonPositiveMaxEntriesFails() {
+        for (String bad : new String[]{"0", "-1"}) {
+            var e = assertThrows(IllegalArgumentException.class, () -> config("""
+                    otel_collector.attribute_types.max_entries = %s
+                    """.formatted(bad)).getAttributeTypeSettings(), bad);
+            assertTrue(e.getMessage().contains("max_entries"), e.getMessage());
+        }
+    }
+
+    @Test
+    void anAttributeTypesValueOfTheWrongTypeFails() {
+        assertThrows(ConfigException.WrongType.class, () -> config("""
+                otel_collector.attribute_types.max_entries = "lots"
+                """).getAttributeTypeSettings());
+    }
+
+    @Test
+    void anInvalidAttributeTypesBlockFailsThroughToProperties() {
+        assertThrows(IllegalArgumentException.class,
+                () -> config("otel_collector.attribute_types.max_entries = 0").toProperties());
+    }
 }

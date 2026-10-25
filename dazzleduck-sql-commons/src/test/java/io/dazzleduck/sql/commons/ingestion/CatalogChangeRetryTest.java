@@ -227,6 +227,51 @@ class CatalogChangeRetryTest {
 
     // -----------------------------------------------------------------------
 
+    /**
+     * A post-ingestion task can write files the write path never saw — a sidecar's rows — and when
+     * the registration is rejected those are as unreferenced as the batch's own output. The queue
+     * must therefore delete what the REJECTING TASK reports, not just what the write produced:
+     * reporting them was pointless while nothing read that list, and each catalog retry would add
+     * another orphan to the sidecar table's directory.
+     *
+     * <p>The rejection is produced the way DuckLake really produces one: a sidecar file whose
+     * column is VARCHAR against a table column that is TIMESTAMP, which
+     * {@code ducklake_add_data_files} refuses because it does not cast.
+     */
+    @Test
+    void aRejectedRegistrationDeletesTheSidecarFileTooAndNotJustTheBatchOutput() throws Exception {
+        Path sidecarDir = Files.createDirectories(tempDir.resolve("data").resolve(SCHEMA).resolve("types"));
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn,
+                    "CREATE TABLE %s.%s.types (name VARCHAR, seen TIMESTAMP)".formatted(CATALOG, SCHEMA));
+        }
+        // Untyped, so 'seen' is written as VARCHAR and the registration is rejected.
+        var sidecar = new SidecarRows("types", List.of("name", "seen"),
+                List.of(List.of("'x'", "'2026-08-01 03:00:00'")));
+
+        var handler = handler(null);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            Path input = Files.copy(src1, tempDir.resolve("in-sidecar.parquet"));
+            var future = queue.add(new Batch<>(null, null, input.toString(), "producer1", 0L,
+                    Files.size(input), "parquet", Instant.now(), sidecar));
+            scheduler.tick(1, TimeUnit.MILLISECONDS);
+            assertThrows(Exception.class, () -> future.get(10, TimeUnit.SECONDS),
+                    "the batch fails: its registration was rejected");
+
+            assertEquals(List.of(), unregisteredFilesUnder(outputDir),
+                    "the batch's own output is deleted, as before");
+            try (var files = Files.list(sidecarDir)) {
+                assertEquals(List.of(), files.map(Path::getFileName).map(Path::toString).sorted().toList(),
+                        "and so is the sidecar file the post-ingestion task wrote");
+            }
+            assertEquals(2, queue.getOrphanFilesDeleted(),
+                    "both files counted as deleted, not just the data file");
+            assertEquals(0, queue.getOrphanFilesLeft());
+        }
+        assertEquals(0L, count(""), "nothing was registered");
+    }
+
     private DuckLakeIngestionHandler handler(String transformation) {
         var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), transformation);
         return new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));

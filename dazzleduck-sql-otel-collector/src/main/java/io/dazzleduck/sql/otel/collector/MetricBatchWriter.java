@@ -42,6 +42,18 @@ public class MetricBatchWriter {
      */
     public static void write(List<MetricEntry> entries, VectorSchemaRoot root, boolean writeDescription,
                              boolean stringCopy) {
+        write(entries, root, writeDescription, stringCopy, null);
+    }
+
+    /**
+     * @param writeDescription see {@link #write(List, VectorSchemaRoot, boolean)}
+     * @param stringCopy       also write every non-string attribute value, as text, to the
+     *                         {@code attributes} / {@code resource_attributes} string maps
+     * @param scan             collects the batch's attribute name/type mappings for
+     *                         {@link AttributeTypeRegistry}, or null to collect nothing
+     */
+    public static void write(List<MetricEntry> entries, VectorSchemaRoot root, boolean writeDescription,
+                             boolean stringCopy, AttributeTypeScan scan) {
         root.allocateNew();
 
         VarCharVector nameVec           = (VarCharVector)        root.getVector(OtelMetricSchema.COL_NAME);
@@ -64,9 +76,11 @@ public class MetricBatchWriter {
 
         int rows = dataPointCount(entries);
         AttributeMapsWriter attrWriter = AttributeMapsWriter.of(root,
-                OtelMetricSchema.COL_ATTRIBUTES, OtelMetricSchema.COL_TYPED_ATTRIBUTES, stringCopy, rows);
+                OtelMetricSchema.COL_ATTRIBUTES, OtelMetricSchema.COL_TYPED_ATTRIBUTES, stringCopy, rows,
+                AttributeTypeScan.cursorOf(scan, AttributeScope.ATTRIBUTE));
         AttributeMapsWriter resAttrWriter = AttributeMapsWriter.of(root,
-                OtelMetricSchema.COL_RESOURCE_ATTRIBUTES, OtelMetricSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy, rows);
+                OtelMetricSchema.COL_RESOURCE_ATTRIBUTES, OtelMetricSchema.COL_TYPED_RESOURCE_ATTRIBUTES, stringCopy,
+                rows, AttributeTypeScan.cursorOf(scan, AttributeScope.RESOURCE));
 
         int row = 0;
         for (MetricEntry entry : entries) {
