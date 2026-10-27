@@ -149,7 +149,10 @@ public interface SqlAuthorizer {
                 if (name == null || name.isNull()) {
                     return null;
                 }
-                return inScope.contains(name.asText().toLowerCase(Locale.ROOT)) ? null : from;
+                // A qualified name is always the table, even under a same-named CTE.
+                boolean qualified = !from.path(ExpressionConstants.FIELD_SCHEMA_NAME).asText("").isEmpty()
+                        || !from.path(ExpressionConstants.FIELD_CATALOG_NAME).asText("").isEmpty();
+                return !qualified && inScope.contains(name.asText().toLowerCase(Locale.ROOT)) ? null : from;
             }
             case ExpressionConstants.NODE_TYPE_SUBQUERY -> {
                 JsonNode subquery = from.get(ExpressionConstants.FIELD_SUBQUERY);

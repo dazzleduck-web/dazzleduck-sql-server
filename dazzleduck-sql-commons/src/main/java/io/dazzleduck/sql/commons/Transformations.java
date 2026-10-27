@@ -680,26 +680,8 @@ public class Transformations {
         if (statement == null || statement instanceof NullNode) return;
         String type = statement.get(FIELD_TYPE).asText();
         if (NODE_TYPE_SELECT_NODE.equals(type)) {
-            // Build the set of CTE names visible in this SELECT scope. A CTE body sees the enclosing
-            // scope and the CTEs declared before it, but NOT itself: in
-            // `WITH t AS (SELECT * FROM t)` the inner `t` is the real table t (DuckDB binds it so),
-            // and treating it as a CTE reference would hide that table from authorization. A WITH
-            // RECURSIVE self-reference is the exception; its body is a RECURSIVE_CTE_NODE, which
-            // adds its own name below.
-            Set<String> localCteNames = new HashSet<>(visibleCteNames);
-            JsonNode cteMap = statement.get("cte_map");
-            if (cteMap != null) {
-                JsonNode map = cteMap.get("map");
-                if (map != null && map.isArray()) {
-                    for (JsonNode entry : map) {
-                        // Walk each CTE body so hidden tables inside them are captured
-                        collectAllTableRefsFromStatement(
-                                entry.get("value").get("query").get("node"),
-                                catalogName, schemaName, collector, new HashSet<>(localCteNames));
-                        localCteNames.add(entry.get("key").asText());
-                    }
-                }
-            }
+            Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
+                    collector, visibleCteNames);
             // FROM clause — skip references that resolve to local CTEs
             JsonNode fromTable = statement.get(FIELD_FROM_TABLE);
             if (fromTable != null && !(fromTable instanceof NullNode)) {
@@ -708,16 +690,20 @@ public class Transformations {
             // Expression fields (WHERE, HAVING, SELECT list, etc.)
             collectAllTableRefsFromExpressionFields(statement, catalogName, schemaName, collector, localCteNames);
         } else if (NODE_TYPE_SET_OPERATION_NODE.equals(type)) {
-            collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, visibleCteNames);
-            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, visibleCteNames);
-            collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, visibleCteNames);
+            // `WITH x AS (…) SELECT … UNION SELECT …` hangs the WITH on the set operation itself.
+            Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
+                    collector, visibleCteNames);
+            collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, localCteNames);
+            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, localCteNames);
+            collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, localCteNames);
         } else if (NODE_TYPE_RECURSIVE_CTE_NODE.equals(type)) {
             // WITH RECURSIVE body: recurse into both arms. Keep the CTE's own name visible so the
             // recursive self-reference is treated as a CTE reference, not a hidden base table.
-            Set<String> localCteNames = visibleCteNames;
+            Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
+                    collector, visibleCteNames);
             JsonNode cteName = statement.get(FIELD_CTE_NAME);
             if (cteName != null) {
-                localCteNames = new HashSet<>(visibleCteNames);
+                localCteNames = new HashSet<>(localCteNames);
                 localCteNames.add(cteName.asText());
             }
             collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, localCteNames);
@@ -730,6 +716,31 @@ public class Transformations {
                     "collectAllTableReferences: unsupported query node type '" + type + "'; refusing to "
                             + "authorize a query whose tables cannot all be enumerated");
         }
+    }
+
+    /**
+     * Collects the table references in {@code statement}'s own WITH bodies and returns the CTE names
+     * visible beneath it. A CTE body sees the enclosing scope and the CTEs declared before it, but NOT
+     * itself: in {@code WITH t AS (SELECT * FROM t)} the inner {@code t} is the real table t (DuckDB
+     * binds it so), and treating it as a CTE reference would hide that table from authorization. A
+     * WITH RECURSIVE self-reference is the exception; its body is a RECURSIVE_CTE_NODE, which adds its
+     * own name.
+     */
+    private static Set<String> collectAllTableRefsFromCteBodies(JsonNode statement, String catalogName,
+                                                                String schemaName,
+                                                                List<CatalogSchemaTable> collector,
+                                                                Set<String> visibleCteNames) {
+        Set<String> localCteNames = new HashSet<>(visibleCteNames);
+        JsonNode cteMap = statement.get(FIELD_CTE_MAP);
+        JsonNode map = cteMap == null ? null : cteMap.get(FIELD_MAP);
+        if (map != null && map.isArray()) {
+            for (JsonNode entry : map) {
+                collectAllTableRefsFromStatement(entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE),
+                        catalogName, schemaName, collector, new HashSet<>(localCteNames));
+                localCteNames.add(entry.get(FIELD_KEY).asText());
+            }
+        }
+        return localCteNames;
     }
 
     /** Walks ORDER BY / LIMIT / OFFSET modifiers for table references inside their subqueries. */
@@ -949,12 +960,14 @@ public class Transformations {
      * name can: DuckDB resolves {@code main.t} or {@code db.main.t} to the catalog even when a CTE
      * named {@code t} is in scope. Matching on the bare name alone let
      * {@code WITH t AS (SELECT 1) SELECT * FROM main.t} read the real {@code t} with no filter CTE.
+     * Case-insensitive, as DuckDB binds {@code FROM T} to a CTE named {@code t}.
      */
     private static boolean isCteReference(JsonNode fromRef, Set<String> cteNames) {
         String schema = asText(fromRef, FIELD_SCHEMA_NAME);
         String catalog = asText(fromRef, FIELD_CATALOG_NAME);
         if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) return false;
-        return cteNames.contains(asText(fromRef, FIELD_TABLE_NAME));
+        String name = asText(fromRef, FIELD_TABLE_NAME);
+        return name != null && cteNames.stream().anyMatch(name::equalsIgnoreCase);
     }
 
     /**
@@ -2947,16 +2960,17 @@ public class Transformations {
         JsonNode mapArray = cteMapNode.get(FIELD_MAP);
         if (mapArray == null || !mapArray.isArray() || mapArray.isEmpty()) return visibleCteNames;
 
+        // Each body sees the enclosing scope and the CTEs declared BEFORE it, in or out of WITH
+        // RECURSIVE: DuckDB binds a name declared later in the same WITH to the base table.
         Set<String> withDeclared = new HashSet<>(visibleCteNames);
-        for (JsonNode entry : mapArray) {
-            withDeclared.add(entry.get(FIELD_KEY).asText());
-        }
         for (JsonNode entry : mapArray) {
             String cteName = entry.get(FIELD_KEY).asText();
             Set<String> namesVisibleInBody = new HashSet<>(withDeclared);
-            namesVisibleInBody.remove(cteName);
+            // Any case: names match case-insensitively (isCteReference).
+            namesVisibleInBody.removeIf(cteName::equalsIgnoreCase);
             ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);
             renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, injection);
+            withDeclared.add(cteName);
         }
         return withDeclared;
     }

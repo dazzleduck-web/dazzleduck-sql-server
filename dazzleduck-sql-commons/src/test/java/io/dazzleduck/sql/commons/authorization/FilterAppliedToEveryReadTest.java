@@ -245,6 +245,52 @@ public class FilterAppliedToEveryReadTest {
         }
     }
 
+    /**
+     * A CTE body sees only the CTEs declared BEFORE it: DuckDB binds {@code orders} in {@code a}'s body
+     * to the table, not to the {@code orders} CTE declared after it, so that read must be filtered.
+     */
+    @Test
+    void aCteDeclaredLaterDoesNotHideAReadInAnEarlierBody() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                for (String sql : new String[]{
+                        "WITH a AS (SELECT id FROM orders), orders AS (SELECT 0 AS id) SELECT id FROM a ORDER BY id",
+                        "WITH a AS (SELECT id FROM orders), orders AS (SELECT 0 AS id) "
+                                + "SELECT id FROM a UNION ALL SELECT id FROM orders ORDER BY id"}) {
+                    List<Object> rows = run(a, sql, claims);
+                    assertTrue(!rows.contains("2"), a + " / " + sql + " leaked tenant xyz: " + rows);
+                }
+            }
+        }
+    }
+
+    /**
+     * The qualified read under a same-named CTE is a direct table read, so RESTRICTED mode keeps its
+     * pruning copy of the filter on the outer WHERE (RESTRICT_READ_ONLY places none).
+     */
+    @Test
+    void aQualifiedReadUnderASameNamedCteKeepsThePruningCopy() throws Exception {
+        for (SqlAuthorizer a : List.of(SqlAuthorizer.RESTRICTED_DATASOURCE_AUTHORIZER)) {
+            for (var claims : grants()) {
+                JsonNode authorized = a.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn,
+                        "WITH orders AS (SELECT 0 AS id) SELECT id FROM main.orders"), claims);
+                JsonNode outer = Transformations.getFirstStatementNode(authorized);
+                assertTrue(outer.path("where_clause").isObject(), a + ": " + Transformations.parseToSql(conn, authorized));
+            }
+        }
+    }
+
+    /** A WITH over a set operation is accepted (its names are CTEs, not tables) and its bodies filtered. */
+    @Test
+    void aWithOverASetOperationIsAuthorizedAndFiltered() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertEquals(List.of("1", "1", "3", "3"), run(a, "WITH x AS (SELECT id FROM orders) "
+                        + "SELECT id FROM x UNION ALL SELECT id FROM orders ORDER BY id", claims), a.toString());
+            }
+        }
+    }
+
     /** In one query, the bare name still reads the CTE and the qualified one the filtered table. */
     @Test
     void theBareNameStillReadsTheShadowingCte() throws Exception {
@@ -252,6 +298,9 @@ public class FilterAppliedToEveryReadTest {
             for (var claims : grants()) {
                 assertEquals(List.of("0", "1", "3"), run(a, "WITH orders AS (SELECT 0 AS id) "
                         + "SELECT id FROM orders UNION ALL SELECT id FROM main.orders ORDER BY id", claims), a.toString());
+                // DuckDB matches CTE names case-insensitively, so ORDERS is the CTE too.
+                assertEquals(List.of("0", "1", "3"), run(a, "WITH orders AS (SELECT 0 AS id) "
+                        + "SELECT id FROM ORDERS UNION ALL SELECT id FROM main.orders ORDER BY id", claims), a.toString());
             }
         }
     }
@@ -261,14 +310,20 @@ public class FilterAppliedToEveryReadTest {
     void aCteNamedLikeAnUngrantedTableDoesNotHideAQualifiedRead() throws Exception {
         for (SqlAuthorizer a : restrictedAuthorizers()) {
             for (var claims : grants()) {
-                String sql = "WITH secrets AS (SELECT 0 AS amount) SELECT amount FROM main.secrets";
-                List<Object> rows;
-                try {
-                    rows = run(a, sql, claims);
-                } catch (UnauthorizedException refused) {
-                    continue;
+                for (String sql : new String[]{
+                        "WITH secrets AS (SELECT 0 AS amount) SELECT amount FROM main.secrets",
+                        // A WITH over a set operation: its bodies are reads too.
+                        "WITH x AS (SELECT amount FROM secrets) SELECT amount FROM x UNION ALL SELECT amount FROM orders",
+                        "WITH x AS (SELECT amount FROM secrets) SELECT amount FROM orders UNION ALL SELECT amount FROM x",
+                        "WITH orders AS (SELECT amount FROM secrets) SELECT amount FROM orders UNION ALL SELECT amount FROM orders"}) {
+                    List<Object> rows;
+                    try {
+                        rows = run(a, sql, claims);
+                    } catch (UnauthorizedException refused) {
+                        continue;
+                    }
+                    assertTrue(!rows.contains("999"), a + " / " + sql + " read an ungranted table: " + rows);
                 }
-                assertEquals(List.of(), rows, a + " read an ungranted table");
             }
         }
     }
