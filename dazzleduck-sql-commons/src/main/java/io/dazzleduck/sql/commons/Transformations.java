@@ -721,13 +721,31 @@ public class Transformations {
     private static Set<String> recursiveArmScope(JsonNode recursiveCte, Set<String> scope) {
         String cteName = asText(recursiveCte, FIELD_CTE_NAME);
         if (cteName == null || cteName.isEmpty()) return scope;
-        Set<String> arm = new HashSet<>(scope);
+        CteScope arm = CteScope.copyOf(scope);
         arm.add(cteName);
         JsonNode keys = recursiveCte.get("key_targets");
         if (keys != null && keys.isArray() && !keys.isEmpty()) {
-            arm.add(RECURRING_PREFIX + cteName);
+            arm.recurring.add(cteName);
         }
         return arm;
+    }
+
+    /**
+     * A scope of CTE names that also carries the USING KEY recurring tables reachable as
+     * {@code recurring.<name>}. Those live in their own set, never as a string beside the CTE names:
+     * a quoted CTE may be named anything, {@code "recurring.secrets"} included, and must not be able
+     * to stand in for one.
+     */
+    private static final class CteScope extends HashSet<String> {
+        final Set<String> recurring = new HashSet<>();
+
+        /** A copy of {@code scope}, keeping its recurring tables when it has any. */
+        static CteScope copyOf(Set<String> scope) {
+            CteScope copy = new CteScope();
+            copy.addAll(scope);
+            if (scope instanceof CteScope s) copy.recurring.addAll(s.recurring);
+            return copy;
+        }
     }
 
     /**
@@ -742,13 +760,13 @@ public class Transformations {
                                                                 String schemaName,
                                                                 List<CatalogSchemaTable> collector,
                                                                 Set<String> visibleCteNames) {
-        Set<String> localCteNames = new HashSet<>(visibleCteNames);
+        Set<String> localCteNames = CteScope.copyOf(visibleCteNames);
         JsonNode cteMap = statement.get(FIELD_CTE_MAP);
         JsonNode map = cteMap == null ? null : cteMap.get(FIELD_MAP);
         if (map != null && map.isArray()) {
             for (JsonNode entry : map) {
                 collectAllTableRefsFromStatement(entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE),
-                        catalogName, schemaName, collector, new HashSet<>(localCteNames));
+                        catalogName, schemaName, collector, CteScope.copyOf(localCteNames));
                 localCteNames.add(entry.get(FIELD_KEY).asText());
             }
         }
@@ -974,15 +992,14 @@ public class Transformations {
         if (catalog != null && !catalog.isEmpty()) return false;
         if (schema != null && !schema.isEmpty()) {
             // `recurring.r` inside r's own USING KEY recursive arm is the recurring table, a CTE.
-            return sameIdentifier(schema, RECURRING_SCHEMA) && containsIdentifier(cteNames, RECURRING_PREFIX + name);
+            return sameIdentifier(schema, RECURRING_SCHEMA)
+                    && cteNames instanceof CteScope scope && containsIdentifier(scope.recurring, name);
         }
         return containsIdentifier(cteNames, name);
     }
 
     /** The schema DuckDB resolves a USING KEY CTE's recurring table under, in its recursive arm. */
     private static final String RECURRING_SCHEMA = "recurring";
-    /** Scope entry for {@code recurring.<name>}; the dot cannot clash with a CTE name in a scope set. */
-    private static final String RECURRING_PREFIX = RECURRING_SCHEMA + ".";
 
     /**
      * Whether two identifiers name the same thing to DuckDB, which folds ASCII letters only: Java's
@@ -3007,10 +3024,10 @@ public class Transformations {
 
         // Each body sees the enclosing scope and the CTEs declared BEFORE it, in or out of WITH
         // RECURSIVE: DuckDB binds a name declared later in the same WITH to the base table.
-        Set<String> withDeclared = new HashSet<>(visibleCteNames);
+        Set<String> withDeclared = CteScope.copyOf(visibleCteNames);
         for (JsonNode entry : mapArray) {
             String cteName = entry.get(FIELD_KEY).asText();
-            Set<String> namesVisibleInBody = new HashSet<>(withDeclared);
+            Set<String> namesVisibleInBody = CteScope.copyOf(withDeclared);
             // Any case: names match case-insensitively (isCteReference).
             namesVisibleInBody.removeIf(n -> sameIdentifier(n, cteName));
             ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);

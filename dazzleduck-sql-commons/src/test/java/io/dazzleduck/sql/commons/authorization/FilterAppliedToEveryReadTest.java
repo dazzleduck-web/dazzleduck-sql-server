@@ -39,12 +39,17 @@ public class FilterAppliedToEveryReadTest {
         conn.createStatement().execute("INSERT INTO orders VALUES (1,'abc',100),(2,'xyz',200),(3,'abc',300)");
         conn.createStatement().execute("CREATE TABLE secrets (id INT, tenant_id VARCHAR, amount INT)");
         conn.createStatement().execute("INSERT INTO secrets VALUES (9,'abc',999)");
+        // A real schema named like DuckDB's USING KEY recurring-table qualifier.
+        conn.createStatement().execute("CREATE SCHEMA recurring");
+        conn.createStatement().execute("CREATE TABLE recurring.secrets AS SELECT * FROM secrets");
+        conn.createStatement().execute("CREATE TABLE recurring.orders AS SELECT * FROM orders");
     }
 
     @AfterAll
     static void tearDown() throws SQLException {
         conn.createStatement().execute("DROP TABLE IF EXISTS orders");
         conn.createStatement().execute("DROP TABLE IF EXISTS secrets");
+        conn.createStatement().execute("DROP SCHEMA IF EXISTS recurring CASCADE");
         conn.close();
     }
 
@@ -396,6 +401,22 @@ public class FilterAppliedToEveryReadTest {
             for (var claims : grants()) {
                 assertEquals(List.of("1", "3"), run(a, "WITH RECURSIVE r USING KEY (id) AS (SELECT id, amount FROM orders "
                         + "UNION SELECT r.id, r.amount FROM recurring.r WHERE false) SELECT id FROM r ORDER BY id", claims), a.toString());
+            }
+        }
+    }
+
+    /**
+     * Only the CTE's own USING KEY arm may read {@code recurring.<name>} as its recurring table. A
+     * quoted CTE may be named {@code "recurring.secrets"}; that must not make the real
+     * {@code recurring.secrets} look like a CTE.
+     */
+    @Test
+    void aCteNamedLikeARecurringReferenceDoesNotHideTheRecurringSchema() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertNoLeak(a, "WITH \"recurring.secrets\" AS (SELECT 1) SELECT s.* FROM orders o, recurring.secrets s", claims);
+                assertNoLeak(a, "WITH \"recurring.orders\" AS (SELECT 1) SELECT o.* FROM orders x, recurring.orders o", claims);
+                assertNoLeak(a, "WITH secrets AS (SELECT 1 AS x) SELECT s.* FROM orders o, recurring.secrets s", claims);
             }
         }
     }
