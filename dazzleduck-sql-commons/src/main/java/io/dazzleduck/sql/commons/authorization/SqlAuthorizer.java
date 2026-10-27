@@ -15,7 +15,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -131,7 +130,7 @@ public interface SqlAuthorizer {
             for (JsonNode entry : map) {
                 JsonNode key = entry.get(ExpressionConstants.FIELD_KEY);
                 if (key != null && !key.isNull()) {
-                    inScope.add(key.asText().toLowerCase(Locale.ROOT));
+                    inScope.add(Transformations.foldIdentifier(key.asText()));
                 }
             }
         }
@@ -152,7 +151,7 @@ public interface SqlAuthorizer {
                 // A qualified name is always the table, even under a same-named CTE.
                 boolean qualified = !from.path(ExpressionConstants.FIELD_SCHEMA_NAME).asText("").isEmpty()
                         || !from.path(ExpressionConstants.FIELD_CATALOG_NAME).asText("").isEmpty();
-                return !qualified && inScope.contains(name.asText().toLowerCase(Locale.ROOT)) ? null : from;
+                return !qualified && inScope.contains(Transformations.foldIdentifier(name.asText())) ? null : from;
             }
             case ExpressionConstants.NODE_TYPE_SUBQUERY -> {
                 JsonNode subquery = from.get(ExpressionConstants.FIELD_SUBQUERY);
@@ -420,7 +419,7 @@ public interface SqlAuthorizer {
         if (map == null || !map.isArray()) return false;
         for (JsonNode entry : map) {
             JsonNode key = entry.get(ExpressionConstants.FIELD_KEY);
-            if (key != null && !key.isNull() && key.asText().equalsIgnoreCase(name.asText())) {
+            if (key != null && !key.isNull() && Transformations.sameIdentifier(key.asText(), name.asText())) {
                 return true;
             }
         }

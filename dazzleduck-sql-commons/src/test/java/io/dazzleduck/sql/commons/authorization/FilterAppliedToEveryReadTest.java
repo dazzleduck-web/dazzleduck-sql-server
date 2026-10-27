@@ -327,4 +327,112 @@ public class FilterAppliedToEveryReadTest {
             }
         }
     }
+
+    /** Asserts {@code sql} returns no tenant-xyz order and no row of the ungranted {@code secrets}, or is refused. */
+    private static void assertNoLeak(SqlAuthorizer a, String sql, Map<String, String> claims) throws Exception {
+        List<Object> rows;
+        try {
+            JsonNode authorized = a.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims);
+            rows = allColumns(Transformations.parseToSql(conn, authorized));
+        } catch (UnauthorizedException refused) {
+            return;
+        }
+        for (Object row : rows) {
+            String r = String.valueOf(row);
+            assertTrue(!r.contains("xyz") && !r.contains("200") && !r.contains("600") && !r.contains("999"),
+                    a + " / " + sql + " leaked: " + rows);
+        }
+    }
+
+    /** Every column of every row, comma-joined per row. */
+    private static List<Object> allColumns(String sql) throws SQLException {
+        List<Object> rows = new ArrayList<>();
+        try (ResultSet rs = conn.createStatement().executeQuery(sql)) {
+            int n = rs.getMetaData().getColumnCount();
+            while (rs.next()) {
+                StringBuilder b = new StringBuilder();
+                for (int i = 1; i <= n; i++) b.append(i > 1 ? "," : "").append(rs.getObject(i));
+                rows.add(b.toString());
+            }
+        }
+        return rows;
+    }
+
+    /**
+     * DuckDB folds only ASCII letters when it matches identifiers; Java's equalsIgnoreCase also folds
+     * U+017F (long s) to {@code s}, which took {@code "orderſ"} for {@code orders}.
+     */
+    @Test
+    void aCteWhoseNameFoldsToTheTableOnlyOutsideAsciiDoesNotHideIt() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertNoLeak(a, "WITH \"orderſ\" AS (SELECT 1 AS id) SELECT id, tenant_id FROM orders", claims);
+                assertNoLeak(a, "WITH \"secretſ\" AS (SELECT 1 AS id) SELECT s.id, s.amount FROM orders o, secrets s", claims);
+            }
+        }
+    }
+
+    /** In a recursive CTE the own name is the CTE only in the recursive arm; in the anchor it is the table. */
+    @Test
+    void aRecursiveCteAnchorReadOfTheSameNameIsFiltered() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertNoLeak(a, "WITH RECURSIVE orders AS (SELECT id, tenant_id, amount FROM orders "
+                        + "UNION ALL SELECT id, tenant_id, amount FROM orders WHERE false) SELECT id, tenant_id FROM orders", claims);
+                assertNoLeak(a, "WITH RECURSIVE secrets AS (SELECT id, tenant_id, amount FROM secrets UNION ALL "
+                        + "SELECT id, tenant_id, amount FROM secrets WHERE false) "
+                        + "SELECT s.id, s.amount FROM secrets s, (SELECT 1 FROM orders LIMIT 1) o", claims);
+                // The recursive arm's self-reference still binds to the CTE.
+                assertEquals(List.of("3"), run(a, "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) "
+                        + "SELECT max(n) FROM r, (SELECT 1 FROM orders LIMIT 1) o", claims), a.toString());
+            }
+        }
+    }
+
+    /** A USING KEY recursive arm reads its recurring table as {@code recurring.<name>}: a CTE, not a schema. */
+    @Test
+    void aUsingKeyRecurringReferenceIsTheCte() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertEquals(List.of("1", "3"), run(a, "WITH RECURSIVE r USING KEY (id) AS (SELECT id, amount FROM orders "
+                        + "UNION SELECT r.id, r.amount FROM recurring.r WHERE false) SELECT id FROM r ORDER BY id", claims), a.toString());
+            }
+        }
+    }
+
+    /** A subquery anywhere in an expression is a read, not only in the fields a walker happens to list. */
+    @Test
+    void aSubqueryInAnyExpressionPositionIsFiltered() throws Exception {
+        String[] shapes = {
+                "SELECT * REPLACE ((SELECT string_agg(tenant_id || ':' || amount, ',') FROM %s) AS tenant_id) FROM orders",
+                "SELECT lead(amount, 99, (SELECT sum(amount) FROM %s)) OVER () AS v FROM orders",
+                "SELECT sum(amount) OVER (PARTITION BY (SELECT max(amount) FROM %s)) AS v FROM orders",
+                "SELECT sum(amount) OVER (ORDER BY (SELECT max(amount) FROM %s)) AS v FROM orders",
+                "SELECT count(*) FILTER (WHERE amount < (SELECT max(amount) FROM %s)) OVER () AS v FROM orders",
+                "SELECT string_agg(id::VARCHAR, ',' ORDER BY (SELECT max(amount) FROM %s)) AS v FROM orders",
+                "SELECT id, (SELECT max(amount) FROM %s) BETWEEN 0 AND 1000000 AS v, "
+                        + "(SELECT max(amount) FROM %s)::VARCHAR AS w FROM orders",
+                "SELECT DISTINCT ON ((SELECT max(amount) FROM %s)) id FROM orders"};
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                for (String shape : shapes) {
+                    assertNoLeak(a, shape.replace("%s", "orders"), claims);
+                    assertNoLeak(a, shape.replace("%s", "secrets"), claims);
+                }
+            }
+        }
+    }
+
+    /** A declared CTE named like a generated filter CTE in another case must not take its place. */
+    @Test
+    void aCteNamedLikeTheGeneratedFilterCteInAnotherCaseDoesNotReplaceIt() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertEquals(List.of("1", "3"), run(a, "WITH ___ORDERS AS (SELECT 7 AS id) SELECT id FROM orders ORDER BY id", claims),
+                        a.toString());
+                assertEquals(List.of("1", "3"), run(a, "WITH ___MEMORY_MAIN_ORDERS AS (SELECT 7 AS id) "
+                        + "SELECT id FROM memory.main.orders ORDER BY id", claims), a.toString());
+            }
+        }
+    }
 }

@@ -697,17 +697,11 @@ public class Transformations {
             collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, localCteNames);
             collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, localCteNames);
         } else if (NODE_TYPE_RECURSIVE_CTE_NODE.equals(type)) {
-            // WITH RECURSIVE body: recurse into both arms. Keep the CTE's own name visible so the
-            // recursive self-reference is treated as a CTE reference, not a hidden base table.
             Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
                     collector, visibleCteNames);
-            JsonNode cteName = statement.get(FIELD_CTE_NAME);
-            if (cteName != null) {
-                localCteNames = new HashSet<>(localCteNames);
-                localCteNames.add(cteName.asText());
-            }
             collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, localCteNames);
-            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, localCteNames);
+            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector,
+                    recursiveArmScope(statement, localCteNames));
             collectAllTableRefsFromModifiers(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, localCteNames);
         } else {
             // Fail closed: an unrecognized query node type must abort authorization rather than
@@ -716,6 +710,24 @@ public class Transformations {
                     "collectAllTableReferences: unsupported query node type '" + type + "'; refusing to "
                             + "authorize a query whose tables cannot all be enumerated");
         }
+    }
+
+    /**
+     * The scope of a WITH RECURSIVE CTE's recursive (right) arm: {@code scope} plus the CTE's own
+     * name, which DuckDB binds to the CTE there and ONLY there; in the anchor (left) arm the same
+     * name is the base table. A USING KEY CTE's arm can also read its recurring table as
+     * {@code recurring.<name>}.
+     */
+    private static Set<String> recursiveArmScope(JsonNode recursiveCte, Set<String> scope) {
+        String cteName = asText(recursiveCte, FIELD_CTE_NAME);
+        if (cteName == null || cteName.isEmpty()) return scope;
+        Set<String> arm = new HashSet<>(scope);
+        arm.add(cteName);
+        JsonNode keys = recursiveCte.get("key_targets");
+        if (keys != null && keys.isArray() && !keys.isEmpty()) {
+            arm.add(RECURRING_PREFIX + cteName);
+        }
+        return arm;
     }
 
     /**
@@ -743,22 +755,12 @@ public class Transformations {
         return localCteNames;
     }
 
-    /** Walks ORDER BY / LIMIT / OFFSET modifiers for table references inside their subqueries. */
+    /** Walks every modifier (ORDER BY, LIMIT/OFFSET, DISTINCT ON, …) for table references inside subqueries. */
     private static void collectAllTableRefsFromModifiers(JsonNode modifiers, String catalogName,
                                                          String schemaName,
                                                          List<CatalogSchemaTable> collector,
                                                          Set<String> cteNames) {
-        if (modifiers == null || !modifiers.isArray()) return;
-        for (JsonNode modifier : modifiers) {
-            JsonNode orders = modifier.get(FIELD_ORDERS);
-            if (orders != null && orders.isArray()) {
-                for (JsonNode order : orders) {
-                    collectAllTableRefsFromExpression(order.get(FIELD_EXPRESSION), catalogName, schemaName, collector, cteNames);
-                }
-            }
-            collectAllTableRefsFromExpression(modifier.get(FIELD_LIMIT), catalogName, schemaName, collector, cteNames);
-            collectAllTableRefsFromExpression(modifier.get(FIELD_OFFSET), catalogName, schemaName, collector, cteNames);
-        }
+        collectAllTableRefsFromExpression(modifiers, catalogName, schemaName, collector, cteNames);
     }
 
     private static void collectAllTableRefsFromFromNode(JsonNode fromNode, String catalogName,
@@ -813,17 +815,22 @@ public class Transformations {
         }
     }
 
+    /**
+     * Every field of a SELECT except its FROM and WITH (walked by the caller): select list, WHERE,
+     * GROUP BY, HAVING, QUALIFY, modifiers, and any field DuckDB adds later. All of them, not an
+     * allow-list, so a subquery anywhere — a {@code * REPLACE}, a window's default or frame, an
+     * aggregate's ORDER BY, a {@code DISTINCT ON} target — is still seen.
+     */
     private static void collectAllTableRefsFromExpressionFields(JsonNode selectNode, String catalogName,
                                                                   String schemaName,
                                                                   List<CatalogSchemaTable> collector,
                                                                   Set<String> cteNames) {
-        collectAllTableRefsFromExpression(selectNode.get(FIELD_WHERE_CLAUSE), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(selectNode.get("having"), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(selectNode.get("qualify"), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(selectNode.get("select_list"), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(selectNode.get("group_expressions"), catalogName, schemaName, collector, cteNames);
-        // ORDER BY / LIMIT / OFFSET live under modifiers[], not a top-level "order_bys" field.
-        collectAllTableRefsFromModifiers(selectNode.get(FIELD_MODIFIERS), catalogName, schemaName, collector, cteNames);
+        var fields = selectNode.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (FIELD_FROM_TABLE.equals(field.getKey()) || FIELD_CTE_MAP.equals(field.getKey())) continue;
+            collectAllTableRefsFromExpression(field.getValue(), catalogName, schemaName, collector, cteNames);
+        }
     }
 
     private static void collectAllTableRefsFromExpression(JsonNode expr, String catalogName,
@@ -839,7 +846,8 @@ public class Transformations {
         }
         if (!expr.isObject()) return;
         JsonNode classNode = expr.get(FIELD_CLASS);
-        if (classNode != null && SUBQUERY_CLASS.equals(classNode.asText())) {
+        boolean subquery = classNode != null && SUBQUERY_CLASS.equals(classNode.asText());
+        if (subquery) {
             JsonNode subqueryContent = expr.get(FIELD_SUBQUERY);
             if (subqueryContent != null) {
                 JsonNode innerNode = subqueryContent.get(FIELD_NODE);
@@ -847,18 +855,14 @@ public class Transformations {
                     collectAllTableRefsFromStatement(innerNode, catalogName, schemaName, collector, cteNames);
                 }
             }
-            collectAllTableRefsFromExpression(expr.get(FIELD_CHILD), catalogName, schemaName, collector, cteNames);
-            return;
         }
-        collectAllTableRefsFromExpression(expr.get(FIELD_LEFT), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_RIGHT), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_CHILDREN), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_CHILD), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_FILTER), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_WHEN_EXPR), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_THEN_EXPR), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_ELSE_EXPR), catalogName, schemaName, collector, cteNames);
-        collectAllTableRefsFromExpression(expr.get(FIELD_CASE_CHECKS), catalogName, schemaName, collector, cteNames);
+        // Every other field, not an allow-list: see collectAllTableRefsFromExpressionFields.
+        var fields = expr.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (subquery && FIELD_SUBQUERY.equals(field.getKey())) continue;
+            collectAllTableRefsFromExpression(field.getValue(), catalogName, schemaName, collector, cteNames);
+        }
     }
 
     public static JsonNode getFirstStatementNode(JsonNode jsonNode) {
@@ -965,9 +969,50 @@ public class Transformations {
     private static boolean isCteReference(JsonNode fromRef, Set<String> cteNames) {
         String schema = asText(fromRef, FIELD_SCHEMA_NAME);
         String catalog = asText(fromRef, FIELD_CATALOG_NAME);
-        if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) return false;
         String name = asText(fromRef, FIELD_TABLE_NAME);
-        return name != null && cteNames.stream().anyMatch(name::equalsIgnoreCase);
+        if (name == null) return false;
+        if (catalog != null && !catalog.isEmpty()) return false;
+        if (schema != null && !schema.isEmpty()) {
+            // `recurring.r` inside r's own USING KEY recursive arm is the recurring table, a CTE.
+            return sameIdentifier(schema, RECURRING_SCHEMA) && containsIdentifier(cteNames, RECURRING_PREFIX + name);
+        }
+        return containsIdentifier(cteNames, name);
+    }
+
+    /** The schema DuckDB resolves a USING KEY CTE's recurring table under, in its recursive arm. */
+    private static final String RECURRING_SCHEMA = "recurring";
+    /** Scope entry for {@code recurring.<name>}; the dot cannot clash with a CTE name in a scope set. */
+    private static final String RECURRING_PREFIX = RECURRING_SCHEMA + ".";
+
+    /**
+     * Whether two identifiers name the same thing to DuckDB, which folds ASCII letters only: Java's
+     * {@link String#equalsIgnoreCase} also folds e.g. U+017F to {@code s}, which would take
+     * {@code "orderſ"} for {@code orders} while DuckDB binds them apart.
+     */
+    public static boolean sameIdentifier(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) return false;
+        for (int i = 0; i < a.length(); i++) {
+            if (asciiLower(a.charAt(i)) != asciiLower(b.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    /** {@code name} with ASCII letters lower-cased and everything else unchanged, as DuckDB folds it. */
+    public static String foldIdentifier(String name) {
+        StringBuilder out = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) out.append(asciiLower(name.charAt(i)));
+        return out.toString();
+    }
+
+    private static char asciiLower(char c) {
+        return c >= 'A' && c <= 'Z' ? (char) (c + ('a' - 'A')) : c;
+    }
+
+    private static boolean containsIdentifier(Set<String> names, String name) {
+        for (String n : names) {
+            if (sameIdentifier(n, name)) return true;
+        }
+        return false;
     }
 
     /**
@@ -993,7 +1038,7 @@ public class Transformations {
             JsonNode key = entry.get("key");
             // Case-insensitive: a CTE named FV shadows view fv in DuckDB, so an exact match here
             // would miss the shadow and inline the view over a reference that resolves to the CTE.
-            if (key != null && name.equalsIgnoreCase(key.asText())) return true;
+            if (key != null && sameIdentifier(name, key.asText())) return true;
         }
         return false;
     }
@@ -1257,7 +1302,7 @@ public class Transformations {
 
     private static boolean cteKeyExists(ArrayNode map, String name) {
         for (JsonNode entry : map) {
-            if (name.equalsIgnoreCase(asText(entry, FIELD_KEY))) return true;
+            if (sameIdentifier(name, asText(entry, FIELD_KEY))) return true;
         }
         return false;
     }
@@ -1308,7 +1353,7 @@ public class Transformations {
         if (node.isObject()) {
             ObjectNode obj = (ObjectNode) node;
             if (NODE_TYPE_BASE_TABLE.equals(asText(obj, FIELD_TYPE))
-                    && table.equalsIgnoreCase(asText(obj, FIELD_TABLE_NAME))) {
+                    && sameIdentifier(table, asText(obj, FIELD_TABLE_NAME))) {
                 n++;
                 if (rename != null) obj.put(FIELD_TABLE_NAME, rename);
             }
@@ -1385,7 +1430,7 @@ public class Transformations {
         if (fromRef == null
                 || view.table == null
                 || !NODE_TYPE_BASE_TABLE.equals(asText(fromRef, FIELD_TYPE))
-                || !view.table.equalsIgnoreCase(asText(fromRef, FIELD_TABLE_NAME))) return false;
+                || !sameIdentifier(view.table, asText(fromRef, FIELD_TABLE_NAME))) return false;
         return qualifierMatches(view.schema, asText(fromRef, FIELD_SCHEMA_NAME))
                 && qualifierMatches(view.catalog, asText(fromRef, FIELD_CATALOG_NAME));
     }
@@ -1395,7 +1440,7 @@ public class Transformations {
         boolean expectedEmpty = expected == null || expected.isEmpty();
         boolean actualEmpty = actual == null || actual.isEmpty();
         if (expectedEmpty != actualEmpty) return false;
-        return expectedEmpty || expected.equalsIgnoreCase(actual);
+        return expectedEmpty || sameIdentifier(expected, actual);
     }
 
     /**
@@ -2967,7 +3012,7 @@ public class Transformations {
             String cteName = entry.get(FIELD_KEY).asText();
             Set<String> namesVisibleInBody = new HashSet<>(withDeclared);
             // Any case: names match case-insensitively (isCteReference).
-            namesVisibleInBody.removeIf(cteName::equalsIgnoreCase);
+            namesVisibleInBody.removeIf(n -> sameIdentifier(n, cteName));
             ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);
             renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, injection);
             withDeclared.add(cteName);
@@ -2998,15 +3043,9 @@ public class Transformations {
             }
             case NODE_TYPE_RECURSIVE_CTE_NODE -> {
                 Set<String> visible = walkNestedCtes(statementNode, visibleCteNames, injection);
-                // The recursive self-reference (FROM r inside the CTE body) is a CTE reference, not a
-                // base table; keep the CTE's own name visible so it is not wrapped as a phantom table.
-                JsonNode cteName = statementNode.get(FIELD_CTE_NAME);
-                if (cteName != null) {
-                    visible = new HashSet<>(visible);
-                    visible.add(cteName.asText());
-                }
                 renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_LEFT), visible, injection);
-                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT), visible, injection);
+                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT),
+                        recursiveArmScope(statementNode, visible), injection);
                 walkModifiersForSubqueries(statementNode.get(FIELD_MODIFIERS), visible, injection);
             }
             default -> throw new IllegalStateException(
@@ -3023,17 +3062,7 @@ public class Transformations {
      */
     private static void walkModifiersForSubqueries(JsonNode modifiers, Set<String> visibleCteNames,
                                                     CteInjection injection) {
-        if (modifiers == null || !modifiers.isArray()) return;
-        for (JsonNode modifier : modifiers) {
-            JsonNode orders = modifier.get(FIELD_ORDERS);
-            if (orders != null && orders.isArray()) {
-                for (JsonNode order : orders) {
-                    walkExpressionsForSubqueries(order.get(FIELD_EXPRESSION), visibleCteNames, injection);
-                }
-            }
-            walkExpressionsForSubqueries(modifier.get(FIELD_LIMIT), visibleCteNames, injection);
-            walkExpressionsForSubqueries(modifier.get(FIELD_OFFSET), visibleCteNames, injection);
-        }
+        walkExpressionsForSubqueries(modifiers, visibleCteNames, injection);
     }
 
     private static void renameBaseTablesInSelect(ObjectNode selectNode, Set<String> userCteNames,
@@ -3052,13 +3081,15 @@ public class Transformations {
      */
     private static void walkExpressionFieldsInSelect(ObjectNode selectNode, Set<String> userCteNames,
                                                        CteInjection injection) {
-        walkExpressionsForSubqueries(selectNode.get(FIELD_WHERE_CLAUSE), userCteNames, injection);
-        walkExpressionsForSubqueries(selectNode.get("having"), userCteNames, injection);
-        walkExpressionsForSubqueries(selectNode.get("qualify"), userCteNames, injection);
-        walkExpressionsForSubqueries(selectNode.get("select_list"), userCteNames, injection);
-        walkExpressionsForSubqueries(selectNode.get("group_expressions"), userCteNames, injection);
-        // ORDER BY / LIMIT / OFFSET live under modifiers[], not a top-level "order_bys" field.
-        walkModifiersForSubqueries(selectNode.get(FIELD_MODIFIERS), userCteNames, injection);
+        // Every field but FROM and WITH (walked by the caller), not an allow-list: a subquery in a
+        // `* REPLACE`, a window's default or frame, an aggregate's ORDER BY or a DISTINCT ON target
+        // reads the table as surely as one in the WHERE.
+        List<String> names = new ArrayList<>();
+        selectNode.fieldNames().forEachRemaining(names::add);
+        for (String name : names) {
+            if (FIELD_FROM_TABLE.equals(name) || FIELD_CTE_MAP.equals(name)) continue;
+            walkExpressionsForSubqueries(selectNode.get(name), userCteNames, injection);
+        }
     }
 
     /**
@@ -3079,9 +3110,9 @@ public class Transformations {
         if (!expr.isObject()) return;
 
         JsonNode classNode = expr.get(FIELD_CLASS);
-        if (classNode != null && SUBQUERY_CLASS.equals(classNode.asText())) {
+        boolean subquery = classNode != null && SUBQUERY_CLASS.equals(classNode.asText());
+        if (subquery) {
             // Expression-level subquery: IN (SELECT ...), EXISTS (...), scalar (SELECT ...)
-            // renameBaseTablesInStatementNode already walks expression fields via renameBaseTablesInSelect
             JsonNode subqueryContent = expr.get(FIELD_SUBQUERY);
             if (subqueryContent != null) {
                 ObjectNode innerNode = (ObjectNode) subqueryContent.get(FIELD_NODE);
@@ -3089,22 +3120,16 @@ public class Transformations {
                     renameBaseTablesInStatementNode(innerNode, userCteNames, injection);
                 }
             }
-            // Walk the `child` field (the expression on the left side of IN/ANY/ALL)
-            walkExpressionsForSubqueries(expr.get(FIELD_CHILD), userCteNames, injection);
-            return;
         }
-
-        // Recurse into known expression child fields for all other expression types
-        walkExpressionsForSubqueries(expr.get(FIELD_LEFT), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_RIGHT), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_CHILDREN), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_CHILD), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_FILTER), userCteNames, injection);
-        // CASE WHEN THEN ELSE
-        walkExpressionsForSubqueries(expr.get(FIELD_WHEN_EXPR), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_THEN_EXPR), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_ELSE_EXPR), userCteNames, injection);
-        walkExpressionsForSubqueries(expr.get(FIELD_CASE_CHECKS), userCteNames, injection);
+        // Every other field, not an allow-list of expression children: the subquery can sit under
+        // any of them (window default_expr / partitions / orders, aggregate order_bys, BETWEEN's
+        // input / lower / upper, STAR replace_list, …), and a missed one is an unfiltered read.
+        var fields = expr.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (subquery && FIELD_SUBQUERY.equals(field.getKey())) continue;
+            walkExpressionsForSubqueries(field.getValue(), userCteNames, injection);
+        }
     }
 
     private static void renameBaseTablesInFromNode(JsonNode fromNode, Set<String> userCteNames,
@@ -3183,12 +3208,13 @@ public class Transformations {
      * stream); reusing a generated one would point two different tables at one CTE.
      */
     private static String freshCteKey(String base, Set<String> reserved) {
-        if (reserved == null || !reserved.contains(base)) {
+        if (reserved == null || !containsIdentifier(reserved, base)) {
             return base;
         }
         String candidate = base;
         int suffix = 0;
-        while (reserved.contains(candidate)) {
+        // Case-insensitively: a declared ___ORDERS is the same CTE name to DuckDB as ___orders.
+        while (containsIdentifier(reserved, candidate)) {
             candidate = base + "_" + (++suffix);
         }
         return candidate;
