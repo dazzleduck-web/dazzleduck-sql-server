@@ -759,7 +759,7 @@ public class Transformations {
         switch (type) {
             case NODE_TYPE_BASE_TABLE -> {
                 String tableName = fromNode.get(FIELD_TABLE_NAME).asText();
-                if (cteNames.contains(tableName)) return; // CTE reference — body already walked
+                if (isCteReference(fromNode, cteNames)) return; // CTE reference — body already walked
                 var schemaFromQuery = fromNode.get(FIELD_SCHEMA_NAME).asText();
                 var catalogFromQuery = fromNode.get(FIELD_CATALOG_NAME).asText();
                 var s = schemaFromQuery == null || schemaFromQuery.isEmpty() ? schemaName : schemaFromQuery;
@@ -942,6 +942,19 @@ public class Transformations {
             // Optimization must never change semantics: on any unexpected structure, do nothing.
             return outerSqlAst;
         }
+    }
+
+    /**
+     * True if the BASE_TABLE {@code fromRef} binds to one of {@code cteNames}. Only an unqualified
+     * name can: DuckDB resolves {@code main.t} or {@code db.main.t} to the catalog even when a CTE
+     * named {@code t} is in scope. Matching on the bare name alone let
+     * {@code WITH t AS (SELECT 1) SELECT * FROM main.t} read the real {@code t} with no filter CTE.
+     */
+    private static boolean isCteReference(JsonNode fromRef, Set<String> cteNames) {
+        String schema = asText(fromRef, FIELD_SCHEMA_NAME);
+        String catalog = asText(fromRef, FIELD_CATALOG_NAME);
+        if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) return false;
+        return cteNames.contains(asText(fromRef, FIELD_TABLE_NAME));
     }
 
     /**
@@ -3087,7 +3100,7 @@ public class Transformations {
         switch (type) {
             case NODE_TYPE_BASE_TABLE -> {
                 String tableName = fromNode.get(FIELD_TABLE_NAME).asText();
-                if (userCteNames.contains(tableName)) return; // CTE reference — skip
+                if (isCteReference(fromNode, userCteNames)) return; // CTE reference — skip
                 String schema = fromNode.has(FIELD_SCHEMA_NAME) ? fromNode.get(FIELD_SCHEMA_NAME).asText() : "";
                 String catalog = fromNode.has(FIELD_CATALOG_NAME) ? fromNode.get(FIELD_CATALOG_NAME).asText() : "";
                 String cteKey = injection.cteKeyFor(List.of(catalog, schema, tableName), (ObjectNode) fromNode);

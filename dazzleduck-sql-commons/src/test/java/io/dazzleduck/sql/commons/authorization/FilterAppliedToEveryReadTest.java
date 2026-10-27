@@ -37,11 +37,14 @@ public class FilterAppliedToEveryReadTest {
         conn = ConnectionPool.getConnection();
         conn.createStatement().execute("CREATE TABLE orders (id INT, tenant_id VARCHAR, amount INT)");
         conn.createStatement().execute("INSERT INTO orders VALUES (1,'abc',100),(2,'xyz',200),(3,'abc',300)");
+        conn.createStatement().execute("CREATE TABLE secrets (id INT, tenant_id VARCHAR, amount INT)");
+        conn.createStatement().execute("INSERT INTO secrets VALUES (9,'abc',999)");
     }
 
     @AfterAll
     static void tearDown() throws SQLException {
         conn.createStatement().execute("DROP TABLE IF EXISTS orders");
+        conn.createStatement().execute("DROP TABLE IF EXISTS secrets");
         conn.close();
     }
 
@@ -52,7 +55,15 @@ public class FilterAppliedToEveryReadTest {
                 Map.of(Headers.HEADER_ACCESS, "[[\"table\",\"orders\",\"*\",\"tenant_id='abc'\"]]"));
     }
 
+    private static List<SqlAuthorizer> restrictedAuthorizers() {
+        return List.of(SqlAuthorizer.RESTRICTED_DATASOURCE_AUTHORIZER, SqlAuthorizer.RESTRICT_READ_ONLY_AUTHORIZER);
+    }
+
     private static List<Object> run(String sql, Map<String, String> claims) throws Exception {
+        return run(authorizer, sql, claims);
+    }
+
+    private static List<Object> run(SqlAuthorizer authorizer, String sql, Map<String, String> claims) throws Exception {
         JsonNode authorized = authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims);
         String rewritten = Transformations.parseToSql(conn, authorized);
         return firstColumn(rewritten);
@@ -208,5 +219,57 @@ public class FilterAppliedToEveryReadTest {
                 "[[\"path\",\"example/data/hive_table\",\"*\",\"key='k2'\"]]");
         assertThrows(UnauthorizedException.class, () ->
                 authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims));
+    }
+
+    /**
+     * A CTE named like the table does not shadow a QUALIFIED reference: DuckDB binds {@code main.orders}
+     * and {@code memory.main.orders} to the table itself. Treating them as CTE references left the
+     * read with no filter CTE, so every tenant's rows came back.
+     */
+    @Test
+    void aCteNamedLikeTheTableDoesNotHideAQualifiedRead() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                for (String sql : new String[]{
+                        "WITH orders AS (SELECT 0 AS id) SELECT id FROM main.orders ORDER BY id",
+                        "WITH orders AS (SELECT 0 AS id) SELECT id FROM memory.main.orders ORDER BY id",
+                        "WITH orders AS (SELECT 0 AS id) SELECT id FROM (SELECT id FROM main.orders) s ORDER BY id",
+                        "WITH orders AS (SELECT 0 AS id) SELECT o.id FROM orders c JOIN main.orders o ON true ORDER BY o.id",
+                        "WITH orders AS (SELECT 0 AS id) SELECT id FROM orders WHERE id IN (SELECT id FROM main.orders) "
+                                + "UNION ALL SELECT id FROM main.orders ORDER BY id",
+                        "SELECT id FROM (WITH orders AS (SELECT 0 AS id) SELECT id FROM main.orders) s ORDER BY id"}) {
+                    List<Object> rows = run(a, sql, claims);
+                    assertTrue(!rows.contains("2"), a + " / " + sql + " leaked tenant xyz: " + rows);
+                }
+            }
+        }
+    }
+
+    /** In one query, the bare name still reads the CTE and the qualified one the filtered table. */
+    @Test
+    void theBareNameStillReadsTheShadowingCte() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertEquals(List.of("0", "1", "3"), run(a, "WITH orders AS (SELECT 0 AS id) "
+                        + "SELECT id FROM orders UNION ALL SELECT id FROM main.orders ORDER BY id", claims), a.toString());
+            }
+        }
+    }
+
+    /** A table the grant does not list cannot be reached by hiding it behind a same-named CTE either. */
+    @Test
+    void aCteNamedLikeAnUngrantedTableDoesNotHideAQualifiedRead() throws Exception {
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                String sql = "WITH secrets AS (SELECT 0 AS amount) SELECT amount FROM main.secrets";
+                List<Object> rows;
+                try {
+                    rows = run(a, sql, claims);
+                } catch (UnauthorizedException refused) {
+                    continue;
+                }
+                assertEquals(List.of(), rows, a + " read an ungranted table");
+            }
+        }
     }
 }
