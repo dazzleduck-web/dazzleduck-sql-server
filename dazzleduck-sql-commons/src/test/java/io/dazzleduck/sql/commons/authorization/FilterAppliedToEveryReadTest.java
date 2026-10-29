@@ -550,6 +550,64 @@ public class FilterAppliedToEveryReadTest {
                 Transformations.parseToTree(conn, io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY), claims);
     }
 
+    /**
+     * A path grant's filter must see the file's own columns in every arm that reads it, and there
+     * must be one read: a REPLACE in the arm made {@code key='k2'} pass every row, and a second read
+     * of the granted file (a scalar subquery) ran unfiltered.
+     */
+    @Test
+    void aPathGrantFilterRefusesRenamedArmsAndASecondRead() throws Exception {
+        var claims = Map.of(Headers.HEADER_ACCESS, "[[\"path\",\"example/data/hive_table\",\"*\",\"key='k2'\"]]");
+        String file = "read_parquet('example/data/hive_table/*/*/*.parquet', hive_partitioning = true)";
+        String typed = "FROM (VALUES(NULL::DATE, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR)) t(dt, p, key, value) WHERE false";
+        for (String sql : new String[]{
+                "FROM (" + typed + " UNION ALL BY NAME SELECT * REPLACE ('k2' AS key) FROM " + file + ")",
+                "FROM (" + typed + " UNION ALL BY NAME SELECT dt, p, 'k2' AS key, value FROM " + file + ")",
+                "FROM (" + typed + " UNION ALL BY NAME FROM " + file + " f(dt, p, value, key))",
+                "SELECT (SELECT string_agg(DISTINCT key) FROM " + file + ") AS leak, count(*) FROM ("
+                        + io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY + ")"}) {
+            assertThrows(UnauthorizedException.class, () ->
+                    authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims), sql);
+        }
+        // The generated shape still passes, and a grant with no filter (true) is not restricted.
+        authorizer.authorize("user", DB, SCHEMA,
+                Transformations.parseToTree(conn, io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY), claims);
+        var unfiltered = Map.of(Headers.HEADER_ACCESS, "[[\"path\",\"example/data/hive_table\",\"*\",\"true\"]]");
+        authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn,
+                "FROM (" + typed + " UNION ALL BY NAME SELECT * REPLACE ('k2' AS key) FROM " + file + ")"), unfiltered);
+    }
+
+    /** Column aliases stay on the reference: the shared body keeps the table's own columns. */
+    @Test
+    void columnAliasesOnAFilteredTableStillWork() throws Exception {
+        for (var claims : grants()) {
+            assertEquals(List.of("1", "3"),
+                    run("SELECT a FROM orders AS o(a, b, c) ORDER BY a", claims), claims.toString());
+            // and a second reference without aliases shares the body unchanged
+            assertEquals(List.of("1", "1", "3", "3"),
+                    run("SELECT a FROM orders AS o(a, b, c) UNION ALL SELECT id FROM orders ORDER BY 1", claims),
+                    claims.toString());
+        }
+    }
+
+    /** Every spelling of one table gets its filter: the first reference's case must not decide it. */
+    @Test
+    void aTableSpelledDifferentlyStillGetsItsFilter() throws Exception {
+        JsonNode filtered = Transformations.injectFilterCtes(Transformations.parseToTree(conn,
+                        "SELECT count(*) FROM \"ORDERS\" a JOIN orders b USING (id)"),
+                Map.of("orders", SqlAuthorizer.compileFilterString("tenant_id = 'abc'")), DB, SCHEMA);
+        assertEquals(List.of("2"), firstColumn(Transformations.parseToSql(conn, filtered)));
+    }
+
+    /** Two identical AT clauses are one version: one filter CTE, whatever their source positions. */
+    @Test
+    void identicalAtClausesShareOneFilterCte() throws Exception {
+        JsonNode filtered = Transformations.injectFilterCtes(Transformations.parseToTree(conn,
+                        "SELECT * FROM orders AS a AT (VERSION => 3) JOIN orders AS b AT (VERSION => 3) USING (id)"),
+                Map.of("orders", SqlAuthorizer.compileFilterString("tenant_id = 'abc'")), DB, SCHEMA);
+        assertEquals(1, Transformations.getFirstStatementNode(filtered).get("cte_map").get("map").size());
+    }
+
     /** Asserts {@code sql} returns no tenant-xyz order and no row of the ungranted {@code secrets}, or is refused. */
     private static void assertNoLeak(SqlAuthorizer a, String sql, Map<String, String> claims) throws Exception {
         List<Object> rows;

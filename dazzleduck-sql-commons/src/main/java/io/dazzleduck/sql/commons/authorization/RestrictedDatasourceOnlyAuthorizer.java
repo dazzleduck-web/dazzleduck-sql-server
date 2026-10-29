@@ -119,7 +119,7 @@ public class RestrictedDatasourceOnlyAuthorizer implements SqlAuthorizer {
                             throw new UnauthorizedException("No access to %s".formatted(cst));
                         }
                     }
-                    SqlAuthorizer.requireFilterablePlacement(query);
+                    SqlAuthorizer.requireFilterablePlacement(query, entry.filter());
                     yield SqlAuthorizer.addFilterToTableFunction(updatedQuery, entry.filter());
                 }
                 case TableAccessEntry.FUNCTION -> {
@@ -132,7 +132,7 @@ public class RestrictedDatasourceOnlyAuthorizer implements SqlAuthorizer {
                             throw new UnauthorizedException("No access to %s".formatted(cst));
                         }
                     }
-                    SqlAuthorizer.requireFilterablePlacement(query);
+                    SqlAuthorizer.requireFilterablePlacement(query, entry.filter());
                     yield SqlAuthorizer.addFilterToTableFunction(updatedQuery, entry.filter());
                 }
                 default -> throw new UnauthorizedException("Unknown access type: " + entry.type());
@@ -175,7 +175,7 @@ public class RestrictedDatasourceOnlyAuthorizer implements SqlAuthorizer {
             throw new UnauthorizedException("A filtered grant cannot read both a table and a table function");
         }
         if (readsFunctions) {
-            SqlAuthorizer.requireFilterablePlacement(query);
+            SqlAuthorizer.requireFilterablePlacement(query, compiledFilter);
             return SqlAuthorizer.addFilterToTableFunction(updatedQuery, compiledFilter);
         }
         return SqlAuthorizer.addFilterToEveryRead(updatedQuery,

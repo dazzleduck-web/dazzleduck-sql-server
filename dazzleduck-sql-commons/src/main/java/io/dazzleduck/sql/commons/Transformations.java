@@ -2953,7 +2953,10 @@ public class Transformations {
                                             String defaultCatalog, String defaultSchema) {
         Map<String, JsonNode> resolved = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> e : tableFilters.entrySet()) {
-            String key = qualifiedTableName(e.getKey(), defaultCatalog, defaultSchema);
+            // Folded as DuckDB folds identifiers (quoted ones included): every reference to the
+            // table shares one filter CTE, keyed the same way, so its filter must not depend on how
+            // the first reference happened to spell the name.
+            String key = foldIdentifier(qualifiedTableName(e.getKey(), defaultCatalog, defaultSchema));
             JsonNode previous = resolved.put(key, e.getValue());
             if (previous != null && !previous.equals(e.getValue())) {
                 throw new IllegalArgumentException(
@@ -3010,12 +3013,16 @@ public class Transformations {
          * reference.
          *
          * <p>The body is a copy of the reference with its AT clause (which must sit on the table)
-         * and WITHOUT its sample: a TABLESAMPLE stays on each reference, so a reference the query
-         * did not sample is not sampled through a shared body.
+         * and WITHOUT its sample or column aliases: a TABLESAMPLE stays on each reference, so a
+         * reference the query did not sample is not sampled through a shared body, and column
+         * aliases ({@code orders AS o(a, b, c)}) stay on the reference too -- in the body they
+         * would rename the columns the grant filter binds to, for every reference.
          */
         String cteKeyFor(List<String> table, ObjectNode reference) {
             JsonNode at = reference.get(FIELD_AT_CLAUSE);
-            String atKey = at == null || at.isNull() ? "" : at.toString();
+            // Keyed on the clause's meaning, not its text: query_location differs between two
+            // identical AT (VERSION => 3) clauses, which must still share one CTE.
+            String atKey = at == null || at.isNull() ? "" : withoutQueryLocations(at).toString();
             List<String> key = List.of(
                     foldIdentifier(table.get(0).isEmpty() ? nullToEmpty(defaultCatalog) : table.get(0)),
                     foldIdentifier(table.get(1).isEmpty() ? nullToEmpty(defaultSchema) : table.get(1)),
@@ -3030,6 +3037,7 @@ public class Transformations {
             cteKeyByTable.put(key, cteKey);
             ObjectNode body = reference.deepCopy();
             body.putNull(FIELD_SAMPLE);
+            body.putArray(FIELD_COLUMN_NAME_ALIAS);
             tablesToWrap.put(cteKey, body);
             return cteKey;
         }
@@ -3037,6 +3045,19 @@ public class Transformations {
 
     private static final String FIELD_AT_CLAUSE = "at_clause";
     private static final String FIELD_SAMPLE = "sample";
+    private static final String FIELD_COLUMN_NAME_ALIAS = "column_name_alias";
+
+    /** A copy of {@code node} with every {@code query_location} field removed, at any depth. */
+    private static JsonNode withoutQueryLocations(JsonNode node) {
+        JsonNode copy = node.deepCopy();
+        stripQueryLocations(copy);
+        return copy;
+    }
+
+    private static void stripQueryLocations(JsonNode node) {
+        if (node instanceof ObjectNode object) object.remove(FIELD_QUERY_LOCATION);
+        for (JsonNode child : node) stripQueryLocations(child);
+    }
 
     private static String nullToEmpty(String s) {
         return s == null ? "" : s;
@@ -3111,7 +3132,8 @@ public class Transformations {
             ArrayNode newMap = JsonNodeFactory.instance.arrayNode();
             for (Map.Entry<String, ObjectNode> e : tablesToWrap.entrySet()) {
                 String qualifiedLookupKey = buildQualifiedLookupKey(e.getValue(), defaultCatalog, defaultSchema);
-                newMap.add(buildFilterCteEntry(e.getKey(), e.getValue(), filterForTable.apply(qualifiedLookupKey)));
+                newMap.add(buildFilterCteEntry(e.getKey(), e.getValue(),
+                        filterForTable.apply(foldIdentifier(qualifiedLookupKey))));
             }
             JsonNode existingMap = statementNode.get(FIELD_CTE_MAP).get(FIELD_MAP);
             if (existingMap != null && existingMap.isArray()) {

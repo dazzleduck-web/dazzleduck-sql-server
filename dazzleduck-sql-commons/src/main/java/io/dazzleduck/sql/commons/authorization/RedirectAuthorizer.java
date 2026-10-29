@@ -119,8 +119,9 @@ public class RedirectAuthorizer {
             if (readsTables) {
                 throw new UnauthorizedException("A filtered table function cannot be combined with a table");
             }
-            SqlAuthorizer.requireFilterablePlacement(query);
-            return SqlAuthorizer.addFilterToTableFunction(updatedQuery, SqlAuthorizer.compileFilterString(functionFilter));
+            JsonNode compiledFunctionFilter = SqlAuthorizer.compileFilterString(functionFilter);
+            SqlAuthorizer.requireFilterablePlacement(query, compiledFunctionFilter);
+            return SqlAuthorizer.addFilterToTableFunction(updatedQuery, compiledFunctionFilter);
         }
         // addFilterToEveryRead, not addFilterViaCtes: a redirect-mode query is split-planned like
         // any other, and the CTEs alone leave the planner no top-level predicate to prune on.
