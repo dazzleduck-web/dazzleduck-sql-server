@@ -220,6 +220,10 @@ public class TransformationsInjectFilterTest {
                 .get("cte_map").get("map").get(0).get("value").get("materialized").asText());
         assertTrue(Transformations.isVolatile(filter("tenant_id = gen_random_uuid()::VARCHAR")));
         assertFalse(Transformations.isVolatile(filter("tenant_id = 'abc' AND now() > TIMESTAMPTZ '2020-01-01'")));
+        // a sampled subquery, and a qualified call (a macro can hide random() behind one)
+        assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders USING SAMPLE 50%)")));
+        assertTrue(Transformations.isVolatile(filter("main.lower(tenant_id) = 'abc'")));
+        assertFalse(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders WHERE amount > 0)")));
     }
 
     // --- WHERE subquery (IN, EXISTS, scalar) — security gap fixed ---

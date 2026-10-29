@@ -3243,7 +3243,14 @@ public class Transformations {
     private static final Set<String> VOLATILE_FUNCTIONS = Set.of(
             "random", "gen_random_uuid", "uuid", "uuidv4", "uuidv7", "nextval", "setseed");
 
-    /** Whether {@code expr} calls a volatile function anywhere. */
+    /**
+     * Whether {@code expr} may give a different answer each time it is evaluated, so inlining it at
+     * every reference could give each reference different rows. Conservative: a volatile built-in,
+     * a schema- or catalog-qualified call (a macro such as {@code main.my_sample()} can wrap
+     * random(), and a qualified built-in only keeps the old materialized behaviour), or a sampled
+     * subquery ({@code USING SAMPLE} / {@code TABLESAMPLE}). An UNQUALIFIED user macro cannot be told
+     * from a built-in here, so a grant filter must not hide randomness behind one.
+     */
     static boolean isVolatile(JsonNode expr) {
         if (expr == null || expr.isNull()) return false;
         if (expr.isObject() && FUNCTION_CLASS.equals(asText(expr, FIELD_CLASS))) {
@@ -3251,6 +3258,16 @@ public class Transformations {
             if (name != null && VOLATILE_FUNCTIONS.contains(name.toLowerCase(java.util.Locale.ROOT))) {
                 return true;
             }
+            // A function call's own qualifier fields, "schema" and "catalog".
+            String schema = asText(expr, "schema");
+            String catalog = asText(expr, "catalog");
+            if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) {
+                return true;
+            }
+        }
+        if (expr.isObject()) {
+            JsonNode sample = expr.get("sample");
+            if (sample != null && !sample.isNull()) return true;
         }
         for (JsonNode child : expr) {
             if (isVolatile(child)) return true;
