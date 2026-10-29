@@ -3247,12 +3247,17 @@ public class Transformations {
      * Whether {@code expr} may give a different answer each time it is evaluated, so inlining it at
      * every reference could give each reference different rows. Conservative: a volatile built-in,
      * a schema- or catalog-qualified call (a macro such as {@code main.my_sample()} can wrap
-     * random(), and a qualified built-in only keeps the old materialized behaviour), or a sampled
-     * subquery ({@code USING SAMPLE} / {@code TABLESAMPLE}). An UNQUALIFIED user macro cannot be told
-     * from a built-in here, so a grant filter must not hide randomness behind one.
+     * random(), and a qualified built-in only keeps the old materialized behaviour), or ANY
+     * subquery -- a subquery can be nondeterministic without a volatile call (LIMIT without ORDER
+     * BY, any_value / first over an unordered input, USING SAMPLE), and an aggregate can only
+     * reach a WHERE filter through one. An UNQUALIFIED user macro cannot be told from a built-in
+     * here, so a grant filter must not hide randomness behind one.
      */
     static boolean isVolatile(JsonNode expr) {
         if (expr == null || expr.isNull()) return false;
+        if (expr.isObject() && SUBQUERY_CLASS.equals(asText(expr, FIELD_CLASS))) {
+            return true;
+        }
         if (expr.isObject() && FUNCTION_CLASS.equals(asText(expr, FIELD_CLASS))) {
             String name = asText(expr, FIELD_FUNCTION_NAME);
             if (name != null && VOLATILE_FUNCTIONS.contains(name.toLowerCase(java.util.Locale.ROOT))) {

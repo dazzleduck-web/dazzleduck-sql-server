@@ -223,7 +223,11 @@ public class TransformationsInjectFilterTest {
         // a sampled subquery, and a qualified call (a macro can hide random() behind one)
         assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders USING SAMPLE 50%)")));
         assertTrue(Transformations.isVolatile(filter("main.lower(tenant_id) = 'abc'")));
-        assertFalse(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders WHERE amount > 0)")));
+        // any subquery: LIMIT without ORDER BY (or any_value over an unordered input) can pick a
+        // different row at each reference, with no volatile call in sight
+        assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders LIMIT 1)")));
+        assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders WHERE amount > 0)")));
+        assertFalse(Transformations.isVolatile(filter("tenant_id IN ('abc', 'def') AND amount BETWEEN 0 AND 500")));
     }
 
     // --- WHERE subquery (IN, EXISTS, scalar) — security gap fixed ---
