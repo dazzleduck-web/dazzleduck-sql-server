@@ -222,7 +222,12 @@ public class TransformationsInjectFilterTest {
         assertFalse(Transformations.isVolatile(filter("tenant_id = 'abc' AND now() > TIMESTAMPTZ '2020-01-01'")));
         // a sampled subquery, and a qualified call (a macro can hide random() behind one)
         assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders USING SAMPLE 50%)")));
-        assertTrue(Transformations.isVolatile(filter("main.lower(tenant_id) = 'abc'")));
+        assertTrue(Transformations.isVolatile(filter("sampling.pick(tenant_id) = 'abc'")));
+        // ...but not the default namespaces: the parser writes list/struct literals as
+        // main.list_value / main.struct_pack, and built-ins live in system.main and pg_catalog
+        assertFalse(Transformations.isVolatile(filter("tenant_id = ANY(['abc', 'def'])")));
+        assertFalse(Transformations.isVolatile(filter("{'k': tenant_id}.k = 'abc'")));
+        assertFalse(Transformations.isVolatile(filter("system.main.lower(tenant_id) = 'abc'")));
         // any subquery: LIMIT without ORDER BY (or any_value over an unordered input) can pick a
         // different row at each reference, with no volatile call in sight
         assertTrue(Transformations.isVolatile(filter("tenant_id IN (SELECT tenant_id FROM orders LIMIT 1)")));

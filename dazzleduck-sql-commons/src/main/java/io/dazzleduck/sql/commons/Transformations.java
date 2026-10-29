@@ -3239,6 +3239,23 @@ public class Transformations {
         return entry;
     }
 
+    /** Whether a BASE_TABLE or TABLE_FUNCTION relation appears anywhere under {@code node}. */
+    private static boolean readsData(JsonNode node) {
+        if (node == null || node.isNull()) return false;
+        if (node.isObject() && !node.has(FIELD_CLASS)) {
+            String type = asText(node, FIELD_TYPE);
+            if (NODE_TYPE_BASE_TABLE.equals(type) || NODE_TYPE_TABLE_FUNCTION.equals(type)) return true;
+        }
+        for (JsonNode child : node) {
+            if (readsData(child)) return true;
+        }
+        return false;
+    }
+
+    /** Qualifiers DuckDB itself puts on built-in calls: not evidence of a user macro. */
+    private static final Set<String> DEFAULT_FUNCTION_SCHEMAS = Set.of("", "main", "pg_catalog");
+    private static final Set<String> DEFAULT_FUNCTION_CATALOGS = Set.of("", "system");
+
     /** DuckDB's volatile scalar functions: a new value per call, so per row and per evaluation. */
     private static final Set<String> VOLATILE_FUNCTIONS = Set.of(
             "random", "gen_random_uuid", "uuid", "uuidv4", "uuidv7", "nextval", "setseed");
@@ -3246,16 +3263,24 @@ public class Transformations {
     /**
      * Whether {@code expr} may give a different answer each time it is evaluated, so inlining it at
      * every reference could give each reference different rows. Conservative: a volatile built-in,
-     * a schema- or catalog-qualified call (a macro such as {@code main.my_sample()} can wrap
-     * random(), and a qualified built-in only keeps the old materialized behaviour), or ANY
-     * subquery -- a subquery can be nondeterministic without a volatile call (LIMIT without ORDER
-     * BY, any_value / first over an unordered input, USING SAMPLE), and an aggregate can only
-     * reach a WHERE filter through one. An UNQUALIFIED user macro cannot be told from a built-in
-     * here, so a grant filter must not hide randomness behind one.
+     * a call qualified with a NON-default schema or catalog (a macro such as
+     * {@code sampling.my_sample()} can wrap random()), or ANY subquery -- a subquery can be
+     * nondeterministic without a volatile call (LIMIT without ORDER BY, any_value / first over an
+     * unordered input, USING SAMPLE), and an aggregate can only reach a WHERE filter through one.
+     *
+     * <p>The default namespaces do not count as qualification: DuckDB's parser itself writes list
+     * and struct literals as {@code main.list_value} / {@code main.struct_pack}, and built-ins live
+     * in {@code system.main} and {@code pg_catalog}, so flagging those would keep ordinary filters
+     * such as {@code tenant_id = ANY(['a', 'b'])} materialized. A user macro in {@code main}, like an
+     * unqualified one, cannot be told from a built-in here, so a grant filter must not hide
+     * randomness behind one.
      */
     static boolean isVolatile(JsonNode expr) {
         if (expr == null || expr.isNull()) return false;
-        if (expr.isObject() && SUBQUERY_CLASS.equals(asText(expr, FIELD_CLASS))) {
+        if (expr.isObject() && SUBQUERY_CLASS.equals(asText(expr, FIELD_CLASS)) && readsData(expr)) {
+            // A subquery over a table or table function. One that reads nothing -- DuckDB parses
+            // `x = ANY(['a', 'b'])` as a FROM-less subquery over unnest(..) -- is walked like any
+            // other expression below.
             return true;
         }
         if (expr.isObject() && FUNCTION_CLASS.equals(asText(expr, FIELD_CLASS))) {
@@ -3266,7 +3291,8 @@ public class Transformations {
             // A function call's own qualifier fields, "schema" and "catalog".
             String schema = asText(expr, "schema");
             String catalog = asText(expr, "catalog");
-            if ((schema != null && !schema.isEmpty()) || (catalog != null && !catalog.isEmpty())) {
+            if (!DEFAULT_FUNCTION_SCHEMAS.contains(schema == null ? "" : schema.toLowerCase(java.util.Locale.ROOT))
+                    || !DEFAULT_FUNCTION_CATALOGS.contains(catalog == null ? "" : catalog.toLowerCase(java.util.Locale.ROOT))) {
                 return true;
             }
         }
