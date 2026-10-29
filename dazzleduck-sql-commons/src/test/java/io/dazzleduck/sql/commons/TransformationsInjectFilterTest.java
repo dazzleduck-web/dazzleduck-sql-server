@@ -177,6 +177,34 @@ public class TransformationsInjectFilterTest {
         assertEquals(2, ids.size());
     }
 
+    @Test
+    void sharedFilterCte_isInlinedNotMaterialized() throws SQLException, JsonProcessingException {
+        // Two references to one table read one filter CTE. Left to DuckDB's default it is
+        // materialized -- every allowed row, every column, buffered before either reference's own
+        // projection or predicate applies. It must be inlined: a scan per reference, no CTE.
+        String sql = "WITH big AS (SELECT id FROM orders WHERE amount > 150) "
+                + "SELECT (SELECT count(*) FROM orders) AS n, (SELECT count(*) FROM big) AS n_big";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        JsonNode result = Transformations.injectFilterCtes(tree, filter("tenant_id = 'abc'"));
+        JsonNode cteMap = result.get("statements").get(0).get("node").get("cte_map").get("map");
+        assertEquals("CTE_MATERIALIZE_NEVER", cteMap.get(0).get("value").get("materialized").asText());
+
+        String out = Transformations.parseToSql(conn, result);
+        assertTrue(out.contains("___orders AS NOT MATERIALIZED"), out);
+
+        StringBuilder plan = new StringBuilder();
+        try (ResultSet rs = conn.createStatement().executeQuery("EXPLAIN " + out)) {
+            while (rs.next()) plan.append(rs.getString(2)).append('\n');
+        }
+        assertFalse(plan.toString().contains("CTE_SCAN"), plan.toString());
+
+        try (ResultSet rs = conn.createStatement().executeQuery(out)) {
+            assertTrue(rs.next());
+            assertEquals(2, rs.getLong(1));
+            assertEquals(1, rs.getLong(2));
+        }
+    }
+
     // --- WHERE subquery (IN, EXISTS, scalar) — security gap fixed ---
 
     @Test

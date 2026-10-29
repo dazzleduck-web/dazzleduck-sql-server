@@ -2763,12 +2763,16 @@ public class Transformations {
      * <p>Example — given filter {@code tenant_id = 'abc'}:
      * <pre>SELECT * FROM a JOIN b ON a.id = b.id</pre>
      * becomes:
-     * <pre>WITH ___a AS (SELECT * FROM a WHERE tenant_id = 'abc'),
-     *      ___b AS (SELECT * FROM b WHERE tenant_id = 'abc')
+     * <pre>WITH ___a AS NOT MATERIALIZED (SELECT * FROM a WHERE tenant_id = 'abc'),
+     *      ___b AS NOT MATERIALIZED (SELECT * FROM b WHERE tenant_id = 'abc')
      * SELECT * FROM ___a a JOIN ___b b ON a.id = b.id</pre>
      *
      * <p>Existing user-defined CTEs are not wrapped at the reference site; instead the
      * filter is injected into their bodies, so they automatically see filtered data.
+     *
+     * <p>Every reference to one table shares its filter CTE, so the CTEs are NOT MATERIALIZED: a
+     * query that names a table twice would otherwise buffer {@code SELECT *} of every row the
+     * grant allows before any of the query's own projections or predicates apply.
      */
     public static JsonNode injectFilterCtes(JsonNode query, JsonNode filter) {
         // One filter for every table, so no table name is ever looked up and the resolution
@@ -3218,7 +3222,13 @@ public class Transformations {
         ObjectNode cteValue = f.objectNode();
         cteValue.putArray("aliases");
         cteValue.set("query", queryWrapper);
-        cteValue.put("materialized", "CTE_MATERIALIZE_DEFAULT");
+        // Inline at every reference. DuckDB materializes a CTE referenced more than once, and
+        // every reference to this table in the query reads this one CTE -- a SELECT * of every
+        // row the grant allows, which then has to fit in memory before the query's own column
+        // and row filters reach it. Inlined, each reference is a plain filtered scan that gets
+        // projection, filter and partition pushdown. The body is a deterministic filter over a
+        // single table, so inlining cannot change the rows any reference sees.
+        cteValue.put("materialized", "CTE_MATERIALIZE_NEVER");
         cteValue.putArray("key_targets");
 
         ObjectNode entry = f.objectNode();
