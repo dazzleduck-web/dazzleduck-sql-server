@@ -220,11 +220,38 @@ public interface SqlAuthorizer {
      * there is no such SELECT the filter has nowhere to go, and the old code then returned
      * {@code null} — which the caller dereferenced into a NullPointerException rather than
      * refusing. The query is refused instead.
+     *
+     * <p>The filter must also bind to the table function's OWN columns, so two shapes the helper
+     * accepts are refused here:
+     * <ul>
+     *   <li>a SELECT over a CTE (a BASE_TABLE reference -- a path or function grant reads no real
+     *       table): the CTE defines its columns, so
+     *       {@code WITH x AS (SELECT * REPLACE ('abc' AS tenant_id) FROM read_parquet(..))} makes a
+     *       {@code tenant_id = 'abc'} filter pass every row;</li>
+     *   <li>a positional UNION: its column names come from the user-written left arm, so the
+     *       filter's column can name a different column of the file. Only UNION BY NAME -- the shape
+     *       the clients and planner generate -- keeps the file's column names.</li>
+     * </ul>
      */
     static void requireFilterablePlacement(JsonNode query) throws UnauthorizedException {
-        if (Transformations.getSelectForTableFunction(Transformations.getFirstStatementNode(query)) == null) {
+        JsonNode select = Transformations.getSelectForTableFunction(Transformations.getFirstStatementNode(query));
+        if (select == null) {
             throw new UnauthorizedException(
                     "This query shape cannot have a path or function grant's filter applied to it");
+        }
+        JsonNode from = select.get(ExpressionConstants.FIELD_FROM_TABLE);
+        String fromType = from == null ? null : from.path(ExpressionConstants.FIELD_TYPE).asText(null);
+        if (ExpressionConstants.NODE_TYPE_BASE_TABLE.equals(fromType)) {
+            throw new UnauthorizedException(
+                    "A path or function grant's filter cannot be applied over a CTE, which defines its own columns");
+        }
+        if (ExpressionConstants.NODE_TYPE_SUBQUERY.equals(fromType)) {
+            JsonNode inner = from.path(ExpressionConstants.FIELD_SUBQUERY).path(ExpressionConstants.FIELD_NODE);
+            if (ExpressionConstants.NODE_TYPE_SET_OPERATION_NODE.equals(inner.path(ExpressionConstants.FIELD_TYPE).asText(null))
+                    && !"UNION_BY_NAME".equals(inner.path("setop_type").asText(null))) {
+                throw new UnauthorizedException(
+                        "A path or function grant's filter needs UNION BY NAME, so it binds to the file's own columns");
+            }
         }
     }
 
@@ -342,6 +369,15 @@ public interface SqlAuthorizer {
     boolean hasWriteAccess(String user, String ingestionQueue, Map<String, String> verifiedClaims);
 
     static boolean hasAccessToPath(String authorizedPath, String queriedPath) {
+        if (queriedPath == null || Transformations.NON_CONSTANT_PATH.equals(queriedPath)) {
+            // Not a path at all (a computed argument): no grant covers it, a grant of "/" included.
+            return false;
+        }
+        for (String segment : queriedPath.split("/")) {
+            // The segments are compared as written, so a "." or ".." would let
+            // "/allowed/../secret/x.parquet" match the "/allowed" prefix and read outside it.
+            if (segment.equals("..") || segment.equals(".")) return false;
+        }
         var authorizedSplits = authorizedPath.split("/");
         var queriedSplits = queriedPath.split("/");
         if (queriedSplits.length < authorizedSplits.length) {

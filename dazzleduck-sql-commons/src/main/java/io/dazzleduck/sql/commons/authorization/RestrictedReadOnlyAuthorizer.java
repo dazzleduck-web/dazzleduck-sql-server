@@ -42,8 +42,8 @@ public class RestrictedReadOnlyAuthorizer implements SqlAuthorizer {
         // references — TABLE_FUNCTION references would pass through unfiltered and could
         // read external data or leak catalog metadata. RESTRICT_READ_ONLY's claim shape
         // ("table" only) gives users no way to express function access, so reject outright.
-        // Note: scan the raw AST directly rather than via collectAllTableReferences,
-        // which skips zero-argument TABLE_FUNCTION nodes like duckdb_tables().
+        // Scans the raw AST, independently of collectAllTableReferences (which now reports every
+        // table function too): the refusal does not depend on that walk being complete.
         String foundFunction = findTableFunctionName(query);
         if (foundFunction != null) {
             throw new UnauthorizedException(

@@ -453,25 +453,101 @@ public class FilterAppliedToEveryReadTest {
     }
 
     /**
-     * A row generator that reads no data -- a lateral unnest of a column -- is not a datasource:
-     * a table grant still allows it, filtered or not, and its rows come only from the granted ones.
+     * A table function in FROM is refused under a table grant, a row generator included: a
+     * catalog table macro named range / unnest / generate_series shadows the built-in (even
+     * unqualified) and reads whatever its body reads, so the name cannot make it data-free. The
+     * select-list form, {@code SELECT unnest(col) FROM t}, is a scalar call and still works.
      */
     @Test
-    void aLateralUnnestOfTheGrantedTableStillWorks() throws Exception {
-        String sql = "SELECT u.x FROM orders o, unnest([o.id * 10, o.id * 10 + 1]) u(x) ORDER BY u.x";
-        // Unfiltered table grant: every row.
-        assertEquals(List.of("10", "11", "20", "21", "30", "31"),
-                run(sql, Map.of(Headers.HEADER_TABLE, "orders")));
-        // Filtered: tenant abc's rows only, in both claim shapes.
-        for (var claims : grants()) {
-            assertEquals(List.of("10", "11", "30", "31"), run(sql, claims), claims.toString());
+    void aTableFunctionInFromIsRefusedUnderATableGrantButSelectListUnnestWorks() throws Exception {
+        for (String sql : new String[]{
+                "SELECT u.x FROM orders o, unnest([o.id * 10, o.id * 10 + 1]) u(x)",
+                "SELECT * FROM orders, range(3)",
+                "SELECT * FROM orders, range(1 + 0)"}) {
+            assertThrows(UnauthorizedException.class, () -> run(sql, Map.of(Headers.HEADER_TABLE, "orders")), sql);
+            for (var claims : grants()) {
+                assertThrows(UnauthorizedException.class, () -> run(sql, claims), sql + " / " + claims);
+            }
         }
-        // And a subquery inside the generator's argument is filtered too.
         for (var claims : grants()) {
-            assertEquals(List.of("1", "3"),
-                    run("SELECT u.x FROM unnest((SELECT list(id ORDER BY id) FROM orders)) u(x) ORDER BY u.x", claims),
+            assertEquals(List.of("10", "11", "30", "31"),
+                    run("SELECT unnest([id * 10, id * 10 + 1]) AS x FROM orders ORDER BY x", claims),
                     claims.toString());
         }
+    }
+
+    /**
+     * A subquery in an AT clause would run inside the filter CTE's body (DuckDB ignores AT on a CTE
+     * reference) without the filter, reading every tenant's rows: refused.
+     */
+    @Test
+    void aSubqueryInAnAtClauseIsRefused() {
+        for (var claims : grants()) {
+            assertThrows(IllegalStateException.class, () ->
+                    run("SELECT * FROM orders AT (VERSION => (SELECT max(id) FROM orders))", claims));
+        }
+    }
+
+    /**
+     * TABLESAMPLE stays on the reference that wrote it: the filter CTE's body is shared by every
+     * reference, so a sample in it sampled references the query did not sample.
+     */
+    @Test
+    void aTablesampleStaysOnItsOwnReference() throws Exception {
+        JsonNode authorized = authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn,
+                "SELECT count(*) FROM orders a TABLESAMPLE 50% JOIN orders b USING (id)"), grants().get(0));
+        String sql = Transformations.parseToSql(conn, authorized);
+        JsonNode statement = Transformations.getFirstStatementNode(authorized);
+        JsonNode body = statement.get("cte_map").get("map").get(0).get("value").get("query").get("node");
+        assertTrue(body.get("from_table").get("sample").isNull(), "the shared body is not sampled: " + sql);
+        JsonNode join = statement.get("from_table");
+        assertTrue(!join.get("left").get("sample").isNull(), "a keeps its sample: " + sql);
+        assertTrue(join.get("right").get("sample").isNull(), "b was never sampled: " + sql);
+    }
+
+    /**
+     * One table read as {@code main.orders} and as {@code orders} is one table, so its reads share
+     * one filter CTE -- otherwise a volatile filter, kept materialized precisely so every read sees
+     * one row set, is evaluated once per spelling.
+     */
+    @Test
+    void differentlyQualifiedReadsOfOneTableShareOneFilterCte() throws Exception {
+        JsonNode authorized = authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn,
+                "SELECT id FROM orders WHERE id IN (SELECT id FROM main.orders) AND id IN (SELECT id FROM memory.main.orders)"),
+                grants().get(0));
+        JsonNode cteMap = Transformations.getFirstStatementNode(authorized).get("cte_map").get("map");
+        assertEquals(1, cteMap.size(), Transformations.parseToSql(conn, authorized));
+    }
+
+    /** A "." or ".." segment cannot walk a path out of the granted prefix. */
+    @Test
+    void aPathGrantRefusesDotDotSegments() {
+        var claims = Map.of(Headers.HEADER_PATH, "example/data/hive_table");
+        for (String sql : new String[]{
+                "SELECT count(*) FROM read_parquet('example/data/hive_table/../../../etc/passwd')",
+                "SELECT count(*) FROM read_parquet('example/data/hive_table/./a.parquet')"}) {
+            assertThrows(UnauthorizedException.class, () ->
+                    authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims), sql);
+        }
+    }
+
+    /**
+     * A path grant's filter must bind to the file's own columns. Over a CTE the user defines the
+     * columns ({@code * REPLACE ('abc' AS tenant_id)} passed every row), and a positional UNION takes
+     * its names from the user's left arm: both refused. UNION BY NAME, the generated shape, passes.
+     */
+    @Test
+    void aPathGrantFilterRefusesShapesWhereTheUserDefinesTheColumns() throws Exception {
+        var claims = Map.of(Headers.HEADER_ACCESS, "[[\"path\",\"example/data/hive_table\",\"*\",\"key='k2'\"]]");
+        for (String sql : new String[]{
+                "WITH x AS (SELECT * REPLACE ('k2' AS key) FROM read_parquet('example/data/hive_table/*/*/*.parquet')) SELECT * FROM x",
+                "FROM (FROM (VALUES (NULL::VARCHAR, NULL::VARCHAR)) t(value, key) WHERE false "
+                        + "UNION ALL FROM read_parquet('example/data/hive_table/*/*/*.parquet'))"}) {
+            assertThrows(UnauthorizedException.class, () ->
+                    authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims), sql);
+        }
+        authorizer.authorize("user", DB, SCHEMA,
+                Transformations.parseToTree(conn, io.dazzleduck.sql.commons.util.TestConstants.SUPPORTED_HIVE_PATH_QUERY), claims);
     }
 
     /** Asserts {@code sql} returns no tenant-xyz order and no row of the ungranted {@code secrets}, or is refused. */

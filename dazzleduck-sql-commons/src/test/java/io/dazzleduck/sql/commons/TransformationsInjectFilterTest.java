@@ -542,8 +542,9 @@ public class TransformationsInjectFilterTest {
         assertThrows(IllegalStateException.class,
                 () -> Transformations.injectFilterCtes(tree, filter("tenant_id = 'abc'")),
                 "an unhandled FROM node type must fail closed, not produce an unfiltered query");
-        // A row generator reads no data, so it passes: there is nothing of its own to filter.
-        Transformations.injectFilterCtes(Transformations.parseToTree(conn, "SELECT * FROM generate_series(1, 3)"),
-                filter("tenant_id = 'abc'"));
+        // A row generator too: a catalog table macro of the same name can shadow it.
+        JsonNode generator = Transformations.parseToTree(conn, "SELECT * FROM generate_series(1, 3)");
+        assertThrows(IllegalStateException.class,
+                () -> Transformations.injectFilterCtes(generator, filter("tenant_id = 'abc'")));
     }
 }
