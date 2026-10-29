@@ -801,14 +801,21 @@ public class Transformations {
                 var function = fromNode.get(FIELD_FUNCTION);
                 var functionName = function.get(FIELD_FUNCTION_NAME).asText();
                 var functionChildren = function.get(FIELD_CHILDREN);
+                int before = collector.size();
                 if (functionChildren != null && functionChildren.isArray() && !functionChildren.isEmpty()) {
                     extractPathsFromTableFunctionChild(functionChildren.get(0), functionName, collector);
+                }
+                if (collector.size() == before) {
+                    // No constant path to check (range(...), unnest(...), read_parquet((SELECT ..))):
+                    // still a table function, so the grant decides -- a table grant refuses it, a
+                    // function grant matches by name, and no path grant can match this path.
+                    collector.add(new CatalogSchemaTable(null, null, NON_CONSTANT_PATH,
+                            TableType.TABLE_FUNCTION, functionName));
                 }
             }
             case NODE_TYPE_JOIN -> {
                 collectAllTableRefsFromFromNode(fromNode.get(FIELD_LEFT), catalogName, schemaName, collector, cteNames);
                 collectAllTableRefsFromFromNode(fromNode.get(FIELD_RIGHT), catalogName, schemaName, collector, cteNames);
-                collectAllTableRefsFromExpression(fromNode.get("condition"), catalogName, schemaName, collector, cteNames);
             }
             case NODE_TYPE_SUBQUERY -> {
                 collectAllTableRefsFromStatement(
@@ -816,20 +823,39 @@ public class Transformations {
             }
             case NODE_TYPE_PIVOT -> {
                 // PIVOT / UNPIVOT: the scanned relation is under `source`; recurse into it so the
-                // pivoted table is seen by the access check. Aggregate expressions may hold subqueries.
+                // pivoted table is seen by the access check.
                 collectAllTableRefsFromFromNode(fromNode.get(FIELD_SOURCE), catalogName, schemaName, collector, cteNames);
-                collectAllTableRefsFromExpression(fromNode.get(FIELD_AGGREGATES), catalogName, schemaName, collector, cteNames);
             }
-            case NODE_TYPE_EXPRESSION_LIST -> {
-                // VALUES list: each value expression may embed a subquery over a base table.
-                collectAllTableRefsFromExpression(fromNode.get(FIELD_VALUES), catalogName, schemaName, collector, cteNames);
-            }
-            case NODE_TYPE_EMPTY -> {
-                // FROM-less SELECT (e.g. SELECT 1): no relation to enumerate.
+            case NODE_TYPE_EXPRESSION_LIST, NODE_TYPE_EMPTY -> {
+                // VALUES list / FROM-less SELECT: no relation of its own; VALUES expressions are
+                // walked below with every other field.
             }
             default -> throw new IllegalStateException(
                     "collectAllTableReferences: unsupported FROM node type '" + type + "'; refusing to "
                             + "authorize a query whose tables cannot all be enumerated");
+        }
+        // Every other field of the FROM node, not an allow-list: a subquery can sit in a table
+        // function's arguments (range(0, (SELECT ..)), unnest((SELECT ..)), named parameters), a
+        // join condition, an AT (VERSION => ..) clause, pivot aggregates or a VALUES row, and a
+        // missed one is a read the access check never sees.
+        collectAllTableRefsFromNonRelationFields(fromNode, catalogName, schemaName, collector, cteNames);
+    }
+
+    /** A table function's path when its first argument is not a constant: matches no path grant. */
+    static final String NON_CONSTANT_PATH = "\u0000non-constant table function argument";
+
+    /** The fields of a FROM node that hold another FROM node or statement, walked by the caller. */
+    private static final Set<String> FROM_RELATION_FIELDS = Set.of(FIELD_LEFT, FIELD_RIGHT, FIELD_SUBQUERY, FIELD_SOURCE);
+
+    private static void collectAllTableRefsFromNonRelationFields(JsonNode fromNode, String catalogName,
+                                                                 String schemaName,
+                                                                 List<CatalogSchemaTable> collector,
+                                                                 Set<String> cteNames) {
+        var fields = fromNode.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (FROM_RELATION_FIELDS.contains(field.getKey())) continue;
+            collectAllTableRefsFromExpression(field.getValue(), catalogName, schemaName, collector, cteNames);
         }
     }
 
@@ -1516,10 +1542,12 @@ public class Transformations {
      * comparison in the prune must fold case, or a consumer spelling {@code "total tokens"} against a
      * view column {@code "Total Tokens"} binds at execution but reads as unused here, and the pruned
      * body then fails to bind. Folding also only errs conservative on the join side: a fold collision
-     * over-counts a qualifier, which keeps a join, never drops one.
+     * over-counts a qualifier, which keeps a join, never drops one. The fold is DuckDB's own
+     * (ASCII letters only, {@link #foldIdentifier}), the one the authorizer matches with: Java's
+     * Unicode lowercasing would also merge names DuckDB keeps apart.
      */
     private static String foldCase(String identifier) {
-        return identifier == null ? null : identifier.toLowerCase(java.util.Locale.ROOT);
+        return identifier == null ? null : foldIdentifier(identifier);
     }
 
     /** Deep-walk the outer query collecting COLUMN_REF name parts (case-folded) and STAR presence. */
@@ -2968,6 +2996,18 @@ public class Transformations {
         }
     }
 
+    /** Every BASE_TABLE name referenced anywhere under {@code node}, CTE references included. */
+    private static void collectBaseTableNames(JsonNode node, Set<String> into) {
+        if (node == null || node.isNull()) return;
+        if (node.isObject() && NODE_TYPE_BASE_TABLE.equals(asText(node, FIELD_TYPE))) {
+            String table = asText(node, FIELD_TABLE_NAME);
+            if (table != null) into.add(table);
+        }
+        for (JsonNode child : node) {
+            collectBaseTableNames(child, into);
+        }
+    }
+
     private static JsonNode injectFilterCtes(JsonNode query, Function<String, JsonNode> filterForTable,
                                              String defaultCatalog, String defaultSchema) {
         var result = query.deepCopy();
@@ -2977,12 +3017,15 @@ public class Transformations {
         // (top-level or nested) — collecting every real base table and rewriting each reference to
         // its filter-CTE name. CTE bodies are handled inside the dispatcher so nesting at any depth
         // is filtered uniformly.
-        // Generated names must avoid every CTE name the query already declares, at any depth.
-        // The per-scope visible set cannot serve: a CTE body has its own name removed from it (a
-        // same-named reference there is the real table), so a body would regenerate the name of the
-        // CTE enclosing it and reference itself. Collected once, up front.
+        // Generated names must avoid every CTE name the query already declares, at any depth, and
+        // every table name it reads. The per-scope visible set cannot serve: a CTE's own name is
+        // not visible in its body, so a body would regenerate the name of the CTE enclosing it and
+        // reference itself. And a generated name equal to a real table's (a table named ___orders
+        // beside orders) would capture that table's own filter-CTE body, `SELECT * FROM ___orders`,
+        // which then reads the other table's filtered rows. Collected once, up front.
         Set<String> reservedCteNames = new HashSet<>();
         collectDeclaredCteNames(statementNode, reservedCteNames);
+        collectBaseTableNames(statementNode, reservedCteNames);
         var injection = new CteInjection(new LinkedHashMap<>(), new LinkedHashMap<>(), reservedCteNames);
         renameBaseTablesInStatementNode(statementNode, new HashSet<>(), injection);
 
@@ -3023,13 +3066,14 @@ public class Transformations {
         if (mapArray == null || !mapArray.isArray() || mapArray.isEmpty()) return visibleCteNames;
 
         // Each body sees the enclosing scope and the CTEs declared BEFORE it, in or out of WITH
-        // RECURSIVE: DuckDB binds a name declared later in the same WITH to the base table.
+        // RECURSIVE: DuckDB binds a name declared later in the same WITH to the base table. Its own
+        // name is not added until after its body, but an OUTER CTE of the same name stays visible:
+        // DuckDB binds `WITH o AS (..) .. (WITH o AS (SELECT .. FROM o) ..)`'s inner `o` to the
+        // outer CTE (the collector does the same), so it must not be wrapped as a base table.
         Set<String> withDeclared = CteScope.copyOf(visibleCteNames);
         for (JsonNode entry : mapArray) {
             String cteName = entry.get(FIELD_KEY).asText();
             Set<String> namesVisibleInBody = CteScope.copyOf(withDeclared);
-            // Any case: names match case-insensitively (isCteReference).
-            namesVisibleInBody.removeIf(n -> sameIdentifier(n, cteName));
             ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);
             renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, injection);
             withDeclared.add(cteName);
@@ -3172,8 +3216,6 @@ public class Transformations {
             case NODE_TYPE_JOIN -> {
                 renameBaseTablesInFromNode(fromNode.get(FIELD_LEFT), userCteNames, injection);
                 renameBaseTablesInFromNode(fromNode.get(FIELD_RIGHT), userCteNames, injection);
-                // Walk the join condition for subqueries (rare but possible)
-                walkExpressionsForSubqueries(fromNode.get("condition"), userCteNames, injection);
             }
             case NODE_TYPE_SUBQUERY -> {
                 // The derived-table body may be a SELECT, a set operation, or a recursive CTE;
@@ -3183,20 +3225,27 @@ public class Transformations {
             }
             case NODE_TYPE_PIVOT -> {
                 // PIVOT / UNPIVOT: the scanned relation is under `source`; recurse into it so the
-                // pivoted base table is filtered. Aggregate expressions may hold subqueries.
+                // pivoted base table is filtered.
                 renameBaseTablesInFromNode(fromNode.get(FIELD_SOURCE), userCteNames, injection);
-                walkExpressionsForSubqueries(fromNode.get(FIELD_AGGREGATES), userCteNames, injection);
             }
-            case NODE_TYPE_EXPRESSION_LIST -> {
-                // VALUES list: each value expression may embed a subquery over a base table.
-                walkExpressionsForSubqueries(fromNode.get(FIELD_VALUES), userCteNames, injection);
+            case NODE_TYPE_EXPRESSION_LIST, NODE_TYPE_EMPTY -> {
+                // VALUES list / FROM-less SELECT: no relation of its own; VALUES expressions are
+                // walked below with every other field.
             }
-            case NODE_TYPE_EMPTY -> {
-                // FROM-less SELECT (e.g. SELECT 1): no relation to filter.
-            }
+            // TABLE_FUNCTION stays refused: a filter CTE cannot wrap a function's output, and the
+            // collector now reports every table function, so a grant that reaches here never
+            // allowed one.
             default -> throw new IllegalStateException(
                     "injectFilterCtes: unsupported FROM node type '" + type + "'; refusing to run to "
                             + "avoid producing an unfiltered (RLS-bypassing) query");
+        }
+        // Every other field (join condition, AT clause, pivot aggregates, VALUES rows, ...), as the
+        // collector walks them: a subquery in any of them is a read that must be filtered.
+        var fields = fromNode.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (FROM_RELATION_FIELDS.contains(field.getKey())) continue;
+            walkExpressionsForSubqueries(field.getValue(), userCteNames, injection);
         }
     }
 

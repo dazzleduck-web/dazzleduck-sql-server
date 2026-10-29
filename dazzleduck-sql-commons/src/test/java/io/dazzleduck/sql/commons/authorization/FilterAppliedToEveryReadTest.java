@@ -270,6 +270,65 @@ public class FilterAppliedToEveryReadTest {
     }
 
     /**
+     * A nested CTE named like an OUTER CTE binds the outer one in its own body (DuckDB: the inner
+     * {@code o} below reads the outer {@code o}, not a table). The injector used to drop the outer
+     * name from that body's scope, wrap {@code o} as a base table, and the query then failed to bind
+     * (no table {@code o}) where it should return the filtered rows.
+     */
+    @Test
+    void aNestedCteReadingASameNamedOuterCteReadsTheOuterCte() throws Exception {
+        String sql = "WITH o AS (SELECT id FROM orders) "
+                + "SELECT id FROM (WITH o AS (SELECT id FROM o) SELECT id FROM o) ORDER BY id";
+        for (SqlAuthorizer a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                assertEquals(List.of("1", "3"), run(a, sql, claims), a + " / " + claims);
+            }
+        }
+    }
+
+    /**
+     * A real table whose name equals a generated filter-CTE name ({@code ___orders} beside
+     * {@code orders}) keeps its own rows: the generated name for {@code orders} must not take
+     * {@code ___orders}, or that table's filter-CTE body {@code SELECT * FROM ___orders} binds to the
+     * orders filter CTE and returns orders rows.
+     */
+    @Test
+    void aTableNamedLikeAGeneratedFilterCteKeepsItsOwnRows() throws Exception {
+        conn.createStatement().execute("CREATE TABLE ___orders (id INT, tenant_id VARCHAR, amount INT)");
+        conn.createStatement().execute("INSERT INTO ___orders VALUES (42,'abc',1)");
+        try {
+            JsonNode query = Transformations.parseToTree(conn,
+                    "SELECT 'o' AS t, id FROM orders UNION ALL SELECT 'u' AS t, id FROM ___orders ORDER BY t, id");
+            JsonNode filtered = Transformations.injectFilterCtes(query, Map.of(
+                    "memory.main.orders", SqlAuthorizer.compileFilterString("tenant_id = 'abc'"),
+                    "memory.main.___orders", SqlAuthorizer.compileFilterString("tenant_id = 'abc'")), DB, SCHEMA);
+            assertEquals(List.of("o:1", "o:3", "u:42"),
+                    allColumns(Transformations.parseToSql(conn, filtered)).stream()
+                            .map(r -> String.valueOf(r).replace(",", ":")).toList());
+        } finally {
+            conn.createStatement().execute("DROP TABLE ___orders");
+        }
+    }
+
+    /**
+     * {@code withUpdatedDatabaseSchema} skips a top-level FROM that names one of the query's CTEs.
+     * A QUALIFIED name is never that CTE, so it still gets the connection's catalog: otherwise a
+     * redirect target resolves {@code main.orders} against its own default catalog.
+     */
+    @Test
+    void aQualifiedTopLevelReadUnderASameNamedCteStillGetsTheCatalog() throws Exception {
+        JsonNode updated = SqlAuthorizer.withUpdatedDatabaseSchema(Transformations.parseToTree(conn,
+                "WITH orders AS (SELECT 0 AS id) SELECT id FROM main.orders"), DB, SCHEMA);
+        JsonNode from = Transformations.getFirstStatementNode(updated).get("from_table");
+        assertEquals(DB, from.get("catalog_name").asText());
+        // The bare name IS the CTE and stays unqualified.
+        JsonNode bare = Transformations.getFirstStatementNode(SqlAuthorizer.withUpdatedDatabaseSchema(
+                Transformations.parseToTree(conn, "WITH orders AS (SELECT 0 AS id) SELECT id FROM orders"),
+                DB, SCHEMA)).get("from_table");
+        assertEquals("", bare.get("catalog_name").asText());
+    }
+
+    /**
      * The qualified read under a same-named CTE is a direct table read, so RESTRICTED mode keeps its
      * pruning copy of the filter on the outer WHERE (RESTRICT_READ_ONLY places none).
      */
@@ -330,6 +389,43 @@ public class FilterAppliedToEveryReadTest {
                     assertTrue(!rows.contains("999"), a + " / " + sql + " read an ungranted table: " + rows);
                 }
             }
+        }
+    }
+
+    /**
+     * A table function's ARGUMENTS can hold a subquery (DuckDB evaluates it), so a read placed there
+     * is a read like any other: it must be authorized and filtered, or refused. The collector looked
+     * only at the first argument's constant path, so {@code secrets} below was never checked.
+     */
+    @Test
+    void aSubqueryInATableFunctionArgumentIsAuthorized() throws Exception {
+        String[] queries = {
+                "SELECT count(*) AS n FROM orders, range(0, (SELECT max(amount) FROM secrets)) r",
+                "SELECT r.* FROM orders, unnest((SELECT list(amount) FROM secrets)) r",
+                "SELECT r.* FROM orders, unnest((SELECT list(tenant_id) FROM orders)) r",
+                "SELECT count(*) AS n FROM orders, range((SELECT count(*) FROM orders o2 WHERE o2.tenant_id = 'xyz') * 600) r",
+        };
+        for (var a : restrictedAuthorizers()) {
+            for (var claims : grants()) {
+                for (String sql : queries) {
+                    assertNoLeak(a, sql, claims);
+                }
+            }
+        }
+    }
+
+    /**
+     * Under a FUNCTION grant {@code range} itself is allowed, so only the argument's read can be
+     * refused. Unchecked, {@code count(*)} here is secrets' {@code max(amount)}: 999.
+     */
+    @Test
+    void aSubqueryInAGrantedFunctionsArgumentIsAuthorized() throws Exception {
+        var rangeGrants = List.of(
+                Map.of(Headers.HEADER_ACCESS, "[[\"function\",\"range\",\"*\",\"true\"]]"),
+                Map.of(Headers.HEADER_FUNCTION, "range", Headers.HEADER_PATH, "unused/"));
+        for (var claims : rangeGrants) {
+            assertNoLeak(authorizer, "SELECT count(*) AS n FROM range(0, (SELECT max(amount) FROM secrets)) r", claims);
+            assertNoLeak(authorizer, "SELECT count(*) AS n FROM range((SELECT max(amount) FROM secrets)) r", claims);
         }
     }
 

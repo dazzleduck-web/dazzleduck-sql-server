@@ -405,15 +405,17 @@ public interface SqlAuthorizer {
             && java.util.Objects.equals(authorized.catalog(), queried.catalog());
     }
 
-    /**
-     * Returns a copy of {@code tree} with the catalog and schema names set on the
-     * FROM table, but only when the FROM clause is a BASE_TABLE. For TABLE_FUNCTION queries the
-     * original tree is returned unchanged.
-     */
     /** Whether {@code fromTable} (a BASE_TABLE node) names a CTE declared by {@code statement}. */
     private static boolean namesATopLevelCte(JsonNode statement, ObjectNode fromTable) {
         JsonNode name = fromTable.get(ExpressionConstants.FIELD_TABLE_NAME);
         if (name == null || name.isNull()) return false;
+        // A schema- or catalog-qualified name is never a CTE reference (as isCteReference): leaving
+        // `main.orders` unqualified under a CTE named orders would let a redirect target resolve it
+        // against its own default catalog rather than the one authorized.
+        for (String part : new String[]{ExpressionConstants.FIELD_SCHEMA_NAME, ExpressionConstants.FIELD_CATALOG_NAME}) {
+            JsonNode qualifier = fromTable.get(part);
+            if (qualifier != null && !qualifier.isNull() && !qualifier.asText().isEmpty()) return false;
+        }
         JsonNode cteMap = statement.get(ExpressionConstants.FIELD_CTE_MAP);
         JsonNode map = cteMap == null ? null : cteMap.get(ExpressionConstants.FIELD_MAP);
         if (map == null || !map.isArray()) return false;
@@ -426,6 +428,11 @@ public interface SqlAuthorizer {
         return false;
     }
 
+    /**
+     * Returns a copy of {@code tree} with the catalog and schema names set on the
+     * FROM table, but only when the FROM clause is a BASE_TABLE. For TABLE_FUNCTION queries the
+     * original tree is returned unchanged.
+     */
     static JsonNode withUpdatedDatabaseSchema(JsonNode tree, String database, String schema) {
         var copy = tree.deepCopy();
         Function<JsonNode, JsonNode> identity = t -> t;
