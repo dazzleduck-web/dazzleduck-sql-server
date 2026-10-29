@@ -3226,14 +3226,35 @@ public class Transformations {
         // every reference to this table in the query reads this one CTE -- a SELECT * of every
         // row the grant allows, which then has to fit in memory before the query's own column
         // and row filters reach it. Inlined, each reference is a plain filtered scan that gets
-        // projection, filter and partition pushdown. The body is a deterministic filter over a
-        // single table, so inlining cannot change the rows any reference sees.
-        cteValue.put("materialized", "CTE_MATERIALIZE_NEVER");
+        // projection, filter and partition pushdown. Inlining evaluates the filter once per
+        // reference, which returns the same rows to each as long as the filter is deterministic:
+        // a grant filter that samples (random() < 0.1) would give a self-join two different row
+        // sets, so a volatile filter keeps DuckDB's default.
+        cteValue.put("materialized", isVolatile(filter) ? "CTE_MATERIALIZE_DEFAULT" : "CTE_MATERIALIZE_NEVER");
         cteValue.putArray("key_targets");
 
         ObjectNode entry = f.objectNode();
         entry.put("key", cteKey);
         entry.set("value", cteValue);
         return entry;
+    }
+
+    /** DuckDB's volatile scalar functions: a new value per call, so per row and per evaluation. */
+    private static final Set<String> VOLATILE_FUNCTIONS = Set.of(
+            "random", "gen_random_uuid", "uuid", "uuidv4", "uuidv7", "nextval", "setseed");
+
+    /** Whether {@code expr} calls a volatile function anywhere. */
+    static boolean isVolatile(JsonNode expr) {
+        if (expr == null || expr.isNull()) return false;
+        if (expr.isObject() && FUNCTION_CLASS.equals(asText(expr, FIELD_CLASS))) {
+            String name = asText(expr, FIELD_FUNCTION_NAME);
+            if (name != null && VOLATILE_FUNCTIONS.contains(name.toLowerCase(java.util.Locale.ROOT))) {
+                return true;
+            }
+        }
+        for (JsonNode child : expr) {
+            if (isVolatile(child)) return true;
+        }
+        return false;
     }
 }

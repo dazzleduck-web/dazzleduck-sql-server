@@ -205,6 +205,23 @@ public class TransformationsInjectFilterTest {
         }
     }
 
+    @Test
+    void volatileFilter_keepsTheDefaultSoEveryReferenceSeesOneRowSet() throws SQLException, JsonProcessingException {
+        // Inlined, a sampling filter would be drawn once per reference: a self-join of the grant
+        // would pair two different samples. A volatile filter keeps DuckDB's default.
+        String sql = "SELECT count(*) FROM orders a JOIN orders b USING (id)";
+        JsonNode tree = Transformations.parseToTree(conn, sql);
+        JsonNode sampled = Transformations.injectFilterCtes(tree, filter("tenant_id = 'abc' AND random() < 2"));
+        assertEquals("CTE_MATERIALIZE_DEFAULT", sampled.get("statements").get(0).get("node")
+                .get("cte_map").get("map").get(0).get("value").get("materialized").asText());
+        // A deterministic filter is still inlined.
+        JsonNode fixed = Transformations.injectFilterCtes(tree, filter("tenant_id = 'abc' AND amount < 2000"));
+        assertEquals("CTE_MATERIALIZE_NEVER", fixed.get("statements").get(0).get("node")
+                .get("cte_map").get("map").get(0).get("value").get("materialized").asText());
+        assertTrue(Transformations.isVolatile(filter("tenant_id = gen_random_uuid()::VARCHAR")));
+        assertFalse(Transformations.isVolatile(filter("tenant_id = 'abc' AND now() > TIMESTAMPTZ '2020-01-01'")));
+    }
+
     // --- WHERE subquery (IN, EXISTS, scalar) — security gap fixed ---
 
     @Test
