@@ -648,13 +648,18 @@ public class Transformations {
      * Comprehensive table reference collector for security-critical access control.
      *
      * <p>Unlike {@link #getAllTablesOrPathsFromSelect}, this method walks the <em>entire</em>
-     * query AST — FROM clauses, JOIN conditions, CTE bodies, UNION/INTERSECT/EXCEPT branches,
-     * and expression-level subqueries (IN, EXISTS, scalar) in WHERE, HAVING, SELECT list,
-     * QUALIFY, GROUP BY, and ORDER BY — so that no table reference can be hidden from
-     * access control checks.
+     * query AST -- FROM clauses, CTE bodies (with DuckDB's CTE scoping), set-operation branches,
+     * and EVERY other field of each SELECT, FROM node and expression (not an allow-list), so a
+     * subquery anywhere -- WHERE, select list, a window frame, a join condition, a table
+     * function's arguments -- is seen. A query or FROM node met anywhere else fails closed.
      *
-     * <p>Do NOT use this method for partition pruning or split planning; those callers
-     * intentionally see only FROM-clause tables.
+     * <p>Every table function is reported: with its constant path(s), or, when its path argument
+     * is not entirely constant, with {@link #NON_CONSTANT_PATH}, which no path grant matches.
+     * The row generators in {@code DATA_FREE_TABLE_FUNCTIONS} are the exception: they read no data
+     * and are reported only with a constant first argument.
+     *
+     * <p>The split planners also use it, because only it reports the real table inside a filter
+     * CTE's body; they require exactly one entry and reject {@link #NON_CONSTANT_PATH}.
      */
     public static List<CatalogSchemaTable> collectAllTableReferences(JsonNode statement,
                                                                       String catalogName,
@@ -801,14 +806,14 @@ public class Transformations {
                 var function = fromNode.get(FIELD_FUNCTION);
                 var functionName = function.get(FIELD_FUNCTION_NAME).asText();
                 var functionChildren = function.get(FIELD_CHILDREN);
-                int before = collector.size();
-                if (functionChildren != null && functionChildren.isArray() && !functionChildren.isEmpty()) {
-                    extractPathsFromTableFunctionChild(functionChildren.get(0), functionName, collector);
-                }
-                if (collector.size() == before) {
-                    // No constant path to check (range(...), unnest(...), read_parquet((SELECT ..))):
-                    // still a table function, so the grant decides -- a table grant refuses it, a
-                    // function grant matches by name, and no path grant can match this path.
+                boolean allConstant = functionChildren != null && functionChildren.isArray()
+                        && !functionChildren.isEmpty()
+                        && extractPathsFromTableFunctionChild(functionChildren.get(0), functionName, collector);
+                if (!allConstant && !isDataFreeTableFunction(functionName)) {
+                    // A path that is not (entirely) a constant -- read_parquet((SELECT ..)),
+                    // read_parquet(['/allowed/a', '/secret/' || 'b']), getvariable(..) -- cannot be
+                    // checked, so it is reported as a path no path grant matches: a table grant
+                    // refuses it, a function grant decides by name, a path grant refuses it.
                     collector.add(new CatalogSchemaTable(null, null, NON_CONSTANT_PATH,
                             TableType.TABLE_FUNCTION, functionName));
                 }
@@ -838,24 +843,66 @@ public class Transformations {
         // function's arguments (range(0, (SELECT ..)), unnest((SELECT ..)), named parameters), a
         // join condition, an AT (VERSION => ..) clause, pivot aggregates or a VALUES row, and a
         // missed one is a read the access check never sees.
-        collectAllTableRefsFromNonRelationFields(fromNode, catalogName, schemaName, collector, cteNames);
+        forEachFieldExcept(fromNode, FROM_RELATION_FIELDS,
+                v -> collectAllTableRefsFromExpression(v, catalogName, schemaName, collector, cteNames));
     }
 
-    /** A table function's path when its first argument is not a constant: matches no path grant. */
-    static final String NON_CONSTANT_PATH = "\u0000non-constant table function argument";
+    /**
+     * A table function's path when its path argument is not entirely constant. It matches no path
+     * grant (no grant names this prefix), and reads plainly in an error message.
+     */
+    public static final String NON_CONSTANT_PATH = "<non-constant table function argument>";
+
+    /**
+     * Table functions that generate rows and read no data. They are not data sources, so a
+     * computed argument (unnest(t.tags), range(n)) does not make them one; their arguments are
+     * still walked for subqueries like any other field. With a constant first argument they are
+     * reported as before.
+     */
+    private static final Set<String> DATA_FREE_TABLE_FUNCTIONS = Set.of("unnest", "range", "generate_series");
+
+    static boolean isDataFreeTableFunction(String functionName) {
+        return functionName != null && DATA_FREE_TABLE_FUNCTIONS.contains(foldIdentifier(functionName));
+    }
+
+    /** The fields of a SELECT that hold its relation and WITH, walked by the caller. */
+    private static final Set<String> SELECT_RELATION_FIELDS = Set.of(FIELD_FROM_TABLE, FIELD_CTE_MAP);
 
     /** The fields of a FROM node that hold another FROM node or statement, walked by the caller. */
     private static final Set<String> FROM_RELATION_FIELDS = Set.of(FIELD_LEFT, FIELD_RIGHT, FIELD_SUBQUERY, FIELD_SOURCE);
 
-    private static void collectAllTableRefsFromNonRelationFields(JsonNode fromNode, String catalogName,
-                                                                 String schemaName,
-                                                                 List<CatalogSchemaTable> collector,
-                                                                 Set<String> cteNames) {
-        var fields = fromNode.fields();
+    /** Query and FROM node types: only the statement/FROM dispatchers may walk into one. */
+    private static final Set<String> RELATION_NODE_TYPES = Set.of(
+            NODE_TYPE_SELECT_NODE, NODE_TYPE_SET_OPERATION_NODE, NODE_TYPE_RECURSIVE_CTE_NODE, "CTE_NODE",
+            NODE_TYPE_BASE_TABLE, NODE_TYPE_TABLE_FUNCTION, NODE_TYPE_JOIN, NODE_TYPE_SUBQUERY,
+            NODE_TYPE_PIVOT, NODE_TYPE_EXPRESSION_LIST);
+
+    /**
+     * Fails closed when the generic expression walk meets a query or FROM node. Those are reached
+     * only through a subquery expression (which hands them to the dispatcher) or the relation fields
+     * the dispatchers walk themselves; one anywhere else -- a form DuckDB adds later -- would be
+     * descended into as if it were an expression, and its tables neither authorized nor filtered.
+     * Expressions carry a {@code class}; query and FROM nodes do not.
+     */
+    private static void requireNotARelation(JsonNode node, String who) {
+        if (node.has(FIELD_CLASS)) return;
+        JsonNode type = node.get(FIELD_TYPE);
+        if (type != null && type.isTextual() && RELATION_NODE_TYPES.contains(type.asText())) {
+            throw new IllegalStateException(who + ": a " + type.asText() + " node outside a subquery"
+                    + " expression; refusing to run rather than miss the tables it reads");
+        }
+    }
+
+    /**
+     * Visits every field of {@code node} but those in {@code skip}. The collector and the injector
+     * both walk SELECT and FROM nodes with this and the same skip sets: a field walked by one and
+     * skipped by the other would be a read that is authorized but not filtered, or the reverse.
+     */
+    private static void forEachFieldExcept(JsonNode node, Set<String> skip, java.util.function.Consumer<JsonNode> visit) {
+        var fields = node.fields();
         while (fields.hasNext()) {
             var field = fields.next();
-            if (FROM_RELATION_FIELDS.contains(field.getKey())) continue;
-            collectAllTableRefsFromExpression(field.getValue(), catalogName, schemaName, collector, cteNames);
+            if (!skip.contains(field.getKey())) visit.accept(field.getValue());
         }
     }
 
@@ -869,12 +916,8 @@ public class Transformations {
                                                                   String schemaName,
                                                                   List<CatalogSchemaTable> collector,
                                                                   Set<String> cteNames) {
-        var fields = selectNode.fields();
-        while (fields.hasNext()) {
-            var field = fields.next();
-            if (FIELD_FROM_TABLE.equals(field.getKey()) || FIELD_CTE_MAP.equals(field.getKey())) continue;
-            collectAllTableRefsFromExpression(field.getValue(), catalogName, schemaName, collector, cteNames);
-        }
+        forEachFieldExcept(selectNode, SELECT_RELATION_FIELDS,
+                v -> collectAllTableRefsFromExpression(v, catalogName, schemaName, collector, cteNames));
     }
 
     private static void collectAllTableRefsFromExpression(JsonNode expr, String catalogName,
@@ -889,6 +932,7 @@ public class Transformations {
             return;
         }
         if (!expr.isObject()) return;
+        requireNotARelation(expr, "collectAllTableReferences");
         JsonNode classNode = expr.get(FIELD_CLASS);
         boolean subquery = classNode != null && SUBQUERY_CLASS.equals(classNode.asText());
         if (subquery) {
@@ -2357,8 +2401,13 @@ public class Transformations {
     /**
      * Extracts paths from a table function child node.
      * Handles both direct constant values and nested list_value functions.
+     *
+     * @return whether EVERY path the argument names was a constant (and so is now in
+     *         {@code collector}); false as soon as one element is computed -- {@code '/a/' || 'b'},
+     *         a cast, getvariable(..), a subquery -- since that element was not collected and its
+     *         path is unknown until DuckDB runs it
      */
-    private static void extractPathsFromTableFunctionChild(JsonNode child, String functionName, List<CatalogSchemaTable> collector) {
+    private static boolean extractPathsFromTableFunctionChild(JsonNode child, String functionName, List<CatalogSchemaTable> collector) {
         JsonNode classNode = child.get(FIELD_CLASS);
         if (classNode != null && FUNCTION_CLASS.equals(classNode.asText())) {
             // Child is a function (e.g., list_value)
@@ -2366,21 +2415,28 @@ public class Transformations {
             if (functionNameNode != null && "list_value".equals(functionNameNode.asText())) {
                 // Extract all paths from list_value children
                 JsonNode listChildren = child.get(FIELD_CHILDREN);
+                boolean allConstant = true;
                 if (listChildren != null && listChildren.isArray()) {
                     for (JsonNode listChild : listChildren) {
                         String path = extractConstantValue(listChild);
                         if (path != null) {
                             collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
+                        } else {
+                            allConstant = false;
                         }
                     }
                 }
+                return allConstant;
             }
+            return false;
         } else {
             // Direct constant value
             String path = extractConstantValue(child);
             if (path != null) {
                 collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
+                return true;
             }
+            return false;
         }
     }
 
@@ -3053,10 +3109,12 @@ public class Transformations {
      * to them are treated as CTE references, not base tables) and injects the filter into each CTE
      * body. Returns {@code visibleCteNames} augmented with the names declared here.
      *
-     * <p>Each CTE body is walked with its OWN name removed from the visible set: a non-recursive CTE
-     * cannot reference itself, so a same-named reference inside the body is the real base table and
-     * MUST be filtered. A recursive CTE body ({@code RECURSIVE_CTE_NODE}) re-adds its own name for the
-     * self-reference in {@link #renameBaseTablesInStatementNode}.
+     * <p>Each CTE body sees the enclosing scope plus the CTEs declared BEFORE it in this WITH; its
+     * own name is added only after its body. So a same-named reference inside a top-level body is
+     * the real base table and MUST be filtered, while one inside a nested body still binds a
+     * same-named OUTER CTE, as DuckDB does. A recursive CTE ({@code RECURSIVE_CTE_NODE}) adds its
+     * own name for its recursive arm only, in {@link #renameBaseTablesInStatementNode}: its anchor
+     * arm reads the base table.
      */
     private static Set<String> walkNestedCtes(ObjectNode node, Set<String> visibleCteNames,
                                               CteInjection injection) {
@@ -3145,12 +3203,8 @@ public class Transformations {
         // Every field but FROM and WITH (walked by the caller), not an allow-list: a subquery in a
         // `* REPLACE`, a window's default or frame, an aggregate's ORDER BY or a DISTINCT ON target
         // reads the table as surely as one in the WHERE.
-        List<String> names = new ArrayList<>();
-        selectNode.fieldNames().forEachRemaining(names::add);
-        for (String name : names) {
-            if (FIELD_FROM_TABLE.equals(name) || FIELD_CTE_MAP.equals(name)) continue;
-            walkExpressionsForSubqueries(selectNode.get(name), userCteNames, injection);
-        }
+        forEachFieldExcept(selectNode, SELECT_RELATION_FIELDS,
+                v -> walkExpressionsForSubqueries(v, userCteNames, injection));
     }
 
     /**
@@ -3169,6 +3223,7 @@ public class Transformations {
         }
 
         if (!expr.isObject()) return;
+        requireNotARelation(expr, "injectFilterCtes");
 
         JsonNode classNode = expr.get(FIELD_CLASS);
         boolean subquery = classNode != null && SUBQUERY_CLASS.equals(classNode.asText());
@@ -3232,21 +3287,27 @@ public class Transformations {
                 // VALUES list / FROM-less SELECT: no relation of its own; VALUES expressions are
                 // walked below with every other field.
             }
-            // TABLE_FUNCTION stays refused: a filter CTE cannot wrap a function's output, and the
-            // collector now reports every table function, so a grant that reaches here never
-            // allowed one.
+            case NODE_TYPE_TABLE_FUNCTION -> {
+                // Only a row generator that reads no data (unnest(t.tags), range(n)) may pass: its
+                // arguments are walked below, so a subquery in them is filtered. Any other table
+                // function reads data a filter CTE cannot wrap, so it stays refused.
+                JsonNode function = fromNode.get(FIELD_FUNCTION);
+                String functionName = function == null ? null : asText(function, FIELD_FUNCTION_NAME);
+                if (!isDataFreeTableFunction(functionName)) {
+                    throw new IllegalStateException("injectFilterCtes: table function '" + functionName
+                            + "' reads data a filter CTE cannot wrap; refusing to run to avoid producing"
+                            + " an unfiltered (RLS-bypassing) query");
+                }
+            }
             default -> throw new IllegalStateException(
                     "injectFilterCtes: unsupported FROM node type '" + type + "'; refusing to run to "
                             + "avoid producing an unfiltered (RLS-bypassing) query");
         }
-        // Every other field (join condition, AT clause, pivot aggregates, VALUES rows, ...), as the
-        // collector walks them: a subquery in any of them is a read that must be filtered.
-        var fields = fromNode.fields();
-        while (fields.hasNext()) {
-            var field = fields.next();
-            if (FROM_RELATION_FIELDS.contains(field.getKey())) continue;
-            walkExpressionsForSubqueries(field.getValue(), userCteNames, injection);
-        }
+        // Every other field (join condition, table-function arguments, AT clause, pivot
+        // aggregates, VALUES rows, ...), as the collector walks them: a subquery in any of them is
+        // a read that must be filtered.
+        forEachFieldExcept(fromNode, FROM_RELATION_FIELDS,
+                v -> walkExpressionsForSubqueries(v, userCteNames, injection));
     }
 
     /**

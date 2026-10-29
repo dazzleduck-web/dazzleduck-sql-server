@@ -429,6 +429,51 @@ public class FilterAppliedToEveryReadTest {
         }
     }
 
+    /**
+     * A path grant checks every path a table function names. A list that mixes an allowed constant
+     * with a COMPUTED element used to be checked on the constant alone, and DuckDB then read the
+     * computed one: any path, past the grant. Such a read is refused.
+     */
+    @Test
+    void aPathGrantRefusesAComputedPathInAList() throws Exception {
+        // The legacy unfiltered path claim returns the query as is once the paths pass, so it is
+        // the shape that leaked: it allowed the list below and DuckDB read /etc/passwd.
+        var claims = Map.of(Headers.HEADER_PATH, "example/data/hive_table");
+        for (String sql : new String[]{
+                "SELECT count(*) FROM read_parquet(['example/data/hive_table/a.parquet', '/etc/' || 'passwd'])",
+                "SELECT count(*) FROM read_parquet(['example/data/hive_table/a.parquet', getvariable('p')])",
+                "SELECT count(*) FROM read_parquet('/etc/' || 'passwd')"}) {
+            assertThrows(UnauthorizedException.class, () ->
+                    authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn, sql), claims), sql);
+        }
+        // An all-constant list of granted paths is still allowed.
+        authorizer.authorize("user", DB, SCHEMA, Transformations.parseToTree(conn,
+                "SELECT count(*) FROM read_parquet(['example/data/hive_table/a.parquet', 'example/data/hive_table/b.parquet'])"),
+                claims);
+    }
+
+    /**
+     * A row generator that reads no data -- a lateral unnest of a column -- is not a datasource:
+     * a table grant still allows it, filtered or not, and its rows come only from the granted ones.
+     */
+    @Test
+    void aLateralUnnestOfTheGrantedTableStillWorks() throws Exception {
+        String sql = "SELECT u.x FROM orders o, unnest([o.id * 10, o.id * 10 + 1]) u(x) ORDER BY u.x";
+        // Unfiltered table grant: every row.
+        assertEquals(List.of("10", "11", "20", "21", "30", "31"),
+                run(sql, Map.of(Headers.HEADER_TABLE, "orders")));
+        // Filtered: tenant abc's rows only, in both claim shapes.
+        for (var claims : grants()) {
+            assertEquals(List.of("10", "11", "30", "31"), run(sql, claims), claims.toString());
+        }
+        // And a subquery inside the generator's argument is filtered too.
+        for (var claims : grants()) {
+            assertEquals(List.of("1", "3"),
+                    run("SELECT u.x FROM unnest((SELECT list(id ORDER BY id) FROM orders)) u(x) ORDER BY u.x", claims),
+                    claims.toString());
+        }
+    }
+
     /** Asserts {@code sql} returns no tenant-xyz order and no row of the ungranted {@code secrets}, or is refused. */
     private static void assertNoLeak(SqlAuthorizer a, String sql, Map<String, String> claims) throws Exception {
         List<Object> rows;

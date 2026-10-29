@@ -42,6 +42,11 @@ public interface SplitPlanner {
             throw new SQLException("unsupported number of tables or path in the query");
         }
         var first = catalogSchemaAndTables.get(0);
+        if (Transformations.NON_CONSTANT_PATH.equals(first.tableOrPath())) {
+            // read_parquet(getvariable('p')) and the like: the files are unknown until DuckDB
+            // evaluates the argument, so there is nothing to prune or split.
+            throw new SQLException("cannot plan splits for a table function whose path is not a constant");
+        }
         var tableFunction =  first.functionName();
         PartitionPrunerV2 splitPlanner;
         if (tableFunction == null) {

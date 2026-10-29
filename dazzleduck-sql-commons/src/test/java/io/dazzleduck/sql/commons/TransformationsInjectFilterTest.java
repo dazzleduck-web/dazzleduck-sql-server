@@ -533,13 +533,17 @@ public class TransformationsInjectFilterTest {
 
     @Test
     void unsupportedFromNode_failsClosed() throws SQLException, JsonProcessingException {
-        // A FROM node type the traversal does not recognize (here a table function) must ABORT rather
-        // than silently pass base tables through unfiltered. RESTRICT_READ_ONLY blocks table functions
-        // upstream; this guards the injector's own fail-closed contract regardless of caller.
-        String sql = "SELECT * FROM generate_series(1, 3)";
+        // A FROM node the injector cannot wrap in a filter CTE (here a table function that reads
+        // data) must ABORT rather than silently pass its rows through unfiltered. RESTRICT_READ_ONLY
+        // blocks table functions upstream; this guards the injector's own fail-closed contract
+        // regardless of caller.
+        String sql = "SELECT * FROM read_parquet('example/data/file1.parquet')";
         JsonNode tree = Transformations.parseToTree(conn, sql);
         assertThrows(IllegalStateException.class,
                 () -> Transformations.injectFilterCtes(tree, filter("tenant_id = 'abc'")),
                 "an unhandled FROM node type must fail closed, not produce an unfiltered query");
+        // A row generator reads no data, so it passes: there is nothing of its own to filter.
+        Transformations.injectFilterCtes(Transformations.parseToTree(conn, "SELECT * FROM generate_series(1, 3)"),
+                filter("tenant_id = 'abc'"));
     }
 }
