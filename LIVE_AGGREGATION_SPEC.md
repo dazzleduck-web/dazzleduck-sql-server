@@ -112,7 +112,9 @@ CREATE OR REPLACE MACRO lake.tail_state(agg_table_id := 21, wm_column_id := 7) A
         SELECT c.table_id, c.column_id
         FROM __ducklake_metadata_lake.ducklake_column c
         JOIN __ducklake_metadata_lake.ducklake_table t ON t.table_id = c.table_id AND t.end_snapshot IS NULL
-        WHERE t.table_name = 'agg' AND c.column_name = 'row_id_watermark' AND c.end_snapshot IS NULL
+        JOIN __ducklake_metadata_lake.ducklake_schema sc ON sc.schema_id = t.schema_id AND sc.end_snapshot IS NULL
+        WHERE sc.schema_name = 'main' AND t.table_name = 'agg'
+          AND c.column_name = 'row_id_watermark' AND c.end_snapshot IS NULL
     ),
     agg_files AS (  -- agg files visible at this query's snapshot, with their row_id_watermark max
         SELECT f.data_file_id, TRY_CAST(s.max_value AS BIGINT) AS wm
@@ -152,6 +154,10 @@ Notes:
 
 - `__ducklake_metadata_lake` is the metadata catalog DuckLake attaches for a
   lake attached as `lake`; it follows the attach name.
+- The name lookup matches schema and table name. Table names are unique only
+  within a schema, so with a name-only match two live aggregations in
+  different schemas, each with an `agg` table, would return two rows and break
+  the scalar subqueries in the guard.
 - The two id defaults are the catalog ids of `agg` and its `row_id_watermark`
   column. They change when `agg` is recreated; the guard then fails every query
   until the macro is re-created with the new ids:
@@ -160,8 +166,9 @@ Notes:
 SELECT c.table_id, c.column_id
 FROM __ducklake_metadata_lake.ducklake_column c
 JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id)
-WHERE t.table_name = 'agg' AND c.column_name = 'row_id_watermark'
-  AND c.end_snapshot IS NULL AND t.end_snapshot IS NULL;
+JOIN __ducklake_metadata_lake.ducklake_schema sc USING (schema_id)
+WHERE sc.schema_name = 'main' AND t.table_name = 'agg' AND c.column_name = 'row_id_watermark'
+  AND c.end_snapshot IS NULL AND t.end_snapshot IS NULL AND sc.end_snapshot IS NULL;
 ```
 
 ---
@@ -348,7 +355,8 @@ Prototype scripts that drove the measurements above are the basis:
    compare `events_v` with a full `GROUP BY` over `tail` (both directions of
    `EXCEPT ALL`) and assert no duplicate group keys.
 2. Roll-up running while ingestion commits: both succeed, result exact.
-3. Guard: stale table id and stale column id each raise the macro's error.
+3. Guard: stale table id and stale column id each raise the macro's error, and
+   an `agg` table of the same name in another schema does not affect it.
 4. Pruning: profile `events_v` with a `day` filter and assert the file counts
    per scan.
 
@@ -366,3 +374,9 @@ Prototype scripts that drove the measurements above are the basis:
    `rowid <= w`) without breaking pruning or the cut-over.
 5. **Job failure.** A failed run leaves `agg` unchanged and the view still
    exact; only the fresh set grows. Is an alert on fresh-set size enough?
+6. **Late rows widen the merge.** One late row for an old day moves `min_day`
+   back, so every query re-aggregates all of `agg` from that day onward until
+   the next roll-up. It is bounded by `rollup_interval`, but an alternative is
+   to merge only the days that actually have fresh rows, at the cost of the
+   range-based file pruning. To be explored together with making the design
+   generic over several intervals (hourly, daily, weekly and so on).
