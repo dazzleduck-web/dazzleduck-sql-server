@@ -29,10 +29,16 @@ SELECT DISTINCT service, unnest(attr_keys) AS attr_key FROM __base
 | D | the base Parquet, read back from S3 | DuckDB `COPY`s |
 | E | the raw Arrow input, written locally | parallel upload afterwards |
 | F | the base Parquet, written locally | parallel upload afterwards |
-| G | the base Parquet, written locally | upload of each file as soon as it is written |
+| G | the base Parquet, written locally | upload of each file as soon as it is written, by the async S3 client and transfer manager (Netty) |
+| H | the base Parquet, written locally | as G, by the client the spec recommends: the synchronous S3 client on `url-connection-client`, on its own executor |
 
-Every run checks that all strategies wrote the same rows per output, and the first measured
-iteration reads each output back from S3 and counts it. Iterations rotate the strategy order.
+Every run checks that all strategies wrote the same number of rows per output. The first measured
+iteration also reads each output back from S3 and compares its column types and a hash of its rows,
+taken as a multiset, across strategies; floating-point columns are rounded to 6 decimals first, since
+a parallel `avg()` can differ in the last bits. Iterations rotate the strategy order.
+
+For E to H the table also splits the time into writing the base, deriving the sidecars and waiting for
+the uploads.
 
 `HttpCount` counts the HTTP requests DuckDB makes for one `COPY` to S3, from its HTTP log.
 

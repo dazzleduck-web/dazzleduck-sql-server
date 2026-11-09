@@ -56,39 +56,61 @@ ingestion_queue_table_mapping = [{
 - `__base` is the base table's rows for this batch as written: after the queue's transformation and
   its partition projections.
 - `transformation_view` names a view whose SQL is read on the same refresh tick as a view-based
-  queue transformation, so a sidecar can change without a restart.
+  queue transformation, so a sidecar can change without a restart, as long as its output still
+  matches its table (see *Reloading a view*).
 - The queue's ingestion variables apply, so a sidecar can read `getvariable('name')`.
 - A sidecar table lives in the queue's catalog and schema.
 
 **Tables are created and checked at startup.** For each sidecar, startup runs its transformation
-over an empty `__base` of the base table's columns. A missing table is created from that result's
-schema; an existing table whose columns differ fails startup, naming the table and the column. A
-batch therefore never meets a missing or mismatched table, and no DDL runs inside the ingestion
-transaction.
+over an empty `__base` built the way a batch builds it: the queue's transformation and its partition
+projections over an empty relation of the batch's input schema. A missing table is created from that
+result's schema; an existing table whose columns differ fails startup, naming the table and the
+column. No DDL runs inside the ingestion transaction.
+
+**Every sidecar file is written with its table's column types.** Each sidecar `COPY` selects its
+columns cast to the table's types, by name. `ducklake_add_data_files` does not cast, so without this a
+file could disagree with its table even when startup passed: the staged path's Parquet round trip
+turns an `ENUM` into `VARCHAR` and can change some interval and timestamp types, hive-read partition
+columns would be re-typed from directory names, and `mode = auto` can send the same sidecar down
+either path. With the cast, both paths write the table's types, and a value that cannot be cast fails
+the batch with a clear error instead of a registration failure.
+
+**Reloading a view.** When a refresh tick changes a sidecar view's SQL, the new SQL is checked the
+same way as at startup before it is used. If its output no longer matches the table, the reload is
+rejected: the queue keeps the previous SQL and logs the table and the column. Changing a sidecar's
+columns therefore takes a table change first (for example `ALTER TABLE ... ADD COLUMN`), then the
+view change.
 
 ## Deriving from the staged Parquet, not the raw input
 
-**Decided: from the staged base Parquet.** Measured on 1M rows, deriving three sidecars from the local
-base Parquet took 214 to 238 ms against 256 to 377 ms from the raw Arrow input, depending on the
-DuckDB version (strategies F and E below); at 100k rows the two were within noise. Parquet lets each
-sidecar read only its columns, and the base transformation runs once rather than once per sidecar.
+**Decided: from the staged base Parquet.** With the base write timed separately, deriving three
+sidecars from 1M rows took 64 ms from the local base Parquet against 146 ms from the raw Arrow input
+on DuckDB 1.5.6 (strategies F and E below). On DuckDB 2.0.0 the two were equal (69 and 68 ms), as they
+were at 100k rows on both versions. Parquet lets each sidecar read only its columns, and the base
+transformation runs once rather than once per sidecar; the main reason, though, is the property
+below.
 
-It also makes a sidecar a pure function of the registered base files. A sidecar can be re-derived
-later from the files in the table's data path, to backfill a new sidecar or repair one, and gets the
-answer the batch got.
+It also makes a sidecar a function of the registered base data. A sidecar can be re-derived later,
+to backfill a new sidecar or repair one, by reading the base **through the DuckLake table** (for
+example filtered to the files or snapshots in question), not the raw files in its data path. For a
+partitioned table the files do not hold the partition columns, DuckLake keeps their values in its
+catalog, and its paths need not follow a hive `key=value` layout; reading through the table returns
+them with the table's types.
 
-**Partitioned queues.** `PARTITION_BY` leaves the partition columns out of the files and in the
-directory names. The staged base is read with `hive_partitioning = true` so `__base` keeps every
-column the transformation produced.
+**Partitioned queues.** `PARTITION_BY` leaves the partition columns out of the staged files and in
+the directory names. The staged base is read with `hive_partitioning = true` and `hive_types` set to
+the base table's partition column types, so `__base` keeps every column the transformation produced,
+with the types it produced.
 
 **Reading the base back from S3 is ruled out.** It was the slowest strategy in every run, roughly
 twice the alternatives once latency is realistic.
 
 ## Staging locally, then uploading
 
-**Decided: stage locally and upload, overlapping the base's upload with sidecar derivation**
-(strategy G below). It was the fastest strategy for large batches on both DuckDB versions and within
-about 50 ms of the fastest for small ones.
+**Decided: stage locally and upload, overlapping the base's upload with sidecar derivation, with the
+recommended uploader** (strategy H below). It was the fastest strategy for 100k-row batches on both
+DuckDB versions. For 1M-row batches it was level with the direct path on DuckDB 2.0.0 and about 15
+percent faster on 1.5.6, and within about 130 ms of the fastest staged variant.
 
 Two properties come with it besides speed: nothing reaches object storage unless every output was
 derived, and a failed upload can be retried without recomputing anything.
@@ -97,8 +119,12 @@ derived, and a failed upload can be retried without recomputing anything.
 - A sidecar that fails to derive fails the batch. Files already uploaded for it are deleted on a
   best-effort basis; any left behind are unregistered, and DuckLake's orphan-file cleanup removes
   them, as it does for a batch's own data file today.
-- Staged files are deleted once the transaction commits or the batch fails. On startup the staging
-  directory is cleared, since nothing in it belongs to a live batch.
+- Staged files are deleted once the transaction commits or the batch fails.
+- **Each process stages in a subdirectory of its own**, named by a random instance id and holding a
+  lock file the process keeps locked while it runs. `staging_dir` is often shared: the server and
+  the otel-collector on one host, a shared mounted tmp, or an old and a new pod overlapping during a
+  rolling restart. On startup a process removes only subdirectories whose lock it can acquire, which
+  belong to processes that have exited; it never clears the directory as a whole.
 
 **Disk.** The staging directory holds each in-flight batch's base and sidecar files, so it needs room
 for the bucket size times the number of concurrent writes, plus the sidecars. It sits next to the
@@ -162,7 +188,14 @@ So both read **one identity from the environment** instead of sharing a secret:
 On Kubernetes that is the pod's IAM role, with no keys anywhere. Static keys, as for MinIO, go in the
 environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), where both chains read them.
 
+There is no credentials setting in the uploader's configuration: a key configured only there would let
+the uploader and DuckDB run as different identities, so that a write succeeds through one and fails
+through the other.
+
 ### Uploader configuration
+
+The shipped `application.conf` has `mode` and `staging_dir` but **no `s3` block**. An operator adds
+one to enable the uploader:
 
 ```hocon
 ingestion.upload {
@@ -170,13 +203,11 @@ ingestion.upload {
     staging_dir = ${java.io.tmpdir}"/dazzleduck-staging"
     max_concurrent_uploads = 16
 
+    # Absent by default; adding it enables the S3 uploader. Credentials come from the AWS chain.
     s3 {
         region = "us-east-1"
         endpoint = ""            # set for MinIO, R2 and other S3-compatible stores
         path_style = false
-        credentials = default    # default (AWS chain) | static
-        access_key_id = ${?DD_S3_ACCESS_KEY_ID}           # static only
-        secret_access_key = ${?DD_S3_SECRET_ACCESS_KEY}   # static only
         multipart_threshold = 16MiB
         part_size = 8MiB
     }
@@ -203,8 +234,9 @@ the base is already in object storage and reading it back was the slowest strate
 return the same rows as long as the transformation is deterministic. What is lost is only that the
 sidecar files are not computed from the registered files themselves.
 
-This is strategy B below: the fastest for small batches on DuckDB 1.5.6, and about 10 to 30 percent
-slower than staging for large ones. It needs nothing beyond the DuckDB secret already configured, and
+This is strategy B below. Against staging with the recommended uploader (H) it was level for small
+batches on DuckDB 1.5.6 and for large ones on 2.0.0, about 15 percent slower for large batches on
+1.5.6, and about twice as slow for small batches on 2.0.0. It needs nothing beyond the DuckDB secret already configured, and
 a queue that declares no sidecars behaves exactly as it does today.
 
 **A local destination** (a filesystem path) never needs an uploader. The base is written in place and
@@ -223,21 +255,29 @@ round trip. Median total in ms; DuckDB 1.5.6 and 2.0.0 measured back to back.
 
 | Strategy | 100k rows, 1.5.6 | 100k rows, 2.0.0 | 1M rows, 1.5.6 | 1M rows, 2.0.0 |
 |---|---|---|---|---|
-| A: raw input, `COPY` to S3 per output, in turn | 458 | 953 | 1,541 | 1,509 |
-| B: raw input, `COPY` to S3 per output, in parallel | **253** | 432 | 1,186 | 916 |
-| C: transformed base in a temp table, `COPY`s to S3 | 492 | 995 | 1,529 | 1,576 |
-| D: base to S3, sidecars read it back from S3 | 961 | 1,213 | 2,236 | 2,142 |
-| E: raw input to local Parquet, then parallel upload | 334 | 320 | 1,093 | 894 |
-| F: base to local Parquet, sidecars from it, then upload | 341 | 343 | 915 | 841 |
-| G: as F, base upload overlapped with sidecars | 307 | **318** | **895** | **809** |
+| A: raw input, `COPY` to S3 per output, in turn | 514 | 903 | 1,959 | 1,479 |
+| B: raw input, `COPY` to S3 per output, in parallel | 285 | 449 | 1,346 | 926 |
+| C: transformed base in a temp table, `COPY`s to S3 | 550 | 960 | 1,685 | 1,630 |
+| D: base to S3, sidecars read it back from S3 | 1,028 | 1,207 | 2,709 | 2,095 |
+| E: raw input to local Parquet, then parallel upload | 395 | 311 | 1,124 | 977 |
+| F: base to local Parquet, sidecars from it, then upload | 392 | 321 | **1,021** | 942 |
+| G: as F, base upload overlapped with sidecars (async client, transfer manager) | 370 | 307 | 1,062 | 999 |
+| H: as G, with the recommended uploader (`url-connection-client`, own executor) | **271** | **221** | 1,149 | **925** |
 
-Every strategy wrote the same rows per output, and each output was read back from S3 and counted.
+Every strategy wrote the same number of rows per output on every run. On the first measured run each
+output was read back from S3, and its column types and a hash of its rows (floating-point columns
+rounded to 6 decimals) were identical across all strategies.
 
-**DuckDB 2.0 cut the direct path's large-batch time** (B: 1,186 to 916 ms), likely from its
-asynchronous Parquet writes, **and doubled its small-batch time** (B: 253 to 432 ms). Its HTTP log
+**The uploader matters more than the pipeline.** G and H differ only in the S3 client. The
+synchronous client on `url-connection-client`, with a single `PUT` below the multipart threshold and
+parts and files uploaded concurrently on its own executor, cut the upload wait at 100k rows from
+about 250 to about 150 ms. At 1M rows the two were within noise.
+
+**DuckDB 2.0 cut the direct path's large-batch time** (B: 1,346 to 926 ms), likely from its
+asynchronous Parquet writes, **and nearly doubled its small-batch time** (B: 285 to 449 ms). Its HTTP log
 shows two `HEAD` requests per file before writing that 1.5.6 does not make, and with real latency
 each one is a round trip. The staged strategies do not go through DuckDB's S3 writer and did not
-change. Choosing G does not depend on the version, but the direct fallback should be measured again
+change. Choosing H does not depend on the version, but the direct fallback should be measured again
 on each upgrade.
 
 **Caveats.** One machine, synthetic rows, three sidecars, no bandwidth limit, and MinIO rather than
@@ -264,7 +304,8 @@ S3. Treat the numbers as directional until they are repeated against a real buck
    extension that copies a local file through DuckDB's own file system, which would reuse DuckDB's
    secrets for every cloud and need no Java SDK, at the cost of DuckDB's S3 writer and its 2.0
    `HEAD` requests.
-4. **Small files.** Whether a single `PUT` below the multipart threshold closes the 100k-row gap
-   between G and B.
+4. **Upload tuning for large batches.** H is fastest for small batches but not for 1M rows, where F
+   was faster on 1.5.6. Whether part size, `max_concurrent_uploads` or a separate pool for parts
+   closes that gap.
 5. **Real S3.** The benchmark against a real bucket, before staging is recommended as the production
    setting.
