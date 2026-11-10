@@ -77,24 +77,17 @@ public class VariantTypeTest {
     }
 
     /**
-     * Characterization: DuckDB cannot yet export a native VARIANT column over Arrow.
-     * If this stops throwing, DuckDB has added Arrow VARIANT support — bump arrow to &ge; 19.0.0.
+     * Characterization: DuckDB 2.0 exports a native VARIANT column over Arrow (1.5 rejected it with
+     * "Unsupported Arrow type VARIANT"), and the Arrow reader loads it.
      */
     @Test
-    public void nativeVariantArrowExportIsUnsupported() throws Exception {
+    public void nativeVariantExportsOverArrow() throws Exception {
         try (DuckDBConnection conn = ConnectionPool.getConnection();
-             BufferAllocator allocator = new RootAllocator()) {
-            IOException ex = assertThrows(IOException.class, () -> {
-                try (ArrowReader reader = ConnectionPool.getReader(conn, allocator,
-                        "SELECT 42::VARIANT AS v", 100)) {
-                    reader.loadNextBatch();
-                }
-            });
-            // DuckDB's exact wording varies ("Unsupported Arrow type VARIANT" /
-            // "Unsupported type in DuckDB -> Arrow Conversion: VARIANT"); assert the essentials.
-            String msg = ex.getMessage();
-            assertTrue(msg.contains("VARIANT") && msg.contains("Unsupported"),
-                    "Expected DuckDB to reject Arrow export of VARIANT, but got: " + msg);
+             BufferAllocator allocator = new RootAllocator();
+             ArrowReader reader = ConnectionPool.getReader(conn, allocator, "SELECT 42::VARIANT AS v", 100)) {
+            assertTrue(reader.loadNextBatch(), "a VARIANT column must export over Arrow");
+            assertEquals(1, reader.getVectorSchemaRoot().getRowCount());
+            assertEquals("v", reader.getVectorSchemaRoot().getSchema().getFields().get(0).getName());
         }
     }
 }

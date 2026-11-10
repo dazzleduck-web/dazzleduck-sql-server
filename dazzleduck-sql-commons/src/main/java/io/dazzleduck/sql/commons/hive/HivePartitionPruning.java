@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
 
 public class HivePartitionPruning extends PartitionPruning {
 
-    private static final String READ_PARTITION_BLOB_SQL = "SELECT filename, size, epoch_ms(last_modified) as last_modified, list_transform(parse_path(substring(filename, len('%s') + 2))[1:%s], x -> split_part(x, '=', 2)) as partitions " +
+    private static final String READ_PARTITION_BLOB_SQL = "SELECT filename, size, epoch_ms(last_modified) as last_modified, list_transform(parse_path(substring(filename, len('%s') + 2))[1:%s], lambda x: split_part(x, '=', 2)) as partitions " +
             "FROM read_blob('%s')";
     private static final String PARTITION_SQL = "WITH A AS (SELECT * FROM %s)," +
             " B AS (SELECT filename, size, last_modified, %s FROM A )" +

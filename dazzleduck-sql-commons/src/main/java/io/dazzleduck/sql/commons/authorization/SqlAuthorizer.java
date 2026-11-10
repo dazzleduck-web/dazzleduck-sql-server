@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.dazzleduck.sql.commons.authorization.UnauthorizedException;
+import io.dazzleduck.sql.commons.AstNodes;
 import io.dazzleduck.sql.commons.ExpressionConstants;
 import io.dazzleduck.sql.commons.ExpressionFactory;
 import io.dazzleduck.sql.commons.Transformations;
@@ -286,8 +287,9 @@ public interface SqlAuthorizer {
     private static void requireArmsProjectTheFunctionUnchanged(JsonNode node) throws UnauthorizedException {
         String type = node.path(ExpressionConstants.FIELD_TYPE).asText("");
         if (ExpressionConstants.NODE_TYPE_SET_OPERATION_NODE.equals(type)) {
-            requireArmsProjectTheFunctionUnchanged(node.path(ExpressionConstants.FIELD_LEFT));
-            requireArmsProjectTheFunctionUnchanged(node.path(ExpressionConstants.FIELD_RIGHT));
+            for (JsonNode branch : AstNodes.setOperationBranches(node)) {
+                requireArmsProjectTheFunctionUnchanged(branch);
+            }
             return;
         }
         if (countTableFunctions(node) == 0) {
@@ -327,20 +329,21 @@ public interface SqlAuthorizer {
     }
 
     /**
-     * Whether {@code filter} is the constant TRUE, i.e. a grant with no row filter. DuckDB parses
-     * the literal {@code true} as {@code CAST('t' AS BOOLEAN)}, so that form counts too.
+     * Whether {@code filter} is the constant TRUE, i.e. a grant with no row filter. DuckDB 1.5 parses
+     * the literal {@code true} as {@code CAST('t' AS BOOLEAN)}, so that form counts too; DuckDB 2.0
+     * parses it as a {@code BOOLEAN} literal.
      */
     private static boolean isTrueConstant(JsonNode filter) {
         if (filter == null) return false;
         JsonNode node = filter;
         if ("CAST".equals(node.path(ExpressionConstants.FIELD_CLASS).asText(""))
-                && "BOOLEAN".equals(node.path("cast_type").path("id").asText(""))) {
+                && ("BOOLEAN".equals(node.path("cast_type").path("id").asText(""))
+                    || "BOOLEAN".equalsIgnoreCase(node.path("type_expr").path("type_name").asText("")))) {
             node = node.path(ExpressionConstants.FIELD_CHILD);
         }
         if (!"CONSTANT".equals(node.path(ExpressionConstants.FIELD_CLASS).asText(""))) return false;
-        JsonNode value = node.path("value").path("value");
-        return value.isBoolean() ? value.asBoolean()
-                : value.isTextual() && (value.asText().equalsIgnoreCase("t") || value.asText().equalsIgnoreCase("true"));
+        String value = AstNodes.constantText(node);
+        return value != null && (value.equalsIgnoreCase("t") || value.equalsIgnoreCase("true"));
     }
 
     static JsonNode addFilterToTableFunction(JsonNode query, JsonNode toAdd) {
@@ -582,6 +585,7 @@ public interface SqlAuthorizer {
             if (existingSchema == null || existingSchema.asText().isEmpty()) {
                 fromTable.put(ExpressionConstants.FIELD_SCHEMA_NAME, schema);
             }
+            AstNodes.forgetQualifiedName(fromTable);
             return copy;
         }
         return tree;

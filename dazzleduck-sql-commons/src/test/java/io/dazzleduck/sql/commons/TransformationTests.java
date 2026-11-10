@@ -78,7 +78,7 @@ public class TransformationTests {
         var indexFile = fileMapppingFunction.apply(file);
         Consumer<JsonNode> changeFunction =  n -> {
             var node = (ObjectNode)n;
-            var children = node.get("children");
+            var children = AstNodes.arguments(node);
             var columnRef = Transformations.getReferenceName(children.get(0));
             var tokens = new ArrayList<String>();
             for( int i = 1; i <  children.size(); i ++) {
@@ -136,10 +136,11 @@ public class TransformationTests {
 
         // Change the parquet function
         Transformations.changeMatching(Transformations.isTableFunction("read_parquet"), n -> {
-            var function = n.get("function");
-            var children = (ArrayNode) function.get("children");
-            children.remove(0);
-            children.add(ExpressionFactory.constant(indexFile));
+            var function = (ObjectNode) n.get("function");
+            var arguments = new ArrayList<>(AstNodes.arguments(function));
+            arguments.remove(0);
+            arguments.add(ExpressionFactory.constant(indexFile));
+            AstNodes.setArguments(function, arguments);
         }).apply(select);
         return template;
     }

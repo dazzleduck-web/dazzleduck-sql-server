@@ -711,7 +711,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         String[] tableParts = splitFqName(fqInputTable, "input_table");
         String viewSql = fetchViewDefinition(viewParts[0], viewParts[1], viewParts[2]);
         try {
-            return Transformations.rewriteTableAsThis(viewSql, tableParts[0], tableParts[1], tableParts[2]);
+            return Transformations.rewriteTableAsThis(viewSql, tableParts[0], tableParts[1], tableParts[2],
+                    viewParts[0], viewParts[1]);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to derive transformation from view '%s' replacing '%s': %s"

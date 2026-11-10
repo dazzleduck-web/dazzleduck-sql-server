@@ -107,6 +107,7 @@ public interface SplitPlanner {
 
         var readParquetFunction = createFunction("read_parquet", "", "", parquetChildren);
         tableFunction.remove("table_name");
+        AstNodes.forgetQualifiedName(tableFunction);
         tableFunction.set("function", readParquetFunction);
         tableFunction.put("type", TABLE_FUNCTION_TYPE);
     }
@@ -125,7 +126,7 @@ public interface SplitPlanner {
 
         JsonNode hiveTypes = null;
         JsonNode unionByName = null;
-        for( var child :  (ArrayNode)from.get("function").get("children")) {
+        for( var child :  AstNodes.arguments(from.get("function"))) {
             var left = child.get("left");
             if(left != null) {
                 var columnNames = (ArrayNode)left.get("column_names");
