@@ -154,7 +154,7 @@ public final class AstNodes {
                 return null;
             }
             try {
-                return Long.parseLong(literal.path(FIELD_TEXT).asText());
+                return Long.parseLong(integerText(literal.path(FIELD_TEXT).asText()));
             } catch (NumberFormatException e) {
                 return null;
             }
@@ -216,8 +216,10 @@ public final class AstNodes {
                 typeInfo.set("child_type", entry);
             }
             case "DECIMAL" -> {
-                typeInfo.put("width", children.isEmpty() ? 18 : integerConstant(children.get(0)));
-                typeInfo.put("scale", children.size() < 2 ? 3 : integerConstant(children.get(1)));
+                // DECIMAL is DECIMAL(18,3); DECIMAL(w) is DECIMAL(w,0).
+                typeInfo.put("width", children.isEmpty() ? Long.valueOf(18) : integerConstant(children.get(0)));
+                typeInfo.put("scale", children.isEmpty() ? Long.valueOf(3)
+                        : children.size() < 2 ? Long.valueOf(0) : integerConstant(children.get(1)));
             }
             default -> typeInfo = null;
         }
@@ -294,10 +296,15 @@ public final class AstNodes {
         return result;
     }
 
+    /** An INTEGER literal's text as Java parses it: DuckDB accepts digit separators ({@code 1_000}). */
+    private static String integerText(String text) {
+        return text.indexOf('_') >= 0 ? text.replace("_", "") : text;
+    }
+
     private static String integerTypeId(String text) {
         BigInteger value;
         try {
-            value = new BigInteger(text);
+            value = new BigInteger(integerText(text));
         } catch (NumberFormatException e) {
             return TYPE_DECIMAL;
         }

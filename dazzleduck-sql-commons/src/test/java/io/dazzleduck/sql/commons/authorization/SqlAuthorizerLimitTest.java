@@ -327,6 +327,15 @@ public class SqlAuthorizerLimitTest {
         throw new AssertionError("no LIMIT_MODIFIER in " + tree);
     }
 
+    /** DuckDB 2.0 keeps digit separators in an integer literal's text ({@code 1_000}). */
+    @Test
+    public void testCapLimit_readsDigitSeparators() throws Exception {
+        assertEquals(10L, extractLimit(Transformations.capLimit(
+                Transformations.parseToTree("SELECT * FROM range(5000) LIMIT 1_000"), 10L)));
+        assertEquals(1000L, extractLimit(Transformations.capLimit(
+                Transformations.parseToTree("SELECT * FROM range(5000) LIMIT 1_000"), 5000L)));
+    }
+
     @Test
     public void testCapLimit_doesNotTouchTheOffset() throws Exception {
         JsonNode query = Transformations.parseToTree("SELECT * FROM range(100) LIMIT 50 OFFSET 5");

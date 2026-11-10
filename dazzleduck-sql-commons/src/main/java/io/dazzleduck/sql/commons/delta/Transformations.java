@@ -247,7 +247,7 @@ public class Transformations {
         String value = AstNodes.constantText(literal);
 
         return switch (type) {
-            case "INTEGER" -> Literal.ofInt(Integer.parseInt(value));
+            case "INTEGER" -> Literal.ofInt(AstNodes.integerConstant(literal).intValue());
             case "VARCHAR" -> Literal.ofString(value);
             case "BOOLEAN" -> Literal.ofBoolean(Boolean.parseBoolean(value));
             case "DATE" -> Literal.ofDate(Integer.parseInt(value));

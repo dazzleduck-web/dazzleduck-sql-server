@@ -218,6 +218,11 @@ docker run \
   --conf 'dazzleduck_sql_compaction.startup_script_provider.script_location=/config/startup.sql'
 ```
 
+The Jib image installs the stock DuckLake extension from DuckDB's extension repository the first
+time the startup script attaches a catalog, so the container needs network access to
+`extensions.duckdb.org` on first start. The native image (`Dockerfile.native`) has it
+pre-installed and runs offline.
+
 ## Telemetry
 
 The service can ship both its meters and its log lines to the DazzleDuck OTel collector over OTLP

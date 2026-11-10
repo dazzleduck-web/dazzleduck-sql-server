@@ -613,7 +613,9 @@ public class Transformations {
             throws SQLException, JsonProcessingException {
         JsonNode ast = parseToTree(sql);
         int[] count = {0};
-        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, viewCatalog, viewSchema, count);
+        Set<String> cteNames = new HashSet<>();
+        collectAllCteNames(ast, cteNames);
+        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, viewCatalog, viewSchema, cteNames, count);
         if (count[0] == 0) {
             throw new IllegalArgumentException(
                     "input_table '%s.%s.%s' not found in view body: %s"
@@ -627,8 +629,16 @@ public class Transformations {
         return parseToSql(ast);
     }
 
+    /** Case-folded names of every CTE declared anywhere in {@code node}. */
+    private static void collectAllCteNames(JsonNode node, Set<String> out) {
+        if (node == null || !node.isContainerNode()) return;
+        if (node.isObject()) collectCteNames(node, out);
+        node.forEach(child -> collectAllCteNames(child, out));
+    }
+
     private static void replaceBaseTableNode(JsonNode node, String catalog, String schema, String table,
-                                             String defaultCatalog, String defaultSchema, int[] count) {
+                                             String defaultCatalog, String defaultSchema, Set<String> cteNames,
+                                             int[] count) {
         if (node == null || node instanceof NullNode || !node.isContainerNode()) return;
         if (count[0] > 1) return; // already invalid — no point scanning further
         if (node.isObject()) {
@@ -637,8 +647,13 @@ public class Transformations {
                 String nodeCatalog = node.get(ExpressionConstants.FIELD_CATALOG_NAME).asText("");
                 String nodeSchema  = node.get(ExpressionConstants.FIELD_SCHEMA_NAME).asText("");
                 String nodeTable   = node.get(ExpressionConstants.FIELD_TABLE_NAME).asText("");
-                if (nodeCatalog.isEmpty()) nodeCatalog = defaultCatalog;
-                if (nodeSchema.isEmpty()) nodeSchema = defaultSchema;
+                // An unqualified name may be a CTE, which shadows the table; it keeps no defaults.
+                boolean maybeCte = nodeCatalog.isEmpty() && nodeSchema.isEmpty()
+                        && cteNames.contains(foldCase(nodeTable));
+                if (!maybeCte) {
+                    if (nodeCatalog.isEmpty()) nodeCatalog = defaultCatalog;
+                    if (nodeSchema.isEmpty()) nodeSchema = defaultSchema;
+                }
                 if (catalog.equals(nodeCatalog) && schema.equals(nodeSchema) && table.equals(nodeTable)) {
                     count[0]++;
                     ObjectNode obj = (ObjectNode) node;
@@ -650,9 +665,10 @@ public class Transformations {
                 }
             }
             node.fields().forEachRemaining(e -> replaceBaseTableNode(e.getValue(), catalog, schema, table,
-                    defaultCatalog, defaultSchema, count));
+                    defaultCatalog, defaultSchema, cteNames, count));
         } else {
-            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, defaultCatalog, defaultSchema, count));
+            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, defaultCatalog, defaultSchema,
+                    cteNames, count));
         }
     }
 
@@ -2426,7 +2442,7 @@ public class Transformations {
                 // Extract all paths from list_value children
                 boolean allConstant = true;
                 for (JsonNode listChild : AstNodes.arguments(child)) {
-                    String path = extractConstantValue(listChild);
+                    String path = AstNodes.constantText(listChild);
                     if (path != null) {
                         collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
                     } else {
@@ -2438,20 +2454,13 @@ public class Transformations {
             return false;
         } else {
             // Direct constant value
-            String path = extractConstantValue(child);
+            String path = AstNodes.constantText(child);
             if (path != null) {
                 collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
                 return true;
             }
             return false;
         }
-    }
-
-    /**
-     * Extracts the string value from a constant node.
-     */
-    private static String extractConstantValue(JsonNode node) {
-        return AstNodes.constantText(node);
     }
 
     private static boolean isHivePartition(JsonNode node) {
@@ -2696,7 +2705,7 @@ public class Transformations {
      * to get wrong.
      */
     private static void rejectNonLiteralLimit(JsonNode ownLimit) {
-        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+        if (ownLimit == null || ownLimit.isNull() || AstNodes.isNullConstant(ownLimit)) {
             return;
         }
         Long literal = literalIntOf(ownLimit);
@@ -2736,12 +2745,12 @@ public class Transformations {
      * <p>An unlimited query stays unlimited: there is nothing to subtract from. That covers an
      * absent LIMIT and an explicit {@code LIMIT NULL}, which SQL reads as <i>unlimited</i> - it
      * parses as a CONSTANT whose value is NULL, not as JSON null, so without the
-     * {@link #isNullConstant} check it took the arithmetic path and
+     * {@link AstNodes#isNullConstant} check it took the arithmetic path and
      * {@code greatest(subtract(NULL, 5), 0)} collapsed to {@code LIMIT 0}, i.e. an empty page for
      * a query that asked for every row.
      */
     private static JsonNode remainingAfterOffset(JsonNode ownLimit, long offset) {
-        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+        if (ownLimit == null || ownLimit.isNull() || AstNodes.isNullConstant(ownLimit)) {
             return NullNode.getInstance();
         }
         if (offset == 0) {
@@ -2758,7 +2767,7 @@ public class Transformations {
      * and the emitted SQL stays a plain {@code LIMIT n}.
      */
     private static JsonNode cappedLimit(JsonNode existing, long cap) {
-        if (existing == null || existing.isNull() || isNullConstant(existing)) {
+        if (existing == null || existing.isNull() || AstNodes.isNullConstant(existing)) {
             return ExpressionFactory.constant(cap);
         }
         return ExpressionFactory.constant(Math.min(literalIntOf(existing), cap));
@@ -2807,11 +2816,6 @@ public class Transformations {
         return ExpressionFactory.createFunction(name, "", "", args);
     }
 
-    /** True for a CONSTANT node whose value is NULL - i.e. an explicit {@code LIMIT/OFFSET NULL}. */
-    private static boolean isNullConstant(JsonNode node) {
-        return AstNodes.isNullConstant(node);
-    }
-
     /**
      * DuckDB {@code type.id} values whose serialized constant is a plain integer. Anything else -
      * DECIMAL, DOUBLE, FLOAT - is <b>not</b> read as a literal, because DuckDB serializes a
@@ -2833,7 +2837,7 @@ public class Transformations {
                 || !CONSTANT_CLASS.equals(node.path(FIELD_CLASS).asText())) {
             return null;
         }
-        if (AstNodes.isNullConstant(node) || !INTEGER_CONSTANT_TYPE_IDS.contains(AstNodes.constantTypeId(node))) {
+        if (!INTEGER_CONSTANT_TYPE_IDS.contains(AstNodes.constantTypeId(node))) {
             return null;
         }
         return AstNodes.integerConstant(node);

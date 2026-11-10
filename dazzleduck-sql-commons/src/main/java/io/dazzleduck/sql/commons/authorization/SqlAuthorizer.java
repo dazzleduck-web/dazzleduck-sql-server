@@ -337,8 +337,8 @@ public interface SqlAuthorizer {
         if (filter == null) return false;
         JsonNode node = filter;
         if ("CAST".equals(node.path(ExpressionConstants.FIELD_CLASS).asText(""))
-                && ("BOOLEAN".equals(node.path("cast_type").path("id").asText(""))
-                    || "BOOLEAN".equalsIgnoreCase(node.path("type_expr").path("type_name").asText("")))) {
+                && AstNodes.castType(node) instanceof JsonNode castType
+                && "BOOLEAN".equals(castType.path("id").asText(""))) {
             node = node.path(ExpressionConstants.FIELD_CHILD);
         }
         if (!"CONSTANT".equals(node.path(ExpressionConstants.FIELD_CLASS).asText(""))) return false;
