@@ -8,16 +8,17 @@ extension, release `v1.5.6-dazzleduck.2` of
 2.0.0 was released on 2026-10-21 and pins DuckLake `417a9117` (branch
 `v2.0-cyanoptera`).
 
-The plan moves to DuckDB 2.0 with a new DuckLake fork, then builds three features
-on top of it. Five tasks, in order:
+The plan moves to DuckDB 2.0 with a new DuckLake fork, builds three features on top
+of it, and reshapes the otel-collector's attribute columns. Six tasks, in order:
 
 | # | Task | Spec | Depends on |
 |---|------|------|------------|
 | 1 | Partition-scoped delete conflicts in DuckLake 2.0 | [duckdb/ducklake#1895](https://github.com/duckdb/ducklake/issues/1895) | none |
 | 2 | Row-id file pruning in DuckLake 2.0, fork release, DuckDB 2.0 bump | [DuckLake patch](../dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md) | 1 |
-| 3 | Aggregation sidecars | [Sidecar views spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/526) (PR #526, `doc/SIDECAR_VIEWS_SPEC.md`) | 2 |
-| 4 | Aggregation background task | none yet | 1, 3 |
-| 5 | Live aggregation view | [Live aggregation spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/527) (PR #527, `LIVE_AGGREGATION_SPEC.md`) | 1 (retention), 2, 4 |
+| 3 | Otel attributes as one struct per attribute set | none yet | 2 |
+| 4 | Aggregation sidecars | [Sidecar views spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/526) (PR #526, `doc/SIDECAR_VIEWS_SPEC.md`) | 2, 3 |
+| 5 | Aggregation background task | none yet | 1, 4 |
+| 6 | Live aggregation view | [Live aggregation spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/527) (PR #527, `LIVE_AGGREGATION_SPEC.md`) | 1 (retention), 2, 5 |
 
 ---
 
@@ -40,7 +41,7 @@ on top of it. Five tasks, in order:
 transaction that deletes from a table fails if any other transaction inserted into
 it, and the other way round, even when the delete only touches a partition the
 insert never writes. Deleting a closed hour while ingestion appends to the current
-hour always fails one of the two. Tasks 4 and 5 both delete while ingestion runs.
+hour always fails one of the two. Tasks 5 and 6 both delete while ingestion runs.
 
 **Fix**, in the style of Iceberg's `OverwriteFiles` conflict-detection filter:
 
@@ -54,7 +55,7 @@ hour always fails one of the two. Tasks 4 and 5 both delete while ingestion runs
    commit, which a metadata server that runs the commit retry loop itself selects
    (`RetrialsServerSide`); it rebuilds the conflict state from staged tables and
    would need the filters staged too. That is DuckLake's own commit mode, unrelated
-   to the local staging in Task 3: files registered with `ducklake_add_data_files`
+   to the local staging in Task 4: files registered with `ducklake_add_data_files`
    commit through the ordinary path and get the narrower check.
 4. For an insert committing after a concurrent delete, track the tables the
    inserting transaction read.
@@ -113,7 +114,74 @@ existing workflow. The steps are in
 
 ---
 
-## Task 3: Aggregation Sidecars
+## Task 3: Otel Attributes as One Struct per Attribute Set
+
+No spec yet; to be written.
+
+**Today** the otel-collector writes each attribute set as six top-level maps, one
+per OTLP value type: `attributes` (strings) and `attributes_int`,
+`attributes_double`, `attributes_bool`, `attributes_bytes`, `attributes_json`, and
+the same six for `resource_attributes`. The string map sits at its original
+position and the ten typed maps are appended at the end of the table, so one
+attribute set is spread across the schema.
+
+**Proposed:** one column per attribute set, a struct with one map per value type.
+
+```sql
+attributes STRUCT(
+    string MAP(VARCHAR, VARCHAR),
+    "int"    MAP(VARCHAR, BIGINT),
+    "double" MAP(VARCHAR, DOUBLE),
+    bool   MAP(VARCHAR, BOOLEAN),
+    bytes  MAP(VARCHAR, BLOB),
+    "json"   MAP(VARCHAR, JSON)
+)
+```
+
+`resource_attributes` gets the same type, and so do the `attributes` of span
+events and links. Each signal loses ten top-level columns: logs go from 23 to 13,
+traces from 26 to 16 and metrics from 29 to 19 (plus `claims` where enabled, which
+stays a plain map).
+
+**Queries** read `attributes.int['http.status_code']` or
+`resource_attributes.string['service.name']`. Checked on DuckDB 1.5.5: the field
+names need no quoting in a query, only in DDL, where DuckDB prints `"int"`,
+`"double"` and `"json"` quoted. Reading one field reads only that field's Parquet
+columns (the scan projects `attributes.int` alone), so the struct costs nothing
+over separate maps for a query that uses one type.
+
+**Work:**
+
+- `OtelSchemaFields`: build the struct field in place of the six maps;
+  `AttributeType` names the struct's children.
+- `AttributeMapsWriter`: write into the struct's child vectors. The column index
+  constants `COL_TYPED_ATTRIBUTES` and `COL_TYPED_RESOURCE_ATTRIBUTES` go away.
+- `attributes.string_copy` keeps its meaning: the `string` field also holds a text
+  copy of every typed value.
+- Schemas, events and links, README, `reference.conf`, and tests. The sidecar spec's
+  attribute examples (Task 4) move to the new names.
+
+**Migration.** DuckLake cannot alter a `MAP` column into a `STRUCT`, so existing
+tables cannot be changed in place, and every query that reads `attributes['k']`
+breaks. To decide in the spec:
+
+- A setting for the layout (`flat` or `struct`), defaulting to `flat` for existing
+  deployments, or a hard switch with new tables.
+- A compatibility view per table that exposes the old columns from the struct
+  (`attributes.string AS attributes`, `attributes.int AS attributes_int`, ...), so
+  existing queries keep working against new tables.
+
+**Verify on DuckDB 2.0:** struct field pruning, DuckLake column stats and file
+pruning on the struct's nested fields, and adding a field to the struct later (a
+new OTLP value type) as a DuckLake schema change.
+
+**Why in this plan.** It is a breaking schema change; shipping it with the 2.0
+upgrade makes one break for consumers instead of two, and it lands before Tasks 4
+and 6 build views over the attribute columns.
+
+---
+
+## Task 4: Aggregation Sidecars
 
 Spec: [PR #526](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/526),
 `doc/SIDECAR_VIEWS_SPEC.md`.
@@ -132,7 +200,7 @@ benchmark on DuckDB 2.0.
 
 ---
 
-## Task 4: Aggregation Background Task
+## Task 5: Aggregation Background Task
 
 No spec yet; to be written.
 
@@ -175,11 +243,11 @@ current hour.
   the rolled-up rows. Note it for consumers.
 - Scheduling: `dazzleduck-sql-ducklake-compactor` already schedules DuckLake
   maintenance and is a natural home, alongside the live view's roll-up job
-  (Task 5).
+  (Task 6).
 
 ---
 
-## Task 5: Live Aggregation View
+## Task 6: Live Aggregation View
 
 Spec: [PR #527](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/527),
 `LIVE_AGGREGATION_SPEC.md`.
@@ -194,7 +262,7 @@ into `agg`.
 - Task 2. Without row-id pruning the result is still correct, but
   `rowid > w` reads every `tail` file.
 - Stable row ids under `merge_adjacent_files`: upstream on 2.0.
-- Task 4. The roll-up job is a background aggregation task and should share its
+- Task 5. The roll-up job is a background aggregation task and should share its
   scheduling.
 - Task 1, for retention: deleting `tail` rows already in `agg` while ingestion
   runs.
