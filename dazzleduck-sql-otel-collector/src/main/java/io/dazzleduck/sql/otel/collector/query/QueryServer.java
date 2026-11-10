@@ -326,6 +326,7 @@ public class QueryServer implements Closeable {
                        CompressionUtil.CodecType codec) throws IOException {
         boolean headersSent = false;
         Statement registered = null;
+        long started = System.nanoTime();
         try {
             try (DuckDBConnection connection = ConnectionPool.getConnection();
                  Statement statement = connection.createStatement();
@@ -380,8 +381,11 @@ public class QueryServer implements Closeable {
             }
         } catch (SQLException | IOException | RuntimeException e) {
             // DuckDB reports a query timeout and a cancel from close() the same way; while not
-            // closing, an interrupt can only be the timeout.
-            boolean timedOut = !closing && isInterrupt(e);
+            // closing, an interrupt can only be the timeout. DuckDB 2.0 reports a timeout of a
+            // streamed result as "Invalid result set" instead, so a failure once the timeout has
+            // passed counts as the timeout too.
+            boolean timedOut = !closing && (isInterrupt(e)
+                    || System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(timeoutSeconds()));
             String outcome = timedOut ? "timeout" : "error";
             if (headersSent) {
                 log.warn("Query result stream failed after the response started; aborting the connection", e);

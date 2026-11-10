@@ -39,7 +39,7 @@ public class HttpMetricDuckLakeIntegrationTest {
     void setup() throws Exception {
         server = new SharedTestServer();
         String STARTUP_SCRIPT = """
-                INSTALL arrow;
+                INSTALL arrow FROM community;
                 LOAD arrow;
 
                 LOAD ducklake;

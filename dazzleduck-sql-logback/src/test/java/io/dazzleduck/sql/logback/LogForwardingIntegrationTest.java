@@ -68,7 +68,7 @@ public class LogForwardingIntegrationTest {
                 "    application_host VARCHAR,\n" +
                 "    date DATE\n" +
                 ")";
-        String startupScript = "INSTALL arrow;\n" +
+        String startupScript = "INSTALL arrow FROM community;\n" +
                 "LOAD arrow;\n" +
                 "\n" +
                 "LOAD ducklake;\n" +

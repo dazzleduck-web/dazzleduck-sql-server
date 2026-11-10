@@ -23,7 +23,10 @@ import io.dazzleduck.sql.flight.model.RunningStatementInfo;
 import io.dazzleduck.sql.flight.server.auth2.AdvanceServerCallHeaderAuthMiddleware;
 import io.dazzleduck.sql.flight.stream.FlightStreamReader;
 import io.micrometer.core.instrument.logging.LoggingMeterRegistry;
+import org.apache.arrow.adapter.jdbc.JdbcFieldInfo;
 import org.apache.arrow.adapter.jdbc.JdbcParameterBinder;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowConfig;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowConfigBuilder;
 import org.apache.arrow.adapter.jdbc.JdbcToArrowUtils;
 import org.apache.arrow.flight.*;
 import org.apache.arrow.flight.sql.FlightSqlUtils;
@@ -31,11 +34,13 @@ import org.apache.arrow.flight.sql.SqlInfoBuilder;
 import org.apache.arrow.flight.sql.impl.FlightSql;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.WriteChannel;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.duckdb.DuckDBConnection;
 import org.duckdb.DuckDBResultSet;
@@ -232,6 +237,31 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
     public record CacheKey(String peerIdentity, long id){}
 
     protected static final Calendar DEFAULT_CALENDAR = JdbcToArrowUtils.getUtcCalendar();
+
+    /**
+     * Maps a query's JDBC result metadata to its Arrow schema. DuckDB 2.0's driver reports a
+     * NULL-typed column ({@code SELECT NULL}, {@code getvariable} of an unset variable) as
+     * {@link Types#OTHER} named {@code "NULL"}, which Arrow's default mapping rejects ("Unmapped JDBC
+     * type: 1111"). It maps to Arrow's Null type, which is what DuckDB 2.0 exports for the column's
+     * data; every other column keeps the default mapping. The config requires an allocator, though
+     * building a schema allocates nothing, hence one with no capacity.
+     */
+    static final JdbcToArrowConfig RESULT_SCHEMA_CONFIG = new JdbcToArrowConfigBuilder(
+            new RootAllocator(0), DEFAULT_CALENDAR)
+            .setJdbcToArrowTypeConverter(DuckDBFlightSqlProducer::resultArrowType)
+            .build();
+
+    static ArrowType resultArrowType(JdbcFieldInfo field) {
+        if (field.getJdbcType() == Types.NULL
+                || (field.getJdbcType() == Types.OTHER && isNullTypeName(field.getTypeName()))) {
+            return ArrowType.Null.INSTANCE;
+        }
+        return JdbcToArrowUtils.getArrowTypeFromJdbcType(field, DEFAULT_CALENDAR);
+    }
+
+    private static boolean isNullTypeName(String typeName) {
+        return typeName != null && typeName.replace("\"", "").equalsIgnoreCase("NULL");
+    }
     public static final String  DEFAULT_DATABASE = "memory";
     protected final FlightRecorder recorder;
     private final Instant startTime;
@@ -563,7 +593,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
                     bytes = ByteString.copyFrom(
                             serializeMetadata(new Schema(List.of())));
                 } else {
-                    var x = JdbcToArrowUtils.jdbcToArrowSchema(metaData, DEFAULT_CALENDAR);
+                    var x = JdbcToArrowUtils.jdbcToArrowSchema(metaData, RESULT_SCHEMA_CONFIG);
                     bytes = ByteString.copyFrom(
                             serializeMetadata(x));
                 }
@@ -670,7 +700,7 @@ public class DuckDBFlightSqlProducer implements FlightSqlHttpProducer, SqlProduc
             if (isNull(metaData) || metaData.getReturnType() == StatementReturnType.NOTHING) {
                 schema = new Schema(List.of());
             } else {
-                schema = JdbcToArrowUtils.jdbcToArrowSchema(metaData, DEFAULT_CALENDAR);
+                schema = JdbcToArrowUtils.jdbcToArrowSchema(metaData, RESULT_SCHEMA_CONFIG);
             }
             return new SchemaResult(schema);
         } catch (SQLException e) {
