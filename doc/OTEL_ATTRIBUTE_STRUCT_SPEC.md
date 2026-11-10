@@ -1,6 +1,7 @@
 # Otel Attributes as One Struct — Design Specification
 
-Status: **proposed.** Task 3 of `doc/DUCKDB_2_UPGRADE_PLAN.md`. The behaviour below was checked on
+Status: **proposed.** Task 3 of `doc/DUCKDB_2_UPGRADE_PLAN.md`; it ships after the DuckDB 2.0
+upgrade (Task 2), in the same release. The behaviour below was checked on
 DuckDB 1.5.5 with stock DuckLake and on DuckDB 2.0.0 with DuckLake `417a9117`; both gave the same
 results.
 
@@ -67,9 +68,16 @@ SELECT e.attributes.string['exception.type'] FROM spans, unnest(events) AS u(e);
 non-string value as text, so `attributes.string['k']` finds a key whatever its type. An attribute
 with no value set is kept in `string` as `''`.
 
-**Nulls.** A log record, span or data point always has a non-null struct, and each map is empty
-when the record has no attribute of that type, as the six columns are today. A span event or link
-with no attributes has a null struct, where today all six fields are null.
+**Never null.** OTLP has no null attribute set. `LogRecord`, `Span`, `Span.Event`, `Span.Link`
+and `Resource` all declare their attributes as `repeated KeyValue`, so "no attributes" is an empty
+list, never an absent one. The one part that can be absent is the `Resource` message itself, which
+also means no resource attributes. So the struct is never null, and each map is empty when there is
+no attribute of that type.
+
+This changes span events and links. Today an event or link with no attributes has all six fields
+null; with the struct it has a non-null struct of empty maps, like every other attribute set, so a
+query tests `cardinality(e.attributes.string) = 0` rather than `IS NULL`. A null typed field would
+invent a state OTLP does not have, and give two ways of saying "none".
 
 ## Cost
 
@@ -92,9 +100,8 @@ All in `dazzleduck-sql-otel-collector`:
 - `OtelSchemaFields` builds the struct field; `typedAttributeFields` and `withTypedAttributes` go.
   The log, trace and metric schemas and the event and link structs use it.
 - `AttributeMapsWriter` takes the struct vector and fills its six child maps, buffering a batch and
-  loading each buffer in one copy as today. It also builds the struct's validity buffer: all valid
-  for a top-level set, and null for an event or link without attributes, which `writeNull` already
-  marks.
+  loading each buffer in one copy as today. The struct's validity buffer is all valid. `writeNull`
+  goes, and `SpanListWriter` writes an event or link without attributes as empty maps.
 - `COL_TYPED_ATTRIBUTES` and `COL_TYPED_RESOURCE_ATTRIBUTES` go; `COL_ATTRIBUTES` and
   `COL_RESOURCE_ATTRIBUTES` name the struct columns.
 - README (schema tables and the Typed attributes section) and the comment in `reference.conf`.
@@ -116,19 +123,42 @@ Invalid Input Error: Failed to map column "attributes" from file "..." to the co
 The second line is DuckDB 2.0's; 1.5 prints only the first. The batch fails and nothing is lost,
 but every batch of that queue fails the same way.
 
-**A startup check.** So that this shows at startup instead of on the first batch, a queue runs its
-transformation over an empty batch of the collector's schema and compares the result's columns with
-its table, failing startup with the table, the column and both types. The sidecar spec
-(`doc/SIDECAR_VIEWS_SPEC.md`) needs the same check for its tables; it is one shared check, not two.
+**A startup check.** So that a mismatch shows at startup instead of on the first batch, a queue runs
+its projection and transformation over an empty batch of the collector's schema and compares the
+result's columns with its table, failing startup with the table, the column and both types. It
+extends the check that already warns, when a queue's state is first built, about a pass-through
+table missing the `claims` column. The sidecar spec (`doc/SIDECAR_VIEWS_SPEC.md`) needs the same
+check for its tables; it is one shared check, not two.
 
 An existing deployment then has three ways forward.
 
-### Keep the flat tables
+### Keep the flat tables: `attribute_layout`
 
-A queue transformation rewrites the struct back into the old columns before the file is written.
-Checked: the transformed file registers into a flat table and queries return the same rows.
+The collector ships the flattening, so an existing table keeps working with no SQL and, by default,
+no configuration. A queue mapping takes:
 
-Logs and metrics:
+```hocon
+{ ingestion_queue = "logs", catalog = "my_catalog", schema = "main", table = "logs",
+  attribute_layout = auto }    # auto | struct | flat
+```
+
+- `struct` writes the struct columns.
+- `flat` applies the collector's shipped projection for the queue's signal, which writes today's six
+  columns per attribute set.
+- `auto`, the default, follows the target table: `flat` when its `attributes` column is a `MAP`,
+  `struct` otherwise, including a table that does not exist yet and plain Parquet output. An
+  existing deployment therefore keeps writing its tables after the upgrade without a change.
+
+The projection runs on the batch before the queue's own transformation, which reads its output as
+`__this`. A transformation or view written against the flat columns, such as one deriving
+`attributes['tenant']`, keeps working unchanged.
+
+There is still one writer: the collector always builds the struct, and `flat` is a projection over
+it. Checked: the projected file registers into a flat table and queries return the same rows. The
+one difference from today is the change above: an event or link without attributes has empty maps
+in the flat layout too, not nulls.
+
+The shipped projection for logs and metrics:
 
 ```sql
 SELECT * EXCLUDE (attributes, resource_attributes),
@@ -147,7 +177,7 @@ SELECT * EXCLUDE (attributes, resource_attributes),
 FROM __this
 ```
 
-Traces add the same for `events` and `links`, whose attributes sit inside lists:
+For traces it adds the same for `events` and `links`, whose attributes sit inside lists:
 
 ```sql
 list_transform(events, lambda e: struct_pack(
@@ -157,8 +187,8 @@ list_transform(events, lambda e: struct_pack(
     attributes_bytes := e.attributes.bytes, attributes_json := e.attributes.json)) AS events
 ```
 
-Matching is by name, so the column order of the result does not matter. The transformation costs a
-projection per batch.
+Matching is by name, so the column order of the result does not matter. It costs a projection per
+batch.
 
 ### Move to new tables
 
@@ -213,10 +243,13 @@ column per attribute set.
 
 ## Rejected Alternatives
 
-**A layout setting in the collector (`flat` or `struct`).** It would keep existing tables working
-without a transformation, but the collector would carry two schemas, two writer paths and two sets
-of tests indefinitely. The transformation above gives the same files from one writer, and is
-configuration an operator can remove once the tables move.
+**A second writer for the flat layout.** Keeping today's writer next to the new one would avoid the
+projection, but the collector would carry two writer paths and two sets of writer tests
+indefinitely. The shipped projection gives the same files from one writer.
+
+**Leaving the flattening to each operator's transformation.** Every deployment with existing tables
+would paste the same SQL, and would have to fold it into any transformation it already has. Shipping
+it, applied before the queue's transformation, makes the upgrade need nothing.
 
 **One map with a union value, `MAP(VARCHAR, UNION(...))`.** One lookup per key, but every read
 pays for `union_extract`, a query cannot read only one value type, and a filter on a typed value is
@@ -232,20 +265,27 @@ upgrade is a point where consumers expect changes; doing it then makes one break
    above, and the six fields in order (replaces `SchemaColumnIndexTest`'s typed-column checks).
 2. Values: every `AnyValue` kind lands in its field, with and without `string_copy`; an attribute
    with no value is `''` in `string` (adapts `OtelCollectorTypedAttributesTest`).
-3. Nulls: an event or link without attributes has a null struct; a record without attributes has a
-   non-null struct of empty maps.
+3. Never null: a record, event or link without attributes has a non-null struct of empty maps, and
+   so does a resource that is absent from the request.
 4. Large batches: alignment of the struct and its children with the other columns across buffer
    growth (adapts `LargeBatchAlignmentTest`).
-5. End to end into DuckLake on DuckDB 2.0: a struct table, a flat table with the transformation,
-   and the startup check failing on a flat table without it.
-6. Collector CPU: steady-rate A/B against the current writer; no regression beyond noise.
+5. `attribute_layout`: `auto` picks `flat` for a table whose `attributes` is a `MAP` and `struct`
+   otherwise; `flat` output registers into a flat table; a queue transformation written against the
+   flat columns runs over it unchanged.
+6. End to end into DuckLake on DuckDB 2.0: a struct table, a flat table under `auto`, and the
+   startup check failing on a flat table with `attribute_layout = struct`.
+7. Collector CPU: steady-rate A/B against the current writer, for `struct` and for `flat`; no
+   regression beyond noise.
+
+## Decisions
+
+1. **No nulls.** OTLP has no null attribute set (see *Never null*), so the struct is never null and
+   a type with no attribute is an empty map.
+2. **The flattening ships with the collector**, as `attribute_layout`, defaulting to `auto`.
+3. **Release.** The DuckDB 2.0 upgrade goes first; this ships after it, in the same release, so the
+   release notes cover both at once.
 
 ## Open Questions
 
-1. **Empty maps or null fields.** A record with no `int` attribute gets an empty `int` map, as
-   today. Null fields would save a little space and make `attributes.int IS NULL` meaningful, at the
-   cost of a second way to say "none".
-2. **A shipped transformation.** Whether the collector should ship the flattening transformations
-   (one per signal) so an operator names one instead of pasting the SQL above.
-3. **Release.** The change breaks existing tables. Whether it waits for the release with the DuckDB
-   2.0 bump, so the release notes cover both at once.
+1. **How long `flat` is supported.** Whether it is deprecated after a set number of releases, or
+   kept as long as tables in that layout exist.
