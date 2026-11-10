@@ -115,7 +115,7 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             ./mvnw $JIB_ARGS package jib:build -pl dazzleduck-sql-ducklake-compactor \
-              -Djib.architecture=$arch -Dducklake.extension.download.skip=false
+              -Djib.architecture=$arch
           done
 
       # Jib pushed one single-arch image per architecture. These stitch them

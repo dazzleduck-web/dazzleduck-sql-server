@@ -17,8 +17,8 @@
 FROM ghcr.io/graalvm/native-image-community:25 AS build
 ARG TARGETARCH
 # Nothing to install: the GraalVM 25 image (Oracle Linux 10) already has libz.so, which the
-# native-image link needs (gcc ... -lz), via zlib-ng-compat-devel, and curl, which fetches the
-# patched DuckLake extension below. Installing zlib-devel conflicts with zlib-ng-compat-devel.
+# native-image link needs (gcc ... -lz), via zlib-ng-compat-devel. Installing zlib-devel conflicts
+# with zlib-ng-compat-devel.
 WORKDIR /src
 COPY . .
 # -Pnative emits target/compactor; duckdb.native.arch picks the DuckDB .so for this arch.
@@ -26,41 +26,25 @@ RUN --mount=type=cache,target=/root/.m2 \
     ./mvnw -q -Pnative -pl dazzleduck-sql-ducklake-compactor -am -DskipTests package \
       -Dduckdb.native.arch="${TARGETARCH}"
 
-# Pre-download the DuckDB extensions (arrow + patched ducklake) for the pinned engine version and
-# this arch, into /root/.duckdb, so the runtime image loads them with no network. The engine
-# version and the patched-extension release are read from the pom (single source of truth) --
-# see DUCKLAKE_PATCH.md for what the patch is and how to update it.
+# Pre-download the DuckDB extensions (arrow + ducklake) for the pinned engine version and this
+# arch, into /root/.duckdb, so the runtime image loads them with no network. The engine version is
+# read from the pom (single source of truth).
 RUN --mount=type=cache,target=/root/.m2 <<'SH'
 set -e
 DUCKDB_VERSION="$(./mvnw -q -N help:evaluate -Dexpression=duckdb.version -DforceStdout)"
-DUCKLAKE_PATCH_RELEASE="$(./mvnw -q help:evaluate -pl dazzleduck-sql-ducklake-compactor -Dexpression=ducklake.patch.release -DforceStdout)"
-DUCKLAKE_EXT_CACHE_VERSION="$(./mvnw -q help:evaluate -pl dazzleduck-sql-ducklake-compactor -Dexpression=ducklake.extension.cache.version -DforceStdout)"
-echo "duckdb.version = ${DUCKDB_VERSION}, ducklake.patch.release = ${DUCKLAKE_PATCH_RELEASE}, arch = ${TARGETARCH}"
+echo "duckdb.version = ${DUCKDB_VERSION}, arch = ${TARGETARCH}"
 DUCKJAR="/root/.m2/repository/org/duckdb/duckdb_jdbc/${DUCKDB_VERSION}/duckdb_jdbc-${DUCKDB_VERSION}.jar"
 [ -f "$DUCKJAR" ] || { echo "ERROR: DuckDB jar not found: $DUCKJAR"; exit 1; }
-
-# Pre-place the patched DuckLake extension (dazzleduck-web/ducklake, backports
-# duckdb/ducklake#1453) at the exact local cache path DuckDB resolves LOAD from, instead of
-# INSTALL-ing the stock extension over the network.
-DUCKLAKE_EXT_DIR="/root/.duckdb/extensions/${DUCKLAKE_EXT_CACHE_VERSION}/linux_${TARGETARCH}"
-mkdir -p "$DUCKLAKE_EXT_DIR"
-curl -fsSL -o "${DUCKLAKE_EXT_DIR}/ducklake.duckdb_extension" \
-  "https://github.com/dazzleduck-web/ducklake/releases/download/${DUCKLAKE_PATCH_RELEASE}/ducklake-linux_${TARGETARCH}.duckdb_extension"
 
 mkdir -p /tmp/ext
 cat > /tmp/ext/Install.java <<'JAVA'
 import java.sql.*;
-import java.util.Properties;
 public class Install {
   public static void main(String[] a) throws Exception {
-    // allow_unsigned_extensions must be a connection property, not a `SET` statement: DuckDB
-    // rejects changing it once the database instance is already running. The pre-placed
-    // extension above isn't signed with DuckDB Labs' key.
-    Properties props = new Properties();
-    props.setProperty("allow_unsigned_extensions", "true");
-    try (Connection c = DriverManager.getConnection("jdbc:duckdb:", props); Statement s = c.createStatement()) {
+    try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
       s.execute("INSTALL arrow FROM community");
       s.execute("LOAD arrow");
+      s.execute("INSTALL ducklake");
       s.execute("LOAD ducklake");
     }
     System.out.println("duckdb extensions installed");
@@ -76,7 +60,7 @@ SH
 FROM debian:12-slim AS runtime
 LABEL org.opencontainers.image.title="dazzleduck ducklake-compactor (native)"
 COPY --from=build /src/dazzleduck-sql-ducklake-compactor/target/compactor /usr/local/bin/compactor
-# Pre-installed DuckDB extensions (arrow, patched ducklake) so the compactor loads them without network.
+# Pre-installed DuckDB extensions (arrow, ducklake) so the compactor loads them without network.
 COPY --from=build /root/.duckdb /root/.duckdb
 # /health HTTP server.
 EXPOSE 8080

@@ -194,9 +194,8 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-25.jdk/Contents/Home
 # Run tests
 ./mvnw test -pl dazzleduck-sql-ducklake-compactor
 
-# Build Docker image (Jib, no daemon required); bakes in the patched DuckLake extension
-# (see DUCKLAKE_PATCH.md), so the download step must be explicitly enabled here
-./mvnw jib:dockerBuild -pl dazzleduck-sql-ducklake-compactor -Dducklake.extension.download.skip=false
+# Build Docker image (Jib, no daemon required)
+./mvnw jib:dockerBuild -pl dazzleduck-sql-ducklake-compactor
 ```
 
 ## Running

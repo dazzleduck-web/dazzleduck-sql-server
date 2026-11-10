@@ -76,14 +76,12 @@ one after the other — **not** in parallel, and not alongside another build of 
 
 The compactor pom already sets the target image to
 `dazzleduck/ducklake-compactor:${project.version}-${jib.architecture}` (plus a `latest-${arch}`
-tag), so no `-Djib.to.image` override is needed — only `-Djib.architecture`. It also bakes in a
-patched DuckLake extension (see `dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`); that
-download step is skipped by default, so it needs `-Dducklake.extension.download.skip=false` here.
+tag), so no `-Djib.to.image` override is needed — only `-Djib.architecture`.
 
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"
-./mvnw package -DskipTests jib:build -pl dazzleduck-sql-ducklake-compactor -Djib.architecture=arm64 -Dducklake.extension.download.skip=false
-./mvnw package -DskipTests jib:build -pl dazzleduck-sql-ducklake-compactor -Djib.architecture=amd64 -Dducklake.extension.download.skip=false
+./mvnw package -DskipTests jib:build -pl dazzleduck-sql-ducklake-compactor -Djib.architecture=arm64
+./mvnw package -DskipTests jib:build -pl dazzleduck-sql-ducklake-compactor -Djib.architecture=amd64
 ```
 
 ### Step 4 — Create and push multi-arch manifests

@@ -16,9 +16,7 @@ name: Native binaries (macOS, Windows)
 #
 # Unlike the Linux images, these binaries ship no pre-installed DuckDB extensions: they install
 # arrow/ducklake from DuckDB's extension repository on first use, so they need network access
-# then. The compactor's patched DuckLake extension (DUCKLAKE_PATCH.md) is only built for Linux, so
-# on macOS and Windows the compactor runs with stock DuckLake, whose compaction-conflict check is
-# per table: concurrent compaction tiers on one table conflict. The binaries are not code-signed:
+# then. The binaries are not code-signed:
 # macOS Gatekeeper blocks a downloaded unsigned binary until its quarantine attribute is cleared
 # (xattr -d com.apple.quarantine <file>).
 on:

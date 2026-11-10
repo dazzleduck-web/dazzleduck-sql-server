@@ -1,6 +1,16 @@
 # Patched DuckLake Extension
 
-This module's Docker images (both the GraalVM native image and the Jib image) bake in a
+> **Retired with the DuckDB 2.0 upgrade (0.3.0).** The images now run the stock DuckLake extension
+> for DuckDB 2.0. DuckLake 2.0 checks compaction and delete conflicts per file upstream, which
+> covers `#1453`, `#1482` and `#1484`, and keeps row ids through `merge_adjacent_files`. The only
+> patch it lacks is rowid file pruning, which nothing in this repository depends on yet.
+>
+> The steps under "Retiring the patch" below have been applied. The rest of this document describes
+> the mechanism as it was, for when a 2.0 fork returns (partition-scoped delete conflicts and rowid
+> pruning, Tasks 1 and 2 of `doc/DUCKDB_2_UPGRADE_PLAN.md`): restore it from the commit that retired
+> it, then follow "Updating the patch".
+
+This module's Docker images (both the GraalVM native image and the Jib image) baked in a
 custom-built DuckLake extension instead of the stock one DuckDB would otherwise fetch over the
 network. This document explains what the patch is, how it's built and published, how the images
 consume it, and the exact steps to update it when `duckdb.version` changes.
