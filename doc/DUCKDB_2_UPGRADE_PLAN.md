@@ -15,7 +15,7 @@ of it, and reshapes the otel-collector's attribute columns. Six tasks, in order:
 |---|------|------|------------|
 | 1 | Partition-scoped delete conflicts in DuckLake 2.0 | [duckdb/ducklake#1895](https://github.com/duckdb/ducklake/issues/1895) | none |
 | 2 | Row-id file pruning in DuckLake 2.0, fork release, DuckDB 2.0 bump | [DuckLake patch](../dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md) | 1 |
-| 3 | Otel attributes as one struct per attribute set | none yet | 2 |
+| 3 | Otel attributes as one struct per attribute set | [Attribute struct spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/530) (PR #530, `doc/OTEL_ATTRIBUTE_STRUCT_SPEC.md`) | 2 |
 | 4 | Aggregation sidecars | [Sidecar views spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/526) (PR #526, `doc/SIDECAR_VIEWS_SPEC.md`) | 2, 3 |
 | 5 | Aggregation background task | none yet | 1, 4 |
 | 6 | Live aggregation view | [Live aggregation spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/527) (PR #527, `LIVE_AGGREGATION_SPEC.md`) | 1 (retention), 2, 5 |
@@ -116,7 +116,8 @@ existing workflow. The steps are in
 
 ## Task 3: Otel Attributes as One Struct per Attribute Set
 
-No spec yet; to be written.
+Spec: [PR #530](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/530),
+`doc/OTEL_ATTRIBUTE_STRUCT_SPEC.md`.
 
 **Today** the otel-collector writes each attribute set as six top-level maps, one
 per OTLP value type: `attributes` (strings) and `attributes_int`,
@@ -161,23 +162,23 @@ over separate maps for a query that uses one type.
 - Schemas, events and links, README, `reference.conf`, and tests. The sidecar spec's
   attribute examples (Task 4) move to the new names.
 
-**Migration.** DuckLake cannot alter a `MAP` column into a `STRUCT`, so existing
-tables cannot be changed in place, and every query that reads `attributes['k']`
-breaks. To decide in the spec:
+**Migration.** DuckLake cannot alter a `MAP` column into a `STRUCT`, and a struct
+file sent to a flat table fails registration. The collector ships the flattening as
+a per-queue `attribute_layout` (`auto`, `struct` or `flat`); `auto`, the default,
+follows the target table, so existing tables keep receiving today's columns with no
+change. A queue's own transformation runs after the flattening and keeps working.
 
-- A setting for the layout (`flat` or `struct`), defaulting to `flat` for existing
-  deployments, or a hard switch with new tables.
-- A compatibility view per table that exposes the old columns from the struct
-  (`attributes.string AS attributes`, `attributes.int AS attributes_int`, ...), so
-  existing queries keep working against new tables.
+**Never null.** OTLP attribute sets are `repeated KeyValue`, so the struct is never
+null and a type without attributes is an empty map; this changes span events and
+links, which today write null when they have no attributes.
 
 **Verify on DuckDB 2.0:** struct field pruning, DuckLake column stats and file
 pruning on the struct's nested fields, and adding a field to the struct later (a
 new OTLP value type) as a DuckLake schema change.
 
-**Why in this plan.** It is a breaking schema change; shipping it with the 2.0
-upgrade makes one break for consumers instead of two, and it lands before Tasks 4
-and 6 build views over the attribute columns.
+**Why in this plan.** It changes the schema new tables get; shipping it after the
+2.0 upgrade, in the same release, gives consumers one set of changes instead of two,
+and it lands before Tasks 4 and 6 build views over the attribute columns.
 
 ---
 
