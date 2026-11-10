@@ -548,6 +548,23 @@ Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mapping
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
 runtime without a restart.
 
+### Commit retries
+
+When several writers and the compactor share one lake, add this to the startup script, after
+`LOAD ducklake`:
+
+```sql
+SET ducklake_max_retry_count = 30;
+```
+
+DuckLake retries a commit that loses the race for the next snapshot id, waiting 100 ms × 1.5ⁿ
+(with jitter, each wait capped at 60 s) between attempts. On DuckDB 2.0 commits collide more often
+than on 1.5, and the default of 10 retries can run out under load. Most collisions resolve in a
+few retries, but with 30 a commit that keeps losing can retry for up to about 15 minutes, so any
+job deleting orphaned files (`ducklake_delete_orphaned_files`) must use an `older_than` well above
+that, or it can delete a file whose commit is still retrying. The setting is global to the DuckDB
+instance. The otel-collector and the compactor set it by default.
+
 ### Transformation
 
 `transformation` is a SQL `SELECT` that runs on each batch before it is persisted. The server
