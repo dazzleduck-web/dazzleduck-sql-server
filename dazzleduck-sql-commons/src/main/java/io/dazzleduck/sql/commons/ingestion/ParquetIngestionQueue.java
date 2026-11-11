@@ -173,6 +173,10 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * deleted after this method returns) and registered. The client sees no failure. If nothing
      * changed, or the retry fails too, the original failure propagates as before.
      *
+     * <p>A queue whose cached state is unusable (unsupported partitioning, a view that does not
+     * resolve) is re-read once before the batch is rejected, so fixing the cause takes effect on the
+     * next batch rather than after the refresh interval.
+     *
      * <p>Output files of a failed attempt are deleted when the post-ingestion step reports that it
      * rejected them before committing ({@link FilesNotRegisteredException}); otherwise they are
      * counted as orphans, for {@code ducklake_delete_orphaned_files} to reclaim.
@@ -180,7 +184,21 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     private IngestionResult writeWithCatalogRetry(WriteTask<String, IngestionResult> writeTask,
                                                   java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql)
             throws Exception {
-        WriteInputs used = currentWriteInputs(writeTask);
+        WriteInputs used;
+        try {
+            used = currentWriteInputs(writeTask);
+        } catch (UnsupportedPartitionTransformException | TransformationUnavailableException unusable) {
+            // The cached state says this queue cannot be written. Its cause may have been fixed since
+            // it was cached (partitioning changed, view recreated), so re-read the catalog once rather
+            // than reject every batch until the refresh interval expires.
+            try {
+                postIngestionHandler.refreshNow(queueId);
+            } catch (RuntimeException refreshFailure) {
+                unusable.addSuppressed(refreshFailure);
+                throw unusable;
+            }
+            used = currentWriteInputs(writeTask); // still unusable: throws the current reason
+        }
         try {
             return writeAndRegister(writeTask, used, lastAttemptSql);
         } catch (Exception first) {

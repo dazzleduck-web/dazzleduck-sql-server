@@ -287,6 +287,80 @@ class ViewTransformationTest {
     }
 
     /**
+     * A view that does not resolve fails only its own queue, as an unsupported partition spec does:
+     * the handler still starts, the other queue is unaffected, and the broken queue's writes are
+     * rejected with the reason.
+     */
+    @Test
+    void unresolvableView_failsOnlyItsQueue() throws Exception {
+        ConnectionPool.execute("CREATE TABLE %s.main.other (level VARCHAR)".formatted(CATALOG));
+        var good = new QueueIdToTableMapping("good", CATALOG, "main", "other", Map.of(), null);
+        var bad = new QueueIdToTableMapping("bad", CATALOG, "main", "logs", Map.of(), null,
+                CATALOG + ".main.no_such_view", CATALOG + ".main.logs");
+        var handler = new DuckLakeIngestionHandler(Map.of("good", good, "bad", bad), Duration.ofMinutes(1));
+
+        assertNull(handler.getTransformation("good"));
+        assertNotNull(handler.getTargetPath("bad"));
+        var e = assertThrows(TransformationUnavailableException.class, () -> handler.getTransformation("bad"));
+        assertTrue(e.getMessage().contains("no_such_view") && e.getMessage().contains("not found"), e.getMessage());
+    }
+
+    /**
+     * A periodic refresh that cannot resolve the view keeps the last resolved transformation (the
+     * failure may be a brief catalog error); a forced refresh, as after a failed write, records the
+     * failure and fails the queue; recreating the view recovers it.
+     */
+    @Test
+    void unresolvableViewOnPeriodicRefresh_keepsLastTransformation_untilForcedRefresh() throws Exception {
+        var mapping = new QueueIdToTableMapping("q", CATALOG, "main", "logs", Map.of(), null,
+                CATALOG + ".main.v_logs", CATALOG + ".main.logs");
+        var clock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
+        var handler = new DuckLakeIngestionHandler(Map.of("q", mapping), Duration.ofMinutes(1), clock);
+        String lastGood = handler.getTransformation("q");
+
+        ConnectionPool.execute("DROP VIEW %s.main.v_logs".formatted(CATALOG));
+        clock.advanceBy(Duration.ofMinutes(2));
+        assertEquals(lastGood, handler.getTransformation("q"), "periodic refresh keeps the last transformation");
+
+        handler.refreshNow("q");
+        assertThrows(TransformationUnavailableException.class, () -> handler.getTransformation("q"),
+                "a forced refresh records the failure");
+        clock.advanceBy(Duration.ofMinutes(2));
+        assertThrows(TransformationUnavailableException.class, () -> handler.getTransformation("q"),
+                "nothing to keep once failed: periodic refresh keeps failing while the view is missing");
+
+        ConnectionPool.execute("CREATE VIEW %s.main.v_logs AS SELECT ts, upper(level) AS level, msg FROM %s.main.logs"
+                .formatted(CATALOG, CATALOG));
+        clock.advanceBy(Duration.ofMinutes(2));
+        assertEquals(lastGood, handler.getTransformation("q"), "recreating the view recovers the queue");
+    }
+
+    /**
+     * A view outside the target table's DuckLake catalog does not move that catalog's
+     * schema_version, so it is re-read on every refresh.
+     */
+    @Test
+    void refresh_updatesTransformation_whenViewInAnotherCatalogChanges() throws Exception {
+        ConnectionPool.execute("CREATE OR REPLACE VIEW memory.main.v_logs_mem AS SELECT ts, upper(level) AS level, msg FROM %s.main.logs"
+                .formatted(CATALOG));
+        try {
+            var mapping = new QueueIdToTableMapping("q", CATALOG, "main", "logs", Map.of(), null,
+                    "memory.main.v_logs_mem", CATALOG + ".main.logs");
+            var clock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
+            var handler = new DuckLakeIngestionHandler(Map.of("q", mapping), Duration.ofMinutes(1), clock);
+            assertTrue(handler.getTransformation("q").contains("upper"));
+
+            ConnectionPool.execute("CREATE OR REPLACE VIEW memory.main.v_logs_mem AS SELECT ts, lower(level) AS level, msg FROM %s.main.logs"
+                    .formatted(CATALOG));
+            assertTrue(handler.getTransformation("q").contains("upper"), "cached until the refresh interval");
+            clock.advanceBy(Duration.ofMinutes(2));
+            assertTrue(handler.getTransformation("q").contains("lower"), "re-read on refresh");
+        } finally {
+            ConnectionPool.execute("DROP VIEW IF EXISTS memory.main.v_logs_mem");
+        }
+    }
+
+    /**
      * Verifies the schema_version short-circuit: when schema_version has NOT changed
      * (data-only writes), refreshState() bumps refreshedAt but does NOT re-fetch path,
      * transformation, or partitions from DuckLake.
