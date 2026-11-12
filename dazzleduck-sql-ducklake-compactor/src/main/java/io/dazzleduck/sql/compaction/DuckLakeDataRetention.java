@@ -63,9 +63,13 @@ public class DuckLakeDataRetention implements DataRetention {
 
     private static final Logger logger = LoggerFactory.getLogger(DuckLakeDataRetention.class);
 
-    private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC);
+    // uuuu, not yyyy (year of era): no year 0 or BC year may print as an AD one
+    private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("uuuu-MM-dd").withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter TIMESTAMP =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC);
+            DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC);
+
+    /** The earliest boundary written as a literal; a lower one, from a corrupt time, skips the table. */
+    static final Instant EARLIEST_BOUNDARY = Instant.parse("0001-01-01T00:00:00Z");
 
     private final List<String> databases;
     private final String policyTable;
@@ -100,16 +104,13 @@ public class DuckLakeDataRetention implements DataRetention {
         } catch (SQLException e) {
             // The connection may be broken (catalog backend restarted): open a new one next cycle
             // rather than fail on the same dead connection until a restart.
-            if (mayBeBroken(e)) {
-                connections.evict(database, connection);
-            }
+            evictIfBroken(database, connection);
             throw e;
         }
         Instant now = clock.instant();
         int tables = 0;
         int failed = 0;
         long rowsDeleted = 0;
-        boolean broken = false;
         for (RetentionPolicy policy : policies) {
             if (policy.unlimited()) {
                 continue;
@@ -126,28 +127,38 @@ public class DuckLakeDataRetention implements DataRetention {
                 }
             } catch (Exception e) {
                 failed++;
-                broken |= e instanceof SQLException sql && mayBeBroken(sql);
                 logger.error("Retention failed for {}, the other tables still run", policy.name(), e);
             } finally {
                 metrics.stopTimer(sample, "retention", "delete", database);
             }
         }
-        if (broken) {
+        if (failed > 0) {
             // The policy table may live elsewhere and still be readable while the DuckLake
-            // catalog's connection is dead: start fresh next cycle.
-            connections.evict(database, connection);
+            // catalog's connection is dead.
+            evictIfBroken(database, connection);
         }
         return new Outcome(tables, rowsDeleted, failed);
     }
 
     /**
-     * False for errors a new connection would not fix: a transaction conflict (retried next cycle),
-     * or a missing table or column. Reconnecting reruns the whole startup script.
+     * After a failure, drops the connection if it can no longer read the DuckLake catalog (its
+     * backend restarted, say), so the next cycle opens a new one. Not for a conflict or a missing
+     * table, which a new connection would not fix: reconnecting reruns the whole startup script.
      */
-    static boolean mayBeBroken(SQLException e) {
-        String message = String.valueOf(e.getMessage());
-        return !(message.contains("Transaction conflict") || message.contains("Catalog Error")
-                || message.contains("Binder Error") || message.contains("Parser Error"));
+    private void evictIfBroken(String database, Connection connection) {
+        if (!catalogReachable(connection, database)) {
+            logger.warn("Retention connection for {} cannot read its catalog, reopening it next cycle", database);
+            connections.evict(database, connection);
+        }
+    }
+
+    static boolean catalogReachable(Connection connection, String database) {
+        String sql = "SELECT 1 FROM \"__ducklake_metadata_%s\".ducklake_snapshot LIMIT 1".formatted(database);
+        try (Statement statement = connection.createStatement(); ResultSet ignored = statement.executeQuery(sql)) {
+            return true;
+        } catch (SQLException e) {
+            return false;
+        }
     }
 
     /**
@@ -230,9 +241,11 @@ public class DuckLakeDataRetention implements DataRetention {
      * only lower the boundary), and a file committed later makes the commit conflict if it could
      * hold rows below the cutoff, rather than be partly deleted.
      *
-     * <p>That read is filtered like the DELETE: DuckLake scopes a transaction's conflict check by
-     * the filters of everything it read, and an unfiltered read - even {@code DESCRIBE}, or a
-     * filter such as {@code IS NULL} - makes the DELETE conflict with every concurrent insert.
+     * <p>That read is filtered on the cutoff: DuckLake scopes a transaction's conflict check by the
+     * filters of everything it read, and an unfiltered read - even {@code DESCRIBE}, a filter such
+     * as {@code IS NULL}, or one that prunes every file, so the scan never starts - makes the DELETE
+     * conflict with every concurrent insert. So the commit conflicts with inserted files that could
+     * hold rows older than the cutoff: late data, older than the retention.
      *
      * @param type         the time column's type, from {@link #columnType}
      * @param beforeDelete for tests: runs between reading the statistics and the DELETE
@@ -268,18 +281,23 @@ public class DuckLakeDataRetention implements DataRetention {
      */
     static Optional<String> deleteStatement(Connection connection, RetentionPolicy policy, String type, Instant cutoff)
             throws SQLException {
-        List<FileRange> files = fileRanges(connection, policy, type);
+        long cutoffMicros = toMicros(type, cutoff);
+        List<FileRange> files = fileRanges(connection, policy, type, cutoffMicros);
         long unknown = files.stream().filter(f -> !f.hasStats()).count();
         if (unknown > 0) {
             logger.warn("Retention for {}: {} data file(s) have no statistics for {}, so they are never dropped whole",
                     policy.name(), unknown, policy.timeColumn());
         }
-        OptionalLong boundary = fileBoundary(files, toMicros(type, cutoff));
+        OptionalLong boundary = fileBoundary(files, cutoffMicros);
         if (boundary.isEmpty()) {
             logger.debug("Retention for {}: no data file is entirely older than {}", policy.name(), cutoff);
             return Optional.empty();
         }
         Instant at = Instant.EPOCH.plus(boundary.getAsLong(), ChronoUnit.MICROS);
+        if (at.isBefore(EARLIEST_BOUNDARY)) {
+            logger.warn("Retention skipped {}: a data file holds a time before year 1 in {}", policy.name(), policy.timeColumn());
+            return Optional.empty();
+        }
         return Optional.of("DELETE FROM %s WHERE %s < %s".formatted(
                 policy.quotedTable(), policy.quotedTimeColumn(), cutoffLiteral(type, at)));
     }
@@ -325,13 +343,18 @@ public class DuckLakeDataRetention implements DataRetention {
         }
     }
 
-    /** The live data files of the table, with the range of the time column each one holds. */
-    private static List<FileRange> fileRanges(Connection connection, RetentionPolicy policy, String type)
+    /**
+     * The live data files of the table that could hold rows below {@code cutoff} (or are without
+     * statistics), with the range of the time column each one holds.
+     */
+    private static List<FileRange> fileRanges(Connection connection, RetentionPolicy policy, String type, long cutoff)
             throws SQLException {
         String metadata = metadataCatalog(policy);
         String min = toMicrosSql(type, "s.min_value");
         String max = toMicrosSql(type, "s.max_value");
+        // Only files that can matter: a file from the cutoff on never moves the boundary or expires
         String sql = """
+                SELECT min_us, max_us, has_nulls, has_stats FROM (
                 SELECT %2$s AS min_us, %3$s AS max_us,
                        coalesce(s.null_count, 1) > 0 AS has_nulls,
                        s.data_file_id IS NOT NULL
@@ -347,12 +370,14 @@ public class DuckLakeDataRetention implements DataRetention {
                      ON s.data_file_id = d.data_file_id AND s.column_id = c.column_id
                 WHERE d.end_snapshot IS NULL AND lower(sc.schema_name) = lower(?)
                   AND lower(t.table_name) = lower(?) AND lower(c.column_name) = lower(?)
+                ) WHERE NOT has_stats OR min_us < ?
                 """.formatted(metadata, min, max);
         List<FileRange> files = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, policy.schema());
             statement.setString(2, policy.table());
             statement.setString(3, policy.timeColumn());
+            statement.setLong(4, cutoff);
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
                     long minUs = rs.getLong(1);
@@ -367,12 +392,17 @@ public class DuckLakeDataRetention implements DataRetention {
     }
 
     /**
-     * The highest boundary at or below {@code cutoff} that no file straddles, or empty when no file
-     * lies entirely below it. A file straddles a boundary when it holds rows on both sides of it.
-     * Lowering the boundary to such a file's minimum can make another file straddle, so it repeats;
-     * a straddling file only holds retention back until its newest row expires. A file holding NULLs,
-     * or without statistics, can never be dropped whole, so it is left out rather than hold
-     * retention back forever.
+     * The highest boundary at or below {@code cutoff} that no droppable file straddles, or empty when
+     * there is nothing to delete below it. A file straddles a boundary when it holds rows on both
+     * sides of it. Lowering the boundary to such a file's minimum can make another file straddle, so
+     * it repeats; a straddling file only holds retention back until its newest row expires. A file
+     * holding NULLs, or without statistics, can never be dropped whole, so it does not move the
+     * boundary rather than hold retention back forever.
+     *
+     * <p>There is something to delete when a droppable file lies entirely below the boundary, or a
+     * file holding NULLs has rows below it; those are deleted with a delete file. A file without
+     * statistics never starts a delete on its own: it could hold anything, and would be scanned in
+     * full every cycle.
      *
      * <p>One sweep in order of descending maximum: once a file's maximum is below the boundary, so
      * is every later file's, and a file passed over had its minimum at or above a boundary that has
@@ -393,7 +423,9 @@ public class DuckLakeDataRetention implements DataRetention {
             }
         }
         long at = boundary;
-        return droppable.stream().anyMatch(f -> f.max() < at) ? OptionalLong.of(boundary) : OptionalLong.empty();
+        boolean anyToDelete = droppable.stream().anyMatch(f -> f.max() < at)
+                || files.stream().anyMatch(f -> f.hasStats() && f.hasNulls() && f.min() != null && f.min() < at);
+        return anyToDelete ? OptionalLong.of(boundary) : OptionalLong.empty();
     }
 
     /** A statistics value of the column, as UTC epoch microseconds, or NULL if it does not parse. */

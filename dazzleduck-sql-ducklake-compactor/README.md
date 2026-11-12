@@ -131,9 +131,9 @@ data_retention {
 
 A retention is a lower bound, not an exact cut: the job deletes whole data files, and leaves the
 rest for a later cycle. For every table in the policy table whose catalog is a configured database
-(no other table is touched), it reads the min/max
-statistics of the time column for each live data file from the catalog, and lowers the cutoff to a
-file boundary, one that no file has rows on both sides of. It then runs:
+(no other table is touched), it reads the min/max statistics of the time column for each live data
+file from the catalog, and lowers the cutoff to a file boundary, one that no file has rows on both
+sides of. It then runs:
 
 ```sql
 DELETE FROM lake.main.logs WHERE ts < CAST('2026-09-01 00:00:00.000000' AS TIMESTAMP)
@@ -141,17 +141,24 @@ DELETE FROM lake.main.logs WHERE ts < CAST('2026-09-01 00:00:00.000000' AS TIMES
 
 That DELETE matches whole files, so DuckLake drops them without writing delete files or rewriting
 anything. The exception is a file holding NULLs or without statistics for the time column (below):
-its expired rows are deleted with a delete file, which housekeeping's delete-file rewrite cleans up. It reads only the time column of the files it drops; every other file is pruned by its
-statistics. No DELETE runs when no file lies entirely below the cutoff.
+its expired rows are deleted with a delete file, which housekeeping's delete-file rewrite cleans up.
+The DELETE reads the time column of the files it drops (and of those exceptions); every other file
+is pruned by its statistics. No DELETE runs when nothing lies below the boundary.
 
 - A file that straddles the cutoff holds back the files above its minimum until its newest row
   expires. Partitioning the table by time, for example by day, keeps files from straddling.
 - Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
   not move the boundary; its expired rows are deleted with a delete file.
 - A data file without statistics for the time column, such as one written before the column was
-  added, is treated the same way and logged: it could hold any time.
+  added, does not move the boundary either, and is logged. It could hold any time, so it never
+  starts a DELETE by itself, but a DELETE that runs for the table's other files covers it too.
+- Rows still inlined in the catalog (`data_inlining_row_limit` above 0) have no file statistics and
+  are only deleted by a DELETE that runs for the table's data files. Ingestion through
+  `ducklake_add_data_files` never inlines.
 - The statistics are read and the DELETE runs in one transaction, so a file committed meanwhile is
   never partly deleted; the commit conflicts instead, and the next cycle retries.
+- A failed table does not stop the others. When a cycle has a failure, the job checks that its
+  connection can still read the DuckLake catalog, and opens a new one next cycle if not.
 - `retention` is a whole number and a unit of at least seconds: `s`, `min`, `h`, `d`, `w`, or the
   unit spelled out (`30 days`, `90 minutes`). A bare number and `m` are rejected rather than read
   as milliseconds and minutes, as they would be in the config file.
@@ -166,7 +173,8 @@ statistics. No DELETE runs when no file lies entirely below the cutoff.
 Without the duckdb/ducklake#1895 fix, which the DuckLake patch has from `v1.5.6-dazzleduck.3`,
 every such DELETE conflicts with any concurrent insert into the table. Under continuous ingestion
 it then keeps failing and is only retried on the next cycle. With the fix it conflicts only with
-inserted files whose column statistics could hold rows below the boundary.
+inserted files whose column statistics could hold rows older than the cutoff: late data, older than
+the retention.
 
 The fix has two halves, and each runs in the process that commits second. The compactor's half
 covers an insert that commits while the retention DELETE is open. The other half covers a DELETE

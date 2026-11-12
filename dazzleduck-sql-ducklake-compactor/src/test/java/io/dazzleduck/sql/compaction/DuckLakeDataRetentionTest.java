@@ -186,9 +186,12 @@ class DuckLakeDataRetentionTest {
                 "lowering to 30 makes the 25-40 file straddle, so it drops again");
         assertTrue(DuckLakeDataRetention.fileBoundary(List.of(straddles, fresh), 100L).isEmpty(),
                 "no file lies entirely below the boundary");
+        assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
+                        List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L),
+                "a file with NULLs cannot be dropped whole, but its expired rows are still deleted");
         assertTrue(DuckLakeDataRetention.fileBoundary(
-                        List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L).isEmpty(),
-                "a file with NULLs cannot be dropped whole, so it alone does not start a delete");
+                        List.of(new DuckLakeDataRetention.FileRange(100L, 120L, true, true)), 100L).isEmpty(),
+                "nothing in it below the cutoff");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
                         List.of(expired, new DuckLakeDataRetention.FileRange(5L, 50L, true, true)), 100L),
                 "a file with NULLs does not move the boundary, or it would hold retention back forever");
@@ -204,6 +207,32 @@ class DuckLakeDataRetentionTest {
         assertTrue(DuckLakeDataRetention.fileBoundary(
                         List.of(new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L).isEmpty(),
                 "and is never counted as expired");
+    }
+
+    @Test
+    void expiredRowsAreDeletedWhenEveryFileHoldsNulls() throws Exception {
+        Path catalog = tmp.resolve("catalog.ducklake");
+        Path data = Files.createDirectories(tmp.resolve("data"));
+        run(catalog, data,
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+                "CREATE TABLE lake.main.sparse (id INTEGER, ts TIMESTAMP)",
+                "INSERT INTO lake.main.sparse VALUES (1, TIMESTAMP '2026-08-01'), (2, NULL)",
+                "INSERT INTO lake.main.sparse VALUES (3, TIMESTAMP '2026-11-10'), (4, NULL)",
+                "CREATE TABLE lake.main.retention_policy (table_name VARCHAR, time_column VARCHAR, retention VARCHAR)",
+                "INSERT INTO lake.main.retention_policy VALUES ('lake.main.sparse', 'ts', '30 days')");
+
+        CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
+        DataRetention.Outcome outcome;
+        try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
+                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+            outcome = retention.enforce(DB);
+        }
+
+        assertEquals(0, outcome.failedTables());
+        assertEquals(1, outcome.rowsDeleted(), "the August row, with a delete file");
+        assertEquals(3, count(catalog, data, "SELECT count(*) FROM lake.main.sparse"));
+        assertEquals(1, count(catalog, data,
+                "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file WHERE end_snapshot IS NULL"));
     }
 
     @Test
@@ -236,15 +265,18 @@ class DuckLakeDataRetentionTest {
     }
 
     @Test
-    void onlyErrorsANewConnectionCouldFixEvictIt() {
-        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
-                "TransactionContext Error: Failed to commit: Transaction conflict - attempting to delete from table")));
-        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
-                "Catalog Error: Table with name retention_policy does not exist!")));
-        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
-                "Binder Error: Referenced column \"no_such_column\" not found")));
-        assertTrue(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
-                "IO Error: Unable to connect to Postgres at localhost:5432")));
+    void aConnectionIsKeptWhileItCanReadTheCatalog() throws Exception {
+        Path catalog = tmp.resolve("catalog.ducklake");
+        Path data = Files.createDirectories(tmp.resolve("data"));
+        run(catalog, data, "CREATE TABLE lake.main.t (ts TIMESTAMP)");
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:");
+             Statement s = c.createStatement()) {
+            s.execute("LOAD ducklake");
+            s.execute(attach(catalog, data));
+            assertTrue(DuckLakeDataRetention.catalogReachable(c, DB));
+            s.execute("DETACH lake");
+            assertFalse(DuckLakeDataRetention.catalogReachable(c, DB));
+        }
     }
 
     @Test
@@ -261,6 +293,14 @@ class DuckLakeDataRetentionTest {
                 "99999999999999999999 days", "200000000 d", "60000 weeks")) {
             assertThrows(IllegalArgumentException.class, () -> RetentionPolicy.parse("a.b.c", "ts", misread), misread);
         }
+    }
+
+    @Test
+    void literalsKeepTheYearsSign() {
+        assertEquals("CAST('0001-01-01 00:00:00.000000' AS TIMESTAMP)",
+                DuckLakeDataRetention.cutoffLiteral("TIMESTAMP", DuckLakeDataRetention.EARLIEST_BOUNDARY));
+        assertEquals("DATE '-0001-06-01'",
+                DuckLakeDataRetention.cutoffLiteral("DATE", Instant.parse("-0001-06-01T00:00:00Z")));
     }
 
     @Test
