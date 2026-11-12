@@ -98,16 +98,18 @@ public class DuckLakeDataRetention implements DataRetention {
         try {
             policies = readPolicies(connection, database);
         } catch (SQLException e) {
-            // The table may be missing, or the connection broken (catalog backend restarted): open a
-            // new one next cycle rather than failing on the same dead connection until a restart.
-            connections.evict(database, connection);
+            // The connection may be broken (catalog backend restarted): open a new one next cycle
+            // rather than fail on the same dead connection until a restart.
+            if (mayBeBroken(e)) {
+                connections.evict(database, connection);
+            }
             throw e;
         }
         Instant now = clock.instant();
         int tables = 0;
         int failed = 0;
         long rowsDeleted = 0;
-        boolean sqlFailure = false;
+        boolean broken = false;
         for (RetentionPolicy policy : policies) {
             if (policy.unlimited()) {
                 continue;
@@ -117,22 +119,35 @@ public class DuckLakeDataRetention implements DataRetention {
             try {
                 long deleted = deleteExpired(connection, policy, now.minus(policy.retention()));
                 rowsDeleted += deleted;
-                metrics.addRowsDeleted(database, policy.name(), deleted);
-                logger.info("Retention deleted {} row(s) older than {} from {}", deleted, policy.retention(), policy.name());
+                // one series per table however the policy row spells it
+                metrics.addRowsDeleted(database, policy.name().toLowerCase(Locale.ROOT), deleted);
+                if (deleted > 0) {
+                    logger.info("Retention deleted {} row(s) older than {} from {}", deleted, policy.retention(), policy.name());
+                }
             } catch (Exception e) {
                 failed++;
-                sqlFailure |= e instanceof SQLException;
+                broken |= e instanceof SQLException sql && mayBeBroken(sql);
                 logger.error("Retention failed for {}, the other tables still run", policy.name(), e);
             } finally {
                 metrics.stopTimer(sample, "retention", "delete", database);
             }
         }
-        if (sqlFailure) {
-            // Most likely a conflict, but it may be a broken connection to the DuckLake catalog
-            // while the policy table, elsewhere, is still readable: start fresh next cycle.
+        if (broken) {
+            // The policy table may live elsewhere and still be readable while the DuckLake
+            // catalog's connection is dead: start fresh next cycle.
             connections.evict(database, connection);
         }
         return new Outcome(tables, rowsDeleted, failed);
+    }
+
+    /**
+     * False for errors a new connection would not fix: a transaction conflict (retried next cycle),
+     * or a missing table or column. Reconnecting reruns the whole startup script.
+     */
+    static boolean mayBeBroken(SQLException e) {
+        String message = String.valueOf(e.getMessage());
+        return !(message.contains("Transaction conflict") || message.contains("Catalog Error")
+                || message.contains("Binder Error") || message.contains("Parser Error"));
     }
 
     /**
@@ -150,8 +165,11 @@ public class DuckLakeDataRetention implements DataRetention {
                 try {
                     policy = RetentionPolicy.parse(rs.getString(1), rs.getString(2), rs.getString(3));
                 } catch (IllegalArgumentException e) {
-                    logger.error("Skipping retention policy row ({}, {}, {}): {}",
-                            rs.getString(1), rs.getString(2), rs.getString(3), e.getMessage());
+                    // every database's cycle reads the row; one of them reports it
+                    if (database.equals(databases.get(0))) {
+                        logger.error("Skipping retention policy row ({}, {}, {}): {}",
+                                rs.getString(1), rs.getString(2), rs.getString(3), e.getMessage());
+                    }
                     continue;
                 }
                 // DuckDB names are case-insensitive
@@ -185,11 +203,13 @@ public class DuckLakeDataRetention implements DataRetention {
 
     /** Deletes the policy's whole expired files in one transaction; returns the rows deleted. */
     static long deleteExpired(Connection connection, RetentionPolicy policy, Instant cutoff) throws SQLException {
+        // Before the transaction, whose first read must be of the table (see deleteInTransaction)
+        String type = columnType(connection, policy);
         // BEGIN/COMMIT statements rather than setAutoCommit(false): the transaction must end with
         // this call, not stay open on a cached connection until the next cycle.
         execute(connection, "BEGIN TRANSACTION");
         try {
-            long deleted = deleteInTransaction(connection, policy, cutoff);
+            long deleted = deleteInTransaction(connection, policy, type, cutoff, () -> { });
             execute(connection, "COMMIT");
             return deleted;
         } catch (SQLException | RuntimeException e) {
@@ -204,21 +224,27 @@ public class DuckLakeDataRetention implements DataRetention {
     }
 
     /**
-     * Reads the file statistics and runs the DELETE, in the caller's transaction. Looking up the
-     * column's type goes through the DuckLake catalog, which fixes the transaction's snapshot before
+     * Reads the file statistics and runs the DELETE, in a transaction the caller has just begun.
+     * Its first statement reads the table, which fixes the transaction's DuckLake snapshot before
      * the statistics are read: they show every file the DELETE sees (and perhaps newer ones, which
      * only lower the boundary), and a file committed later makes the commit conflict if it could
-     * hold rows below the boundary, rather than be partly deleted.
+     * hold rows below the cutoff, rather than be partly deleted.
+     *
+     * <p>That read is filtered like the DELETE: DuckLake scopes a transaction's conflict check by
+     * the filters of everything it read, and an unfiltered read - even {@code DESCRIBE}, or a
+     * filter such as {@code IS NULL} - makes the DELETE conflict with every concurrent insert.
+     *
+     * @param type         the time column's type, from {@link #columnType}
+     * @param beforeDelete for tests: runs between reading the statistics and the DELETE
      */
-    static long deleteInTransaction(Connection connection, RetentionPolicy policy, Instant cutoff)
-            throws SQLException {
-        return deleteInTransaction(connection, policy, cutoff, () -> { });
-    }
-
-    /** For tests: {@code beforeDelete} runs between reading the statistics and the DELETE. */
-    static long deleteInTransaction(Connection connection, RetentionPolicy policy, Instant cutoff, Runnable beforeDelete)
-            throws SQLException {
-        Optional<String> sql = deleteStatement(connection, policy, cutoff);
+    static long deleteInTransaction(Connection connection, RetentionPolicy policy, String type, Instant cutoff,
+                                    Runnable beforeDelete) throws SQLException {
+        String pin = "SELECT 1 FROM %s WHERE %s < %s LIMIT 1".formatted(policy.quotedTable(), policy.quotedTimeColumn(),
+                cutoffLiteral(type, Instant.EPOCH.plus(toMicros(type, cutoff), ChronoUnit.MICROS)));
+        try (Statement statement = connection.createStatement(); ResultSet ignored = statement.executeQuery(pin)) {
+            // only fixes the snapshot
+        }
+        Optional<String> sql = deleteStatement(connection, policy, type, cutoff);
         if (sql.isEmpty()) {
             return 0;
         }
@@ -240,10 +266,8 @@ public class DuckLakeDataRetention implements DataRetention {
      * The DELETE that drops the table's data files entirely older than {@code cutoff}, or empty when
      * there are none.
      */
-    static Optional<String> deleteStatement(Connection connection, RetentionPolicy policy, Instant cutoff)
+    static Optional<String> deleteStatement(Connection connection, RetentionPolicy policy, String type, Instant cutoff)
             throws SQLException {
-        // first: it fixes the DuckLake snapshot (see deleteInTransaction)
-        String type = columnType(connection, policy);
         List<FileRange> files = fileRanges(connection, policy, type);
         long unknown = files.stream().filter(f -> !f.hasStats()).count();
         if (unknown > 0) {
@@ -260,22 +284,36 @@ public class DuckLakeDataRetention implements DataRetention {
                 policy.quotedTable(), policy.quotedTimeColumn(), cutoffLiteral(type, at)));
     }
 
-    private static String columnType(Connection connection, RetentionPolicy policy) throws SQLException {
-        // Case-insensitive, as DuckDB resolves the same names in the DELETE
-        String sql = "SELECT data_type FROM duckdb_columns() WHERE lower(database_name) = lower(?) "
-                + "AND lower(schema_name) = lower(?) AND lower(table_name) = lower(?) AND lower(column_name) = lower(?)";
+    /**
+     * The time column's type, as DuckDB names it, from the DuckLake metadata rather than
+     * {@code duckdb_columns()}, which would list every attached catalog.
+     */
+    static String columnType(Connection connection, RetentionPolicy policy) throws SQLException {
+        String sql = """
+                SELECT c.column_type
+                FROM %1$s.ducklake_column c
+                JOIN %1$s.ducklake_table t ON t.table_id = c.table_id AND t.end_snapshot IS NULL
+                JOIN %1$s.ducklake_schema sc ON sc.schema_id = t.schema_id AND sc.end_snapshot IS NULL
+                WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL AND lower(sc.schema_name) = lower(?)
+                  AND lower(t.table_name) = lower(?) AND lower(c.column_name) = lower(?)
+                """.formatted(metadataCatalog(policy));
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, policy.catalog());
-            statement.setString(2, policy.schema());
-            statement.setString(3, policy.table());
-            statement.setString(4, policy.timeColumn());
+            statement.setString(1, policy.schema());
+            statement.setString(2, policy.table());
+            statement.setString(3, policy.timeColumn());
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) {
                     throw new IllegalArgumentException("%s has no column %s".formatted(policy.name(), policy.timeColumn()));
                 }
-                return rs.getString(1);
+                // DuckLake's type names; timestamptz is the only one DuckDB spells differently
+                String type = rs.getString(1).toUpperCase(Locale.ROOT);
+                return type.equals("TIMESTAMPTZ") ? "TIMESTAMP WITH TIME ZONE" : type;
             }
         }
+    }
+
+    private static String metadataCatalog(RetentionPolicy policy) {
+        return "\"__ducklake_metadata_" + policy.catalog() + "\"";
     }
 
     /** The time-column range of one live data file, in UTC epoch microseconds. */
@@ -290,7 +328,7 @@ public class DuckLakeDataRetention implements DataRetention {
     /** The live data files of the table, with the range of the time column each one holds. */
     private static List<FileRange> fileRanges(Connection connection, RetentionPolicy policy, String type)
             throws SQLException {
-        String metadata = "\"__ducklake_metadata_" + policy.catalog() + "\"";
+        String metadata = metadataCatalog(policy);
         String min = toMicrosSql(type, "s.min_value");
         String max = toMicrosSql(type, "s.max_value");
         String sql = """

@@ -95,7 +95,7 @@ class RetentionConcurrentIngestionTest {
             int recent = 60 * 24;
             addFile(ingest, recent);
 
-            execute(retention, "BEGIN");
+            begin(retention);
             assertEquals(3 * ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent)));
             // Ingestion keeps landing data while the DELETE is uncommitted.
             addFile(ingest, recent + 1);
@@ -138,7 +138,7 @@ class RetentionConcurrentIngestionTest {
             int recent = 60 * 24;
             addFile(ingest, recent);
 
-            execute(retention, "BEGIN");
+            begin(retention);
             assertEquals(2 * ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent)));
             addFile(ingest, 12);
             SQLException conflict = assertThrows(SQLException.class, () -> execute(retention, "COMMIT"));
@@ -166,7 +166,7 @@ class RetentionConcurrentIngestionTest {
             int recent = 60 * 24;
             addFile(ingest, recent);
 
-            execute(retention, "BEGIN");
+            begin(retention);
             assertEquals(ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent), () -> {
                 try {
                     addRange(ingest, 24, recent + 24);
@@ -302,7 +302,15 @@ class RetentionConcurrentIngestionTest {
         return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff);
     }
 
-    /** Retention's delete, in a transaction the caller has begun and commits. */
+    /** BEGIN, as the job does: the type is looked up first, outside the transaction. */
+    private static void begin(Connection connection) throws SQLException {
+        type = DuckLakeDataRetention.columnType(connection, POLICY);
+        execute(connection, "BEGIN");
+    }
+
+    static String type;
+
+    /** Retention's delete, in a transaction begun with {@link #begin}; the caller commits. */
     private static long deleteInOpenTransaction(Connection connection, Instant cutoff) throws SQLException {
         return deleteInOpenTransaction(connection, cutoff, () -> { });
     }
@@ -310,7 +318,7 @@ class RetentionConcurrentIngestionTest {
     /** The same, running {@code beforeDelete} between the statistics read and the DELETE. */
     private static long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
             throws SQLException {
-        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, cutoff, beforeDelete);
+        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, beforeDelete);
     }
 
     private static Instant cutoffAtHour(int hour) {

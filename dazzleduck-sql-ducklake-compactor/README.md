@@ -129,8 +129,9 @@ data_retention {
 }
 ```
 
-A retention is a lower bound, not an exact cut: the job deletes whole data files only, and leaves
-the rest for a later cycle. For every table of a configured database it reads the min/max
+A retention is a lower bound, not an exact cut: the job deletes whole data files, and leaves the
+rest for a later cycle. For every table in the policy table whose catalog is a configured database
+(no other table is touched), it reads the min/max
 statistics of the time column for each live data file from the catalog, and lowers the cutoff to a
 file boundary, one that no file has rows on both sides of. It then runs:
 
@@ -139,7 +140,8 @@ DELETE FROM lake.main.logs WHERE ts < CAST('2026-09-01 00:00:00.000000' AS TIMES
 ```
 
 That DELETE matches whole files, so DuckLake drops them without writing delete files or rewriting
-anything. It reads only the time column of the files it drops; every other file is pruned by its
+anything. The exception is a file holding NULLs or without statistics for the time column (below):
+its expired rows are deleted with a delete file, which housekeeping's delete-file rewrite cleans up. It reads only the time column of the files it drops; every other file is pruned by its
 statistics. No DELETE runs when no file lies entirely below the cutoff.
 
 - A file that straddles the cutoff holds back the files above its minimum until its newest row
@@ -165,6 +167,15 @@ Without the duckdb/ducklake#1895 fix, which the DuckLake patch has from `v1.5.6-
 every such DELETE conflicts with any concurrent insert into the table. Under continuous ingestion
 it then keeps failing and is only retried on the next cycle. With the fix it conflicts only with
 inserted files whose column statistics could hold rows below the boundary.
+
+The fix has two halves, and each runs in the process that commits second. The compactor's half
+covers an insert that commits while the retention DELETE is open. The other half covers a DELETE
+that commits while an insert is open, and runs in the ingesting process: the SQL server or the
+OTel collector. Those load stock DuckLake unless their image bakes in the patched extension too.
+With stock DuckLake there, an ingestion batch whose registration is open when a retention DELETE
+on the same table commits fails with a transaction conflict and is reported to the client as
+failed, which must resend it. Registration takes milliseconds and retention commits once per table
+per cycle, so this is rare but not impossible.
 
 ### Connections
 

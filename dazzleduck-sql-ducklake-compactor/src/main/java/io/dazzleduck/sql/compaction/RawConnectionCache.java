@@ -9,8 +9,8 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * One raw DuckDB instance per database (see {@link RawConnections}), opened on first use and kept.
- * Keyed by database rather than shared: different databases' jobs run concurrently, and a JDBC
+ * One raw DuckDB instance per key (see {@link RawConnections}), opened on first use and kept. Keyed
+ * (by database, or database and tier) rather than shared: those jobs run concurrently, and a JDBC
  * Connection is not safe for use by more than one thread at a time.
  */
 final class RawConnectionCache implements AutoCloseable {
@@ -29,29 +29,34 @@ final class RawConnectionCache implements AutoCloseable {
         this.purpose = purpose;
     }
 
-    Connection get(String database) throws SQLException {
-        Connection existing = connections.get(database);
+    /** The key's connection, opened with this cache's connection settings. */
+    Connection get(String key) throws SQLException {
+        return get(key, connectionSettings);
+    }
+
+    /** The key's connection, opened with {@code settings} if it is not open yet. */
+    Connection get(String key, List<String> settings) throws SQLException {
+        Connection existing = connections.get(key);
         if (existing != null) {
             return existing;
         }
         synchronized (this) {
-            existing = connections.get(database);
+            existing = connections.get(key);
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, connectionSettings);
-            connections.put(database, opened);
+            Connection opened = RawConnections.open(startupScript, settings);
+            connections.put(key, opened);
             return opened;
         }
     }
 
     /**
-     * Closes the database's connection, if it is still {@code connection}, so the next
-     * {@link #get} opens a new one: for a connection that may be broken, e.g. after the catalog
-     * backend restarted.
+     * Closes the key's connection, if it is still {@code connection}, so the next {@link #get}
+     * opens a new one: for a connection that may be broken, e.g. after the catalog backend restarted.
      */
-    void evict(String database, Connection connection) {
-        if (connections.remove(database, connection)) {
+    void evict(String key, Connection connection) {
+        if (connections.remove(key, connection)) {
             closeQuietly(connection);
         }
     }

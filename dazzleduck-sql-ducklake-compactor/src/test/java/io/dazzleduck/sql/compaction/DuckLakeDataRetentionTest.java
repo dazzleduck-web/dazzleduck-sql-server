@@ -236,6 +236,18 @@ class DuckLakeDataRetentionTest {
     }
 
     @Test
+    void onlyErrorsANewConnectionCouldFixEvictIt() {
+        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
+                "TransactionContext Error: Failed to commit: Transaction conflict - attempting to delete from table")));
+        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
+                "Catalog Error: Table with name retention_policy does not exist!")));
+        assertFalse(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
+                "Binder Error: Referenced column \"no_such_column\" not found")));
+        assertTrue(DuckLakeDataRetention.mayBeBroken(new java.sql.SQLException(
+                "IO Error: Unable to connect to Postgres at localhost:5432")));
+    }
+
+    @Test
     void retentionMustSpellOutAUnit() {
         assertEquals(Duration.ofDays(30), RetentionPolicy.parse("a.b.c", "ts", "30 days").retention());
         assertEquals(Duration.ofHours(12), RetentionPolicy.parse("a.b.c", "ts", "12h").retention());
@@ -243,9 +255,10 @@ class DuckLakeDataRetentionTest {
         assertEquals(Duration.ofMinutes(90), RetentionPolicy.parse("a.b.c", "ts", "90 min").retention());
         assertEquals(Duration.ofSeconds(45), RetentionPolicy.parse("a.b.c", "ts", "45S").retention());
         assertTrue(RetentionPolicy.parse("a.b.c", "ts", " Unlimited ").unlimited());
+        assertEquals(Duration.ofDays(36_500), RetentionPolicy.parse("a.b.c", "ts", "36500 days").retention());
         // a bare number is milliseconds to HOCON, 'm' minutes; both would delete nearly everything
         for (String misread : List.of("30", "6m", "500ms", "10us", "0 days", "-1 days", "1.5 days", "30 months",
-                "99999999999999999999 days")) {
+                "99999999999999999999 days", "200000000 d", "60000 weeks")) {
             assertThrows(IllegalArgumentException.class, () -> RetentionPolicy.parse("a.b.c", "ts", misread), misread);
         }
     }

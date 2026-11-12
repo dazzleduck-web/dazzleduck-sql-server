@@ -23,7 +23,6 @@ public class CompactionService implements Closeable {
     private static final Logger logger = LoggerFactory.getLogger(CompactionService.class);
 
     private final CompactionConfig config;
-    private final String startupScript;
     private final TierCompactor tierCompactor;
     private final Housekeeper housekeeper;
     // null when data retention is off
@@ -47,7 +46,7 @@ public class CompactionService implements Closeable {
     // not database alone: different tiers for the same database run concurrently by design, and a
     // plain JDBC Connection is not safe for concurrent use by more than one thread — the same reason
     // DuckDbTierCompactor/DuckLakeHousekeeper key their own connections this way.
-    private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
+    private final RawConnectionCache countingConnections;
 
     /** Synthetic "tier" key for the off-control-path whole-catalog file-count refresh connection. */
     private static final String FILE_COUNT_REFRESH_KEY = "__filecount_refresh__";
@@ -80,7 +79,7 @@ public class CompactionService implements Closeable {
             logger.warn("data_retention is enabled but no DataRetention was given, so retention will not run");
         }
         this.config = config;
-        this.startupScript = startupScript;
+        this.countingConnections = new RawConnectionCache(startupScript, List.of(), "counting");
         this.tierCompactor = tierCompactor;
         this.housekeeper = housekeeper;
         this.dataRetention = dataRetention;
@@ -324,20 +323,7 @@ public class CompactionService implements Closeable {
     }
 
     private Connection countingConnectionFor(String database, String tierName) throws SQLException {
-        String key = runKey(database, tierName);
-        Connection existing = countingConnections.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        synchronized (this) {
-            existing = countingConnections.get(key);
-            if (existing != null) {
-                return existing;
-            }
-            Connection opened = RawConnections.open(startupScript, List.of());
-            countingConnections.put(key, opened);
-            return opened;
-        }
+        return countingConnections.get(runKey(database, tierName));
     }
 
     /**
@@ -388,13 +374,7 @@ public class CompactionService implements Closeable {
         if (dataRetention != null) {
             closeQuietly(dataRetention);
         }
-        countingConnections.values().forEach(connection -> {
-            try {
-                connection.close();
-            } catch (SQLException e) {
-                logger.warn("Failed to close a counting connection", e);
-            }
-        });
+        countingConnections.close();
         logger.info("Compaction service stopped");
     }
 

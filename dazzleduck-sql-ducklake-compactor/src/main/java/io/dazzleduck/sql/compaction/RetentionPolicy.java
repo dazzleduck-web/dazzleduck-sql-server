@@ -21,6 +21,8 @@ record RetentionPolicy(String catalog, String schema, String table, String timeC
     /** Retention values that keep a table's rows forever. */
     private static final String UNLIMITED = "unlimited";
 
+    private static final Duration MAX_RETENTION = ChronoUnit.YEARS.getDuration().multipliedBy(1000);
+
     private static final Pattern DURATION = Pattern.compile("(\\d+)\\s*([a-z]+)");
 
     private static final Map<String, ChronoUnit> UNITS = Map.ofEntries(
@@ -80,11 +82,18 @@ record RetentionPolicy(String catalog, String schema, String table, String timeC
         if (amount <= 0) {
             throw new IllegalArgumentException("retention must be positive, got '%s'".formatted(value));
         }
+        Duration duration;
         try {
-            return unit.getDuration().multipliedBy(amount);
+            duration = unit.getDuration().multipliedBy(amount);
         } catch (ArithmeticException e) {
-            throw new IllegalArgumentException("retention is too long, got '%s'".formatted(value), e);
+            duration = null;
         }
+        // now() - retention must stay a representable instant and a microsecond count
+        if (duration == null || duration.compareTo(MAX_RETENTION) > 0) {
+            throw new IllegalArgumentException(
+                    "retention is longer than 1000 years, use 'unlimited', got '%s'".formatted(value));
+        }
+        return duration;
     }
 
     private static String identifier(String field, String value) {
