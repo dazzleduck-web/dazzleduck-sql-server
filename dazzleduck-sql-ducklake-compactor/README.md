@@ -167,6 +167,9 @@ runs no DELETE when none does.
   added, does not move the boundary either, and is logged. Its expired rows are deleted with a
   delete file.
 - Rows still inlined in the catalog (`data_inlining_row_limit` above 0) are deleted too.
+- Attach the catalog with `DATA_INLINING_ROW_LIMIT 0`. Otherwise the rows retention deletes from a
+  file it cannot drop whole (one holding NULLs or without statistics) are recorded as inlined
+  deletes in the catalog database instead of a delete file.
 - Files holding NULLs or without statistics keep their statistics after their expired rows are
   deleted, so each cycle's check for a row older than the boundary scans them until housekeeping's
   delete-file rewrite replaces them.

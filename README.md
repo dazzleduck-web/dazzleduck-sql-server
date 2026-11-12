@@ -542,7 +542,7 @@ configure `ingestion_queue_table_mapping` entries:
 | `table` | Yes | Target table name |
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
 | `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
-| `additional_parameters` | No | Extra key/value pairs. `watermark_*` keys are rejected: ingestion watermarks were removed |
+| `additional_parameters` | No | Reserved for per-queue extensions; no key is read today. `watermark_*` keys fail startup: ingestion watermarks were removed |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
@@ -668,8 +668,8 @@ A batch's files are registered with `ducklake_add_data_files` in one transaction
 commits meanwhile, such as the compactor's data retention job's. The registration is then retried in
 a new transaction, up to 5 attempts with a short jittered backoff, instead of failing the batch back
 to the client. The conflict is decided before DuckLake writes anything, so nothing of the failed
-attempt was registered and the same files are registered again. When the attempts run out, the batch fails as not registered, so its files are
-deleted and the client may resend it.
+attempt was registered and the same files are registered again. When the attempts run out, the batch
+fails as not registered, so its files are deleted and the client may resend it.
 
 Only a conflict with a concurrent DELETE is retried. A conflict with an ALTER or DROP of the table is
 not, since registering the same files under a changed schema could silently drop columns, and any

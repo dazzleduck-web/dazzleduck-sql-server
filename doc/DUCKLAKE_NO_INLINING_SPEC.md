@@ -1,10 +1,16 @@
 # DuckLake Data Inlining Must Be Off — Design Specification
 
-Status: **superseded.** Ingestion watermarks were removed (Task 7 of
-`doc/DUCKDB_2_UPGRADE_PLAN.md`), and the watermark tables were the only tables the collector writes
-with SQL, so neither the rule nor its startup check has anything left to guard; the check over the
-watermark tables was removed with them. The measurements below, of where inlining comes from and
-that it covers deletes, stay as reference for any later change that writes DuckLake tables with SQL.
+Status: **superseded for ingestion; the rule still matters for retention.** Ingestion watermarks
+were removed (Task 7 of `doc/DUCKDB_2_UPGRADE_PLAN.md`). Their tables were the only ones the
+collector writes with SQL, so the startup check over them was removed with them, and nothing on the
+ingestion path is inlinable: registering a file never is.
+
+What this spec measured still applies to the compactor's data retention job, which runs `DELETE` on
+ingested tables. Inlining covers deletes: at the default limit, deleting a few rows of a Parquet file
+puts them in the catalog's `ducklake_inlined_delete_<n>` tables instead of a delete file. Retention
+drops whole files where it can, which writes neither, but the rows it deletes from a file holding
+NULL times, or without statistics, go to the catalog. Attach catalogs retention runs against with
+`DATA_INLINING_ROW_LIMIT 0`; no check enforces it today.
 
 Earlier status: accepted; partly implemented. The open questions were settled (see the last section):
 the collector refuses to start, the watermark's `INSERT` becomes a write-then-register, and its

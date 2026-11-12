@@ -580,8 +580,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
              var stmt = conn.createStatement()) {
 
             // The queue's session variables, before anything reads the relation: the transformation
-            // inside it, and so the COPY, may reference them with getvariable(). ConnectionPool hands out a duplicate per use, so these are
-            // scoped to this write and cannot leak into another queue's connection.
+            // inside it, and so the COPY, may reference them with getvariable(). ConnectionPool hands
+            // out a duplicate per use, so these are scoped to this write and cannot leak into another
+            // queue's connection.
             applyVariables(stmt);
 
             // Set up cancellation hook

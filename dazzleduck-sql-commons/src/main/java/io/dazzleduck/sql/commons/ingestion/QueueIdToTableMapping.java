@@ -1,6 +1,5 @@
 package io.dazzleduck.sql.commons.ingestion;
 
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -79,25 +78,6 @@ public record QueueIdToTableMapping(
             throw new IllegalArgumentException(
                     "Queue '%s': 'num_partitions' > 1 requires a non-blank 'partition_expression'"
                             .formatted(ingestionQueue));
-        }
-        rejectWatermarkKeys(ingestionQueue, additionalParameters);
-    }
-
-    /**
-     * Ingestion watermarks were removed. A mapping that still configures one fails at config load
-     * rather than have its watermark table silently stop receiving rows.
-     */
-    static void rejectWatermarkKeys(String ingestionQueue, Map<String, String> additionalParameters) {
-        if (additionalParameters == null) {
-            return;
-        }
-        List<String> keys = additionalParameters.keySet().stream()
-                .filter(key -> key.startsWith("watermark_"))
-                .sorted()
-                .toList();
-        if (!keys.isEmpty()) {
-            throw new IllegalArgumentException(("Queue '%s': ingestion watermarks are no longer supported; "
-                    + "remove %s from additional_parameters").formatted(ingestionQueue, keys));
         }
     }
 
