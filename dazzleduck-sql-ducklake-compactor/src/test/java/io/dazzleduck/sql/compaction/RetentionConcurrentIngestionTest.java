@@ -315,20 +315,21 @@ class RetentionConcurrentIngestionTest {
     }
 
     /** BEGIN, as the job does: the type is looked up first, outside the transaction. */
-    private static void begin(Connection connection) throws SQLException {
+    private void begin(Connection connection) throws SQLException {
         type = DuckLakeDataRetention.columnType(connection, POLICY);
         execute(connection, "BEGIN");
     }
 
-    static String type;
+    /** The time column's type, looked up by {@link #begin}. */
+    String type;
 
     /** Retention's delete, in a transaction begun with {@link #begin}; the caller commits. */
-    private static long deleteInOpenTransaction(Connection connection, Instant cutoff) throws SQLException {
+    private long deleteInOpenTransaction(Connection connection, Instant cutoff) throws SQLException {
         return deleteInOpenTransaction(connection, cutoff, () -> { });
     }
 
     /** The same, running {@code beforeDelete} between the statistics read and the DELETE. */
-    private static long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
+    private long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
             throws SQLException {
         return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, beforeDelete);
     }

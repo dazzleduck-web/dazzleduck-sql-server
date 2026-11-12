@@ -67,6 +67,9 @@ compaction_tiers {
 }
 ```
 
+The names `housekeeping` and `retention` (in any case) are reserved: they tag the metrics of those
+jobs, so a tier with either name is refused at startup.
+
 Tiers are **keyed by name**, and the key is the tier's name — there is no `name` field. That is
 what makes a tier individually overridable: HOCON merges objects field-by-field but replaces lists
 wholesale, so
@@ -164,6 +167,9 @@ runs no DELETE when none does.
 - `retention` is a whole number and a unit of at least seconds: `s`, `min`, `h`, `d`, `w`, or the
   unit spelled out (`30 days`, `90 minutes`). A bare number and `m` are rejected rather than read
   as milliseconds and minutes, as they would be in the config file.
+- The statistics are read from `__ducklake_metadata_<catalog>`, the name DuckLake gives the metadata
+  catalog by default, as the rest of the compactor does; a catalog attached with `METADATA_CATALOG`
+  is not supported.
 - Rows that cannot be used (a name that is not a plain identifier, an unknown duration) are logged
   and skipped. A table that fails, such as one without the named column, does not stop the others.
 - The dropped files are removed from storage by the regular housekeeping job once they fall out of

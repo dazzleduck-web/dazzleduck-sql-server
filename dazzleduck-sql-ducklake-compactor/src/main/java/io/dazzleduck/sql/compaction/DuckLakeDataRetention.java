@@ -67,6 +67,8 @@ public class DuckLakeDataRetention implements DataRetention {
             DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC);
 
     /** The earliest boundary written as a literal; a lower one, from a corrupt time, skips the table. */
+    private static final java.util.Set<String> WARNED_NO_STATISTICS = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     static final Instant EARLIEST_BOUNDARY = Instant.parse("0001-01-01T00:00:00Z");
 
     private final List<String> databases;
@@ -265,7 +267,8 @@ public class DuckLakeDataRetention implements DataRetention {
         }
         List<FileRange> files = fileRanges(connection, policy, type, cutoffMicros);
         long unknown = files.stream().filter(f -> !f.hasStats()).count();
-        if (unknown > 0) {
+        if (unknown > 0 && WARNED_NO_STATISTICS.add(policy.name().toLowerCase(Locale.ROOT))) {
+            // once per table and process: those files keep lacking statistics until rewritten
             logger.warn("Retention for {}: {} data file(s) have no statistics for {}, so they are never dropped whole",
                     policy.name(), unknown, policy.timeColumn());
         }
@@ -333,7 +336,9 @@ public class DuckLakeDataRetention implements DataRetention {
                 }
                 // DuckLake's type names; timestamptz is the only one DuckDB spells differently
                 String type = rs.getString(1).toUpperCase(Locale.ROOT);
-                return type.equals("TIMESTAMPTZ") ? "TIMESTAMP WITH TIME ZONE" : type;
+                type = type.equals("TIMESTAMPTZ") ? "TIMESTAMP WITH TIME ZONE" : type;
+                toMicrosSql(type, "NULL"); // rejects a type other than DATE or TIMESTAMP, before any transaction
+                return type;
             }
         }
     }
@@ -363,12 +368,14 @@ public class DuckLakeDataRetention implements DataRetention {
         // Only files that can matter: a file from the cutoff on never moves the boundary or expires
         String sql = """
                 SELECT min_us, max_us, has_nulls, has_stats FROM (
-                SELECT %2$s AS min_us, %3$s AS max_us,
+                SELECT min_us, max_us, has_nulls,
+                       has_row AND (min_value IS NULL) = (max_value IS NULL)
+                         AND (min_value IS NULL OR min_us IS NOT NULL)
+                         AND (max_value IS NULL OR max_us IS NOT NULL) AS has_stats
+                FROM (
+                SELECT %2$s AS min_us, %3$s AS max_us, s.min_value, s.max_value,
                        coalesce(s.null_count, 1) > 0 AS has_nulls,
-                       s.data_file_id IS NOT NULL
-                         AND (s.min_value IS NULL) = (s.max_value IS NULL)
-                         AND (s.min_value IS NULL OR %2$s IS NOT NULL)
-                         AND (s.max_value IS NULL OR %3$s IS NOT NULL) AS has_stats
+                       s.data_file_id IS NOT NULL AS has_row
                 FROM %1$s.ducklake_data_file d
                 JOIN %1$s.ducklake_table t ON t.table_id = d.table_id AND t.end_snapshot IS NULL
                 JOIN %1$s.ducklake_schema sc ON sc.schema_id = t.schema_id AND sc.end_snapshot IS NULL
@@ -378,7 +385,7 @@ public class DuckLakeDataRetention implements DataRetention {
                      ON s.data_file_id = d.data_file_id AND s.column_id = c.column_id
                 WHERE d.end_snapshot IS NULL AND lower(sc.schema_name) = lower(?)
                   AND lower(t.table_name) = lower(?) AND lower(c.column_name) = lower(?)
-                ) WHERE NOT has_stats OR min_us < ?
+                )) WHERE NOT has_stats OR min_us < ?
                 """.formatted(metadata, min, max);
         List<FileRange> files = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {

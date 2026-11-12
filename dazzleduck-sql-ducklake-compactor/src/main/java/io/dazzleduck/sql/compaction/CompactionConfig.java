@@ -207,7 +207,8 @@ public record CompactionConfig(
                 throw new IllegalArgumentException("Duplicate compaction tier name: " + tier.name());
             }
             // a tier's name is also its metrics' type tag, which these jobs use
-            if (tier.name().equals(CompactionState.HOUSEKEEPING_KIND) || tier.name().equals(CompactionState.RETENTION_KIND)) {
+            if (tier.name().equalsIgnoreCase(CompactionState.HOUSEKEEPING_KIND)
+                    || tier.name().equalsIgnoreCase(CompactionState.RETENTION_KIND)) {
                 throw new IllegalArgumentException("Compaction tier name '%s' is reserved".formatted(tier.name()));
             }
             if (tier.enabled() && tier.maxFileSize() <= tier.minFileSize()) {
