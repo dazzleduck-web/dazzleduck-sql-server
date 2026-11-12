@@ -284,21 +284,6 @@ class DuckLakeDataRetentionTest {
     }
 
     @Test
-    void aConnectionIsKeptWhileItCanReadTheCatalog() throws Exception {
-        Path catalog = tmp.resolve("catalog.ducklake");
-        Path data = Files.createDirectories(tmp.resolve("data"));
-        run(catalog, data, "CREATE TABLE lake.main.t (ts TIMESTAMP)");
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:");
-             Statement s = c.createStatement()) {
-            s.execute("LOAD ducklake");
-            s.execute(attach(catalog, data));
-            assertTrue(DuckLakeDataRetention.catalogReachable(c, DB));
-            s.execute("DETACH lake");
-            assertFalse(DuckLakeDataRetention.catalogReachable(c, DB));
-        }
-    }
-
-    @Test
     void retentionMustSpellOutAUnit() {
         assertEquals(Duration.ofDays(30), RetentionPolicy.parse("a.b.c", "ts", "30 days").retention());
         assertEquals(Duration.ofHours(12), RetentionPolicy.parse("a.b.c", "ts", "12h").retention());

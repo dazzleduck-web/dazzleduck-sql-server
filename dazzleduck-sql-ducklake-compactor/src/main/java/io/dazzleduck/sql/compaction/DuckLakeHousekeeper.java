@@ -9,19 +9,24 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class DuckLakeHousekeeper implements Housekeeper {
 
     private static final Logger logger = LoggerFactory.getLogger(DuckLakeHousekeeper.class);
 
+    private final String startupScript;
     private final Duration snapshotRetention;
+    private final List<String> connectionSettings;
     private final boolean rewriteDeletesEnabled;
     private final Double rewriteDeleteThreshold;
     private final CompactionState metrics;
 
+    // One real DuckDB instance per database — see RawConnections. Keyed by database, not shared:
     // CompactionService sizes its housekeeping thread pool so different databases' housekeeping runs
-    // concurrently, hence one connection per database.
-    private final RawConnectionCache connections;
+    // concurrently, and a plain JDBC Connection is not safe for concurrent use by more than one
+    // thread. Opened lazily on first use and reused for that database's whole lifetime.
+    private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
 
     public DuckLakeHousekeeper(String startupScript, Duration snapshotRetention, List<String> connectionSettings, CompactionState metrics) {
         this(startupScript, snapshotRetention, connectionSettings, false, null, metrics);
@@ -35,8 +40,9 @@ public class DuckLakeHousekeeper implements Housekeeper {
      */
     public DuckLakeHousekeeper(String startupScript, Duration snapshotRetention, List<String> connectionSettings,
                                boolean rewriteDeletesEnabled, Double rewriteDeleteThreshold, CompactionState metrics) {
+        this.startupScript = startupScript;
         this.snapshotRetention = snapshotRetention;
-        this.connections = new RawConnectionCache(startupScript, connectionSettings, "housekeeping");
+        this.connectionSettings = connectionSettings;
         this.rewriteDeletesEnabled = rewriteDeletesEnabled;
         this.rewriteDeleteThreshold = rewriteDeleteThreshold;
         this.metrics = metrics;
@@ -45,7 +51,7 @@ public class DuckLakeHousekeeper implements Housekeeper {
     @Override
     public void housekeep(String database) throws Exception {
         long retentionSeconds = snapshotRetention.toSeconds();
-        Connection connection = connections.get(database);
+        Connection connection = connectionFor(database);
 
         // Run steps independently so a failure in one does not silently skip the rest. Rewriting
         // first means the files it replaces are retired in this cycle and deleted by cleanup once
@@ -78,6 +84,22 @@ public class DuckLakeHousekeeper implements Housekeeper {
             return "CALL ducklake_rewrite_data_files('%s')".formatted(database);
         }
         return "CALL ducklake_rewrite_data_files('%s', delete_threshold => %s)".formatted(database, deleteThreshold);
+    }
+
+    private Connection connectionFor(String database) throws SQLException {
+        Connection existing = connections.get(database);
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            existing = connections.get(database);
+            if (existing != null) {
+                return existing;
+            }
+            Connection opened = RawConnections.open(startupScript, connectionSettings);
+            connections.put(database, opened);
+            return opened;
+        }
     }
 
     /** Sums {@code files_processed} over the one-row-per-table result of a DuckLake compaction call. */
@@ -117,6 +139,12 @@ public class DuckLakeHousekeeper implements Housekeeper {
 
     @Override
     public void close() {
-        connections.close();
+        connections.values().forEach(connection -> {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                logger.warn("Failed to close a housekeeping connection", e);
+            }
+        });
     }
 }

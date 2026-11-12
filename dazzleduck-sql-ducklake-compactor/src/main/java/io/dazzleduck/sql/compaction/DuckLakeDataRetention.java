@@ -75,8 +75,8 @@ public class DuckLakeDataRetention implements DataRetention {
     private final String policyTable;
     private final CompactionState metrics;
     private final Clock clock;
-    // Different databases' retention cycles run concurrently, hence one connection per database.
-    private final RawConnectionCache connections;
+    private final String startupScript;
+    private final List<String> connectionSettings;
 
     /**
      * @param databases the configured databases, to report policy rows that no cycle handles
@@ -90,74 +90,44 @@ public class DuckLakeDataRetention implements DataRetention {
                           List<String> connectionSettings, CompactionState metrics, Clock clock) {
         this.databases = List.copyOf(databases);
         this.policyTable = policyTable;
-        this.connections = new RawConnectionCache(startupScript, connectionSettings, "retention");
+        this.startupScript = startupScript;
+        this.connectionSettings = List.copyOf(connectionSettings);
         this.metrics = metrics;
         this.clock = clock;
     }
 
     @Override
     public Outcome enforce(String database) throws Exception {
-        Connection connection = connections.get(database);
-        List<RetentionPolicy> policies;
-        try {
-            policies = readPolicies(connection, database);
-        } catch (SQLException e) {
-            // The connection may be broken (catalog backend restarted): open a new one next cycle
-            // rather than fail on the same dead connection until a restart.
-            evictIfBroken(database, connection);
-            throw e;
-        }
-        Instant now = clock.instant();
-        int tables = 0;
-        int failed = 0;
-        long rowsDeleted = 0;
-        for (RetentionPolicy policy : policies) {
-            if (policy.unlimited()) {
-                continue;
-            }
-            tables++;
-            Timer.Sample sample = metrics.startTimer();
-            try {
-                long deleted = deleteExpired(connection, policy, now.minus(policy.retention()));
-                rowsDeleted += deleted;
-                // one series per table however the policy row spells it
-                metrics.addRowsDeleted(database, policy.name().toLowerCase(Locale.ROOT), deleted);
-                if (deleted > 0) {
-                    logger.info("Retention deleted {} row(s) older than {} from {}", deleted, policy.retention(), policy.name());
+        // A new connection each cycle, closed at its end: it runs at most hourly by default, so
+        // there is no stale connection to detect or replace, and nothing to keep between cycles.
+        try (Connection connection = RawConnections.open(startupScript, connectionSettings)) {
+            List<RetentionPolicy> policies = readPolicies(connection, database);
+            Instant now = clock.instant();
+            int tables = 0;
+            int failed = 0;
+            long rowsDeleted = 0;
+            for (RetentionPolicy policy : policies) {
+                if (policy.unlimited()) {
+                    continue;
                 }
-            } catch (Exception e) {
-                failed++;
-                logger.error("Retention failed for {}, the other tables still run", policy.name(), e);
-            } finally {
-                metrics.stopTimer(sample, "retention", "delete", database);
+                tables++;
+                Timer.Sample sample = metrics.startTimer();
+                try {
+                    long deleted = deleteExpired(connection, policy, now.minus(policy.retention()));
+                    rowsDeleted += deleted;
+                    // one series per table however the policy row spells it
+                    metrics.addRowsDeleted(database, policy.name().toLowerCase(Locale.ROOT), deleted);
+                    if (deleted > 0) {
+                        logger.info("Retention deleted {} row(s) older than {} from {}", deleted, policy.retention(), policy.name());
+                    }
+                } catch (Exception e) {
+                    failed++;
+                    logger.error("Retention failed for {}, the other tables still run", policy.name(), e);
+                } finally {
+                    metrics.stopTimer(sample, "retention", "delete", database);
+                }
             }
-        }
-        if (failed > 0) {
-            // The policy table may live elsewhere and still be readable while the DuckLake
-            // catalog's connection is dead.
-            evictIfBroken(database, connection);
-        }
-        return new Outcome(tables, rowsDeleted, failed);
-    }
-
-    /**
-     * After a failure, drops the connection if it can no longer read the DuckLake catalog (its
-     * backend restarted, say), so the next cycle opens a new one. Not for a conflict or a missing
-     * table, which a new connection would not fix: reconnecting reruns the whole startup script.
-     */
-    private void evictIfBroken(String database, Connection connection) {
-        if (!catalogReachable(connection, database)) {
-            logger.warn("Retention connection for {} cannot read its catalog, reopening it next cycle", database);
-            connections.evict(database, connection);
-        }
-    }
-
-    static boolean catalogReachable(Connection connection, String database) {
-        String sql = "SELECT 1 FROM %s.ducklake_snapshot LIMIT 1".formatted(DuckLakeCatalogs.metadataCatalog(database));
-        try (Statement statement = connection.createStatement(); ResultSet ignored = statement.executeQuery(sql)) {
-            return true;
-        } catch (SQLException e) {
-            return false;
+            return new Outcome(tables, rowsDeleted, failed);
         }
     }
 
@@ -217,14 +187,14 @@ public class DuckLakeDataRetention implements DataRetention {
         // Before the transaction, whose first read must be of the table (see deleteInTransaction)
         String type = columnType(connection, policy);
         // BEGIN/COMMIT statements rather than setAutoCommit(false): the transaction must end with
-        // this call, not stay open on a cached connection until the next cycle.
+        // this call, not stay open for the cycle's next table.
         execute(connection, "BEGIN TRANSACTION");
         try {
             long deleted = deleteInTransaction(connection, policy, type, cutoff, () -> { });
             execute(connection, "COMMIT");
             return deleted;
         } catch (Throwable e) {
-            // any failure, an Error too: a transaction left open would fail every later BEGIN
+            // any failure, an Error too: a transaction left open would fail the next table's BEGIN
             try {
                 execute(connection, "ROLLBACK");
             } catch (SQLException rollback) {
@@ -343,8 +313,9 @@ public class DuckLakeDataRetention implements DataRetention {
         }
     }
 
+    /** The metadata catalog under DuckLake's default name, as the rest of the compactor reads it. */
     private static String metadataCatalog(RetentionPolicy policy) {
-        return DuckLakeCatalogs.metadataCatalog(policy.catalog());
+        return "\"__ducklake_metadata_" + policy.catalog() + "\"";
     }
 
     /** The time-column range of one live data file, in UTC epoch microseconds. */
@@ -489,8 +460,4 @@ public class DuckLakeDataRetention implements DataRetention {
         };
     }
 
-    @Override
-    public void close() {
-        connections.close();
-    }
 }

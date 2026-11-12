@@ -162,8 +162,8 @@ runs no DELETE when none does.
   delete-file rewrite replaces them.
 - The statistics are read and the DELETE runs in one transaction, so a file committed meanwhile is
   never partly deleted; the commit conflicts instead, and the next cycle retries.
-- A failed table does not stop the others. When a cycle has a failure, the job checks that its
-  connection can still read the DuckLake catalog, and opens a new one next cycle if not.
+- A failed table does not stop the others. Each cycle opens its own connection, running the
+  startup script, and closes it at the end.
 - `retention` is a whole number and a unit of at least seconds: `s`, `min`, `h`, `d`, `w`, or the
   unit spelled out (`30 days`, `90 minutes`). A bare number and `m` are rejected rather than read
   as milliseconds and minutes, as they would be in the config file.

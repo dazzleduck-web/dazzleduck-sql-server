@@ -23,6 +23,7 @@ public class CompactionService implements Closeable {
     private static final Logger logger = LoggerFactory.getLogger(CompactionService.class);
 
     private final CompactionConfig config;
+    private final String startupScript;
     private final TierCompactor tierCompactor;
     private final Housekeeper housekeeper;
     // null when data retention is off
@@ -46,7 +47,7 @@ public class CompactionService implements Closeable {
     // not database alone: different tiers for the same database run concurrently by design, and a
     // plain JDBC Connection is not safe for concurrent use by more than one thread — the same reason
     // DuckDbTierCompactor/DuckLakeHousekeeper key their own connections this way.
-    private final RawConnectionCache countingConnections;
+    private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
 
     /** Synthetic "tier" key for the off-control-path whole-catalog file-count refresh connection. */
     private static final String FILE_COUNT_REFRESH_KEY = "__filecount_refresh__";
@@ -79,7 +80,7 @@ public class CompactionService implements Closeable {
             logger.warn("data_retention is enabled but no DataRetention was given, so retention will not run");
         }
         this.config = config;
-        this.countingConnections = new RawConnectionCache(startupScript, List.of(), "counting");
+        this.startupScript = startupScript;
         this.tierCompactor = tierCompactor;
         this.housekeeper = housekeeper;
         this.dataRetention = dataRetention;
@@ -302,7 +303,7 @@ public class CompactionService implements Closeable {
      * concurrently-running tiers each measure only their own file-size range.
      */
     private ActiveFiles queryActiveFiles(String database, String tierName, long minSizeInclusive, long maxSizeExclusive) {
-        String mdDatabase = DuckLakeCatalogs.metadataCatalog(database);
+        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
         String sql = ("SELECT COUNT(*) AS total, COALESCE(SUM(file_size_bytes), 0) AS total_bytes "
                 + "FROM %s.ducklake_data_file WHERE end_snapshot IS NULL "
                 + "AND file_size_bytes >= %d AND file_size_bytes < %d")
@@ -323,7 +324,20 @@ public class CompactionService implements Closeable {
     }
 
     private Connection countingConnectionFor(String database, String tierName) throws SQLException {
-        return countingConnections.get(runKey(database, tierName));
+        String key = runKey(database, tierName);
+        Connection existing = countingConnections.get(key);
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            existing = countingConnections.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            Connection opened = RawConnections.open(startupScript, List.of());
+            countingConnections.put(key, opened);
+            return opened;
+        }
     }
 
     /**
@@ -332,7 +346,7 @@ public class CompactionService implements Closeable {
      * a concurrently-running {@link #runTier} may be using (a JDBC Connection is not concurrency-safe).
      */
     private void refreshFileCounts(String database) {
-        String mdDatabase = DuckLakeCatalogs.metadataCatalog(database);
+        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
         for (CompactionTier tier : config.tiers()) {
             sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""
@@ -374,7 +388,13 @@ public class CompactionService implements Closeable {
         if (dataRetention != null) {
             closeQuietly(dataRetention);
         }
-        countingConnections.close();
+        countingConnections.values().forEach(connection -> {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                logger.warn("Failed to close a counting connection", e);
+            }
+        });
         logger.info("Compaction service stopped");
     }
 

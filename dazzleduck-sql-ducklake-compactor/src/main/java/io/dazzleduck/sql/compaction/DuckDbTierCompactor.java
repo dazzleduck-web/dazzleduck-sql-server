@@ -5,13 +5,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class DuckDbTierCompactor implements TierCompactor {
 
     private static final Logger logger = LoggerFactory.getLogger(DuckDbTierCompactor.class);
 
+    private final String startupScript;
     private final CompactionState metrics;
 
     // One real DuckDB instance per (database, tier) pair — see RawConnections for why this can't be
@@ -21,16 +23,16 @@ public class DuckDbTierCompactor implements TierCompactor {
     // different databases, and a plain JDBC Connection is not safe for concurrent use by more than
     // one thread — keying by tier name only would hand two such threads the same Connection object.
     // Opened lazily on first use and reused for the pair's whole lifetime.
-    private final RawConnectionCache connections;
+    private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
 
     public DuckDbTierCompactor(String startupScript, CompactionState metrics) {
-        this.connections = new RawConnectionCache(startupScript, List.of(), "tier");
+        this.startupScript = startupScript;
         this.metrics = metrics;
     }
 
     @Override
     public MergeOutcome compact(String database, CompactionTier tier) throws Exception {
-        Connection connection = connections.get(connectionKey(database, tier.name()), tier.connectionSettings());
+        Connection connection = connectionFor(database, tier);
         String sql = mergeAdjacentFilesSql(database, tier.minFileSize(), tier.maxFileSize(), tier.maxCompactedFiles());
         Timer.Sample sample = metrics.startTimer();
         long start = System.nanoTime();
@@ -66,6 +68,23 @@ public class DuckDbTierCompactor implements TierCompactor {
         return new MergeOutcome(durationMergeMs, filesProcessed, filesCreated);
     }
 
+    private Connection connectionFor(String database, CompactionTier tier) throws SQLException {
+        String key = connectionKey(database, tier.name());
+        Connection existing = connections.get(key);
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            existing = connections.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            Connection opened = RawConnections.open(startupScript, tier.connectionSettings());
+            connections.put(key, opened);
+            return opened;
+        }
+    }
+
     private static String connectionKey(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;
     }
@@ -88,6 +107,12 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     @Override
     public void close() {
-        connections.close();
+        connections.values().forEach(connection -> {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                logger.warn("Failed to close a tier connection", e);
+            }
+        });
     }
 }
