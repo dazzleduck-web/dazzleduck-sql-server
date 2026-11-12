@@ -25,7 +25,8 @@ public record CompactionConfig(
         int healthPort,
         int runHistorySize,
         boolean rewriteDeletesEnabled,
-        Double rewriteDeleteThreshold
+        Double rewriteDeleteThreshold,
+        DataRetentionConfig dataRetention
 ) {
     private static final String CONFIG_PATH = "dazzleduck_sql_compaction";
 
@@ -37,6 +38,15 @@ public record CompactionConfig(
                             int healthPort, int runHistorySize) {
         this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
                 healthPort, runHistorySize, false, null);
+    }
+
+    /** Data retention off, for callers (mostly tests) written before it existed. */
+    public CompactionConfig(List<String> databases, List<CompactionTier> tiers, Duration housekeepingFrequency,
+                            Duration snapshotRetention, List<String> housekeepingConnectionSettings,
+                            int healthPort, int runHistorySize, boolean rewriteDeletesEnabled,
+                            Double rewriteDeleteThreshold) {
+        this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
+                healthPort, runHistorySize, rewriteDeletesEnabled, rewriteDeleteThreshold, DataRetentionConfig.DISABLED);
     }
     private static final String TIERS_KEY = "compaction_tiers";
 
@@ -67,7 +77,8 @@ public record CompactionConfig(
                 c.hasPath("run_history_size")
                         ? c.getInt("run_history_size") : CompactionRunLog.DEFAULT_CAPACITY,
                 !c.hasPath("rewrite_deletes_enabled") || c.getBoolean("rewrite_deletes_enabled"),
-                rewriteDeleteThreshold(c)
+                rewriteDeleteThreshold(c),
+                DataRetentionConfig.from(c)
         );
     }
 
@@ -194,6 +205,11 @@ public record CompactionConfig(
         for (CompactionTier tier : tiers) {
             if (!names.add(tier.name())) {
                 throw new IllegalArgumentException("Duplicate compaction tier name: " + tier.name());
+            }
+            // a tier's name is also its metrics' type tag, which these jobs use
+            if (tier.name().equalsIgnoreCase(CompactionState.HOUSEKEEPING_KIND)
+                    || tier.name().equalsIgnoreCase(CompactionState.RETENTION_KIND)) {
+                throw new IllegalArgumentException("Compaction tier name '%s' is reserved".formatted(tier.name()));
             }
             if (tier.enabled() && tier.maxFileSize() <= tier.minFileSize()) {
                 throw new IllegalArgumentException(

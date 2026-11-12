@@ -39,9 +39,14 @@ public class CompactionState {
     private static final String SATURATED_METRIC = "ducklake.compaction.saturated";
     private static final String SPILL_PEAK_METRIC = "ducklake.compaction.spill_peak_bytes";
     private static final String RSS_PEAK_METRIC = "ducklake.compaction.rss_peak_bytes";
+    private static final String BOUNDARY_LAG_METRIC = "ducklake.retention.boundary_lag";
+    private static final String ROWS_DELETED_METRIC = "ducklake.retention.rows_deleted";
 
     /** Failure kind used for housekeeping cycles, which aren't a tier. */
     static final String HOUSEKEEPING_KIND = "housekeeping";
+
+    /** Failure kind used for data-retention cycles, which aren't a tier either. */
+    static final String RETENTION_KIND = "retention";
 
     private final MeterRegistry registry;
     private final List<String> tierNames;
@@ -235,6 +240,7 @@ public class CompactionState {
             Map<String, AtomicLong> counters = new HashMap<>();
             List<String> kinds = new ArrayList<>(tierNames);
             kinds.add(HOUSEKEEPING_KIND);
+            kinds.add(RETENTION_KIND);
             for (String kind : kinds) {
                 counters.put(kind, new AtomicLong(0));
             }
@@ -268,6 +274,32 @@ public class CompactionState {
 
     public void addFilesRewritten(String db, long delta) {
         if (delta > 0) filesRewritten.computeIfAbsent(db, k -> new AtomicLong(0)).addAndGet(delta);
+    }
+
+    /** Counts the rows a data-retention cycle deleted from one table, tagged by database and table. */
+    // Per "db|table": how far retention's file boundary lags the cutoff, in seconds.
+    private final ConcurrentHashMap<String, AtomicLong> boundaryLags = new ConcurrentHashMap<>();
+
+    /**
+     * How far behind its cutoff a table's retention is held by files straddling it: rows older than
+     * the retention that are still kept. A gauge in seconds; 0 when nothing holds it back.
+     */
+    public void setBoundaryLag(String db, String table, java.time.Duration lag) {
+        boundaryLags.computeIfAbsent(db + "|" + table, key -> {
+            AtomicLong value = new AtomicLong();
+            Gauge.builder(BOUNDARY_LAG_METRIC, value, AtomicLong::get)
+                    .tags("database", db, "table", table)
+                    .baseUnit("seconds")
+                    .description("How far retention's file boundary lags its cutoff")
+                    .register(registry);
+            return value;
+        }).set(lag.toSeconds());
+    }
+
+    public void addRowsDeleted(String db, String table, long delta) {
+        if (delta > 0) {
+            registry.counter(ROWS_DELETED_METRIC, "database", db, "table", table).increment(delta);
+        }
     }
 
     public long getFilesRewritten(String db) {
@@ -335,7 +367,10 @@ public class CompactionState {
         lastSuccessTimes.computeIfAbsent(db, k -> new AtomicReference<>()).set(Instant.now());
     }
 
-    /** {@code kind} is a tier's name, or {@link #HOUSEKEEPING_KIND} for a housekeeping failure. */
+    /**
+     * {@code kind} is a tier's name, {@link #HOUSEKEEPING_KIND} for a housekeeping failure, or
+     * {@link #RETENTION_KIND} for a data-retention failure.
+     */
     public void recordFailure(String db, String kind) {
         failureCounters(db).get(kind).incrementAndGet();
     }

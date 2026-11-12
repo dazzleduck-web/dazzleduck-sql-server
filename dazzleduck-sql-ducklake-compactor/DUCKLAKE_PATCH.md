@@ -29,6 +29,15 @@ It adds `ducklake_backfill_row_id_stats(...)`, which fills in that row for files
 patch (they are never pruned until then), and fixes `ducklake_merge_adjacent_files` renumbering row
 ids that an `UPDATE` preserved or that a sorted table's compaction re-sorted.
 
+From `v1.5.6-dazzleduck.3` it also carries
+[`duckdb/ducklake#1949`](https://github.com/duckdb/ducklake/pull/1949), the fix for
+[`duckdb/ducklake#1895`](https://github.com/duckdb/ducklake/issues/1895): a `DELETE` no longer
+conflicts with every concurrent insert into the table, only with inserted files whose statistics
+could match the delete, and an insert that never read the table no longer conflicts with a
+concurrent delete. Data retention depends on it: its `DELETE` would otherwise keep failing against
+continuous ingestion. `RetentionConcurrentIngestionTest` runs against the pinned release and fails
+on the stock extension.
+
 All of it is backported onto DuckLake's `v1.5-variegata` branch at its DuckDB `v1.5.6` bump
 (`343df36a`). Its extension source is exactly `ac7595b0`, the DuckLake commit DuckDB `v1.5.6` pins via
 its own `.github/config/extensions/ducklake.cmake` (the bump commit only changes CI files and
@@ -52,7 +61,7 @@ select extension_version from duckdb_extensions() where extension_name = 'duckla
 |---|---|
 | Patched source | [`dazzleduck-web/ducklake`](https://github.com/dazzleduck-web/ducklake), branch `backport/v1.5.6-dazzleduck` |
 | Build + publish workflow | same repo, `.github/workflows/build-and-publish-extension.yml` (manually triggered) |
-| Published binaries | GitHub Releases on that repo, e.g. [`v1.5.6-dazzleduck.2`](https://github.com/dazzleduck-web/ducklake/releases/tag/v1.5.6-dazzleduck.2), assets `ducklake-<platform>.duckdb_extension` for `linux_amd64`, `linux_arm64` (the Docker images), `osx_amd64`, `osx_arm64` and `windows_amd64` (native binaries and local testing) |
+| Published binaries | GitHub Releases on that repo, e.g. [`v1.5.6-dazzleduck.3`](https://github.com/dazzleduck-web/ducklake/releases/tag/v1.5.6-dazzleduck.3), assets `ducklake-<platform>.duckdb_extension` for `linux_amd64`, `linux_arm64` (the Docker images), `osx_amd64`, `osx_arm64` and `windows_amd64` (native binaries and local testing) |
 | Version pins in this repo | `dazzleduck-sql-ducklake-compactor/pom.xml`: `ducklake.patch.release`, `ducklake.patch.built.for.duckdb.version`, `ducklake.extension.cache.version` |
 | Drift guard | `DuckLakePatchVersionTest` (fails the build if `duckdb.version` diverges from `ducklake.patch.built.for.duckdb.version`, or if `ducklake.extension.cache.version` no longer matches `duckdb.version`'s first three components) |
 | Runtime enablement | Two separate connections need it, both set as a JDBC connection **property** (not a `SET` statement — DuckDB rejects changing it once the instance is running): `RawConnections.java` for the compaction/housekeeping connections, and `src/main/resources/duckdb.properties` for the shared commons singleton `Main.java` runs the startup script against first (`ConnectionPool.executeOnSingleton` has no other hook for connection properties) |

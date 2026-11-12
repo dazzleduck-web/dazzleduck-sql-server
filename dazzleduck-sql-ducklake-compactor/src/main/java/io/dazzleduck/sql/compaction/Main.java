@@ -53,8 +53,13 @@ public class Main {
             Housekeeper housekeeper = new DuckLakeHousekeeper(
                     startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
                     config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
+            DataRetentionConfig retention = config.dataRetention();
+            DataRetention dataRetention = retention.enabled()
+                    ? new DuckLakeDataRetention(startupScript, config.databases(), retention.policyTable(),
+                            retention.connectionSettings(), retention.maxFilesPerCycle(), state)
+                    : null;
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
-            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, state, runLog);
+            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state, runLog);
             healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
 
             healthServer.start();
