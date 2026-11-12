@@ -1,9 +1,15 @@
 # DuckLake Data Inlining Must Be Off — Design Specification
 
-Status: **accepted; partly implemented.** The open questions are settled (see the last section):
+Status: **superseded.** Ingestion watermarks were removed (Task 7 of
+`doc/DUCKDB_2_UPGRADE_PLAN.md`), and the watermark tables were the only tables the collector writes
+with SQL, so neither the rule nor its startup check has anything left to guard; the check over the
+watermark tables was removed with them. The measurements below, of where inlining comes from and
+that it covers deletes, stay as reference for any later change that writes DuckLake tables with SQL.
+
+Earlier status: accepted; partly implemented. The open questions were settled (see the last section):
 the collector refuses to start, the watermark's `INSERT` becomes a write-then-register, and its
-conflict-path `UPDATE` becomes an append. The append landed in #514, which this spec now assumes;
-the inlining rule itself and the sidecar conversion have not.
+conflict-path `UPDATE` becomes an append. The append landed in #514; the inlining rule itself and the
+sidecar conversion did not.
 
 The rule guards a live fault, not a hypothetical one: with #514 merged the watermark path still
 writes with SQL — one `INSERT` per batch for its rows, plus an `INSERT` for a correction on the rare

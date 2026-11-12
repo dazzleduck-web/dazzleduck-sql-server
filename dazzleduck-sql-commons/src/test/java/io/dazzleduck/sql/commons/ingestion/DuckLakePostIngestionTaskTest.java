@@ -57,7 +57,7 @@ class DuckLakePostIngestionTaskTest {
     @Test
     void shouldAddFilesToDuckLakeTableTest() throws Exception {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 3L, List.of(parquetFile.toString()));
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         // execute (from DuckLakePostIngestionTask)
         task.execute();
 
@@ -72,14 +72,14 @@ class DuckLakePostIngestionTaskTest {
     @Test
     void shouldFailWhenParquetFileDoesNotExistTest() {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 3L, List.of(tempDir.resolve("missing.parquet").toString()));
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         assertThrows(RuntimeException.class, task::execute);
     }
 
     @Test
     void shouldNoOpWhenFileListIsEmptyTest() throws Exception {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 0L, List.of());
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         task.execute(); // should not throw
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.execute(conn, "USE " + catalog);

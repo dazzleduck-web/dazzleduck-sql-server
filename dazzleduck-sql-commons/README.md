@@ -121,15 +121,13 @@ The `ingestion/` package implements the server's write path:
   definition from `duckdb_views()` and rewrites the input-table reference to `__this`
   (`Transformations.rewriteTableAsThis`), so the transformation is maintained as SQL DDL and
   picked up on schema-version refresh without a restart
-- `WatermarkSpec` — per-group MIN timestamp, MAX timestamp, and row count computed per batch and
-  inserted into a watermark table in the same transaction as the DuckLake file registration
 - `DuckLakeIngestionTaskFactoryProvider` — static queue-to-table mapping from config
   (`ingestion_queue_table_mapping`)
 - `DynamicDuckLakeIngestionTaskFactoryProvider` — SQLite-backed queue registry polled at
   runtime (`db_path`, `config_load_interval_ms`); with `manage_tables = true`,
   `DuckLakeTableManager` reconciles target tables non-destructively (CREATE / ADD COLUMN / DROP COLUMN)
-- `DuckLakePostIngestionTask` — registers written files with `ducklake_add_data_files` and
-  inserts the watermark rows in one transaction
+- `DuckLakePostIngestionTask` — registers written files with `ducklake_add_data_files` in one
+  transaction
 
 ## Other Utilities
 

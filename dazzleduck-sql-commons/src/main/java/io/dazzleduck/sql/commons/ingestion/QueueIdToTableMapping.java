@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -79,9 +80,25 @@ public record QueueIdToTableMapping(
                     "Queue '%s': 'num_partitions' > 1 requires a non-blank 'partition_expression'"
                             .formatted(ingestionQueue));
         }
-        // Fail at config load, not per batch: a malformed watermark spec (partial/blank/typo'd
-        // keys) would otherwise write each batch's output and then orphan it at post-ingestion.
-        WatermarkSpec.fromParameters(ingestionQueue, additionalParameters);
+        rejectWatermarkKeys(ingestionQueue, additionalParameters);
+    }
+
+    /**
+     * Ingestion watermarks were removed. A mapping that still configures one fails at config load
+     * rather than have its watermark table silently stop receiving rows.
+     */
+    static void rejectWatermarkKeys(String ingestionQueue, Map<String, String> additionalParameters) {
+        if (additionalParameters == null) {
+            return;
+        }
+        List<String> keys = additionalParameters.keySet().stream()
+                .filter(key -> key.startsWith("watermark_"))
+                .sorted()
+                .toList();
+        if (!keys.isEmpty()) {
+            throw new IllegalArgumentException(("Queue '%s': ingestion watermarks are no longer supported; "
+                    + "remove %s from additional_parameters").formatted(ingestionQueue, keys));
+        }
     }
 
     /** Backward-compatible constructor without outputPath/inputSchema (DuckLake-managed entries). */

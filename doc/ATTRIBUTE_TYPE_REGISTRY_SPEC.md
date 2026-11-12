@@ -144,8 +144,8 @@ Every read groups, because the table is append-only and duplicates are expected.
 
 ## Decisions
 
-**The table is per-stream config, not a fixed layout.** `watermark_table` already works this way:
-an unqualified name in the queue's mapping, resolved in that queue's own catalog and schema. So the
+**The table is per-stream config, not a fixed layout:** an unqualified name in the queue's mapping,
+resolved in that queue's own catalog and schema. So the
 registry lands beside the tables it describes and a query can join them, and the operator decides
 everything else — two streams may name one table and share it, their rows kept apart by
 `ingestion_queue`, or each may name its own, and a stream that names none records nothing.
@@ -163,7 +163,7 @@ fails the batch, where a writer would have retried it off the ingest path. That 
 eliminated: every statement is generated from a fixed column list with escaped literals, every
 identifier is checked against `[A-Za-z_][A-Za-z0-9_]*`, and an attribute name that cannot be
 written as a SQL literal at all (a NUL byte) is dropped rather than sent. The mechanism is
-`SidecarRows` in commons, the producer-side counterpart to `WatermarkSpec`: rows derived by
+`SidecarRows` in commons: rows derived by
 whoever built the batch, from information the write path never sees.
 
 A failed registration leaves the mapping file unreferenced, which is the same outcome the batch's
@@ -376,74 +376,15 @@ registering a file: `ducklake_add_data_files` with a one-row file at the default
 
 So writing Parquet and registering it is immune by construction, which is one more point in its
 favour. The separate no-inlining rule (`doc/DUCKLAKE_NO_INLINING_SPEC.md`) covers the paths that do
-insert. **This spec does not depend on it** — but the dependency now runs the other way: that rule's
-watermark conversion needs `SidecarRows` from here, so this lands first. A sequencing order, not a
-design coupling.
-
-## The watermark moves to write-then-register too
-
-An earlier draft of this spec argued the opposite — that `WatermarkSpec` should keep its
-`INSERT ... VALUES` — and review decided against it. The reversal is recorded here because the
-argument that was made for keeping it was measured under the wrong conditions.
-
-What held up: **with inlining off, an `INSERT` does write a Parquet file.** The same single-row
-insert that was inlined at the default limit produced a real data file once the limit was zero. So
-the watermark was never choosing catalog rows over files, and cardinality is not the decider — a
-watermark row is produced per batch and a mapping row only on a mapping's first appearance, but both
-mechanisms end in one small file per batch for the watermark either way.
-
-What did not hold up was the conflict path, twice over. The old argument was that tightening a row
-which arrived as a registered file becomes `inlined_insert` + `inlined_delete`, moving the row into
-the catalog anyway and stranding the just-written Parquet file with a stale value. That is **true at
-the default inlining limit and false once the no-inlining rule is in force**, which is the only
-configuration either spec permits:
-
-| Tightening `UPDATE` on a row that arrived as a registered file | Inlined rows | The file |
-|---|---|---|
-| At the default limit of 10 | 1 in `ducklake_inlined_data_<n>`, 1 in `ducklake_inlined_delete_<n>` | left unexpired, still holding the stale id |
-| With the limit at 0 | none | expired, and a corrected replacement file written |
-
-And then review removed the `UPDATE` altogether: the conflict path **appends** a correction row
-carrying the exact snapshot id, and a reader takes the latest snapshot per batch. So the watermark
-table becomes append-only with duplicates tolerated — the registry's own model — and the two tables
-now agree on shape as well as on mechanism.
-
-That append needs an identity on the row, which is the part worth knowing here because it is the
-same problem the registry solved differently. Watermark rows carry no key, and two batches in the
-same group can aggregate identically, so a correction cannot be told from a second batch. Measured
-on a corrected batch plus a same-aggregate second batch, where the truth is 200 ingested rows:
-latest-snapshot-per-batch-id gives **200**, grouping by the value columns gives **100** (it merges
-the two batches), and a raw `sum(row_count)` gives **300** (it counts the correction). Hence an
-optional `watermark_batch_id_column` holding the sidecar file's UUID. The registry needs no
-equivalent: its key *is* the row, so a duplicate is absorbed by `GROUP BY` rather than
-double-counted.
-
-Two further facts settled the conversion:
-
-- **The sidecar must be typed.** `ducklake_add_data_files` does not cast, so the all-VARCHAR file
-  `SidecarRows` renders today cannot be registered into a table with `TIMESTAMP` and `BIGINT`
-  columns — it fails with `Failed to map column "min_ts"`. The registry never hit this because its
-  columns are all strings. Typed projection in `SidecarRows` is therefore shared work, and it is
-  the one real cost of the conversion for this PR.
-- **`ducklake_table_insertions` does return a rowid for a row that arrived as a registered file** —
-  a one-row sidecar registered in snapshot 2 came back with `rowid = 0`. That was measured to prove
-  the tightening could still key correctly, and the append then made it moot; it is recorded because
-  it is the kind of thing worth not having to measure twice.
-
-What remains true is that the two sets of rows are computed in different places — the watermark's
-inside the write path, the registry's carried in from the producer — but that difference no longer
-justifies two mechanisms, and with the `UPDATE` gone it no longer justifies two shapes either. The
-registry's sidecar write is the one mechanism. The conversion itself is specified in
-`doc/DUCKLAKE_NO_INLINING_SPEC.md`, where the question was asked; what this spec owes it is
-`SidecarRows` carrying column types.
+insert. **This spec does not depend on it.**
 
 ## Deliberately out of scope
 
 - **A generated view.** The registry makes "one correctly typed column per attribute" possible;
   generating it is a follow-up, not part of this.
 - **Dynamic queues.** They cannot record, because `DynamicQueueRepository` stores no
-  `additional_parameters` — the same limitation watermarks already have. Lifting it means changing
-  the registry schema, which belongs with watermarks rather than here.
+  `additional_parameters`. Lifting it means changing the queue registry's schema, which is a change
+  of its own.
 - **`/stats`.** The cache size and in-flight count are Micrometer gauges; putting them on the
   dashboard can come later.
 
@@ -467,12 +408,5 @@ Settled in review:
   flight.
 - **The rows are written as a Parquet file and registered**, following the data path's semantics
   rather than inserting.
-- **`WatermarkSpec` moves to the same mechanism, and to the same shape.** The earlier conclusion
-  that it should keep its `INSERT` was reversed, and the measurement behind it was wrong once the
-  no-inlining rule is in force. Its conflict-path `UPDATE` is then replaced by an appended
-  correction with the reader taking the latest snapshot per batch, so the watermark table becomes
-  append-only with duplicates tolerated, as this one is — see the section above. The consequence for
-  this spec is that `SidecarRows` must carry the target table's column types, since
-  `ducklake_add_data_files` does not cast.
 
 Deferred: a tighter end-to-end CPU measurement. Not a gate on the implementation.

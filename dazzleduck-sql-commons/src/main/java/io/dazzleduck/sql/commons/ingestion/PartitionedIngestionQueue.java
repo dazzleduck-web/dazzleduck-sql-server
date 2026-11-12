@@ -18,8 +18,8 @@ import java.util.concurrent.ScheduledExecutorService;
  * hash-routed child queues. Each child is a fully independent {@link ParquetIngestionQueue} (its own
  * batching, backpressure, flush loop and write path). All children write into the parent's output
  * path — the on-disk layout is identical to an unpartitioned queue, so Hive partition pruning and
- * plain directory globs keep working — and share the parent's queue id so the transformation,
- * watermark spec and DuckLake catalog registration all resolve to the same table. Files never
+ * plain directory globs keep working — and share the parent's queue id so the transformation and
+ * DuckLake catalog registration both resolve to the same table. Files never
  * collide: unpartitioned writes are named {@code dd_<uuid>} and {@code PARTITION_BY} writes use
  * {@code APPEND}, which generates unique names.
  *

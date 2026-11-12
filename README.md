@@ -11,7 +11,7 @@ ADBC, plain HTTP, or DuckDB itself.
 - **Arrow-Native**: query results and ingestion both use Apache Arrow IPC (ZSTD-compressed by default); TSV and JSONL/NDJSON output are also available over HTTP
 - **JWT Authentication**: all versioned HTTP endpoints and Flight SQL calls are authenticated; Basic credentials are upgraded to a server-issued JWT
 - **Row-Level Security**: four access modes with filter injection scoped by JWT claims
-- **Ingestion Pipeline**: batched Arrow-to-Parquet ingestion with backpressure, producer-id deduplication, DuckLake catalog registration, and per-group watermarks
+- **Ingestion Pipeline**: batched Arrow-to-Parquet ingestion with backpressure, producer-id deduplication, and DuckLake catalog registration
 - **Partition Pruning**: Hive, Delta Lake, and DuckLake pruning based on query predicates, plus split planning for distributed execution
 - **Named Queries**: Jinja-templated SQL stored in a DuckDB table, executed by name over HTTP
 
@@ -542,7 +542,7 @@ configure `ingestion_queue_table_mapping` entries:
 | `table` | Yes | Target table name |
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
 | `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
-| `additional_parameters` | No | Extra key/value pairs, including the watermark spec below |
+| `additional_parameters` | No | Extra key/value pairs. `watermark_*` keys are rejected: ingestion watermarks were removed |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
@@ -668,195 +668,12 @@ A batch's files are registered with `ducklake_add_data_files` in one transaction
 commits meanwhile, such as the compactor's data retention job's. The registration is then retried in
 a new transaction, up to 5 attempts with a short jittered backoff, instead of failing the batch back
 to the client. The conflict is decided before DuckLake writes anything, so nothing of the failed
-attempt was registered and the same files are registered again; watermark rows are part of the
-retried transaction. When the attempts run out, the batch fails as not registered, so its files are
+attempt was registered and the same files are registered again. When the attempts run out, the batch fails as not registered, so its files are
 deleted and the client may resend it.
 
 Only a conflict with a concurrent DELETE is retried. A conflict with an ALTER or DROP of the table is
 not, since registering the same files under a changed schema could silently drop columns, and any
 other commit failure has an unknown outcome, so retrying it could register the batch twice.
-
-### Watermarks
-
-A queue mapping can commit a watermark row per ingested batch, in the **same transaction** as
-the DuckLake file registration. Each row carries the per-group MIN timestamp, MAX timestamp, and
-row count. Configure under `additional_parameters`:
-
-| Key | Required | Description |
-|-----|----------|-------------|
-| `watermark_table` | Yes | Watermark table (same catalog/schema as the target table) |
-| `watermark_timestamp_column` | Yes | Source column both MIN and MAX are computed from |
-| `watermark_min_timestamp_column` | Yes | Destination column for the MIN timestamp; use the source column's type. A `TIMESTAMPTZ` source is written in UTC, so a `TIMESTAMP` column gets the UTC clock time |
-| `watermark_max_timestamp_column` | Yes | Destination column for the MAX timestamp; same type advice as the MIN column |
-| `watermark_row_count_column` | Yes | Destination column for the batch row count |
-| `watermark_group_columns` | No | Comma-separated grouping columns; empty = one global row per batch |
-| `watermark_snapshot_id_column` | Yes | Destination column for a lower bound on the DuckLake snapshot the batch committed in |
-| `watermark_batch_id_column` | Yes | Destination column (`UUID`) for the batch id, which the appended snapshot correction attaches to |
-
-A malformed spec (partial keys, blanks, typos in `watermark_*` keys) fails at startup rather
-than per batch. Watermarks are not available for queues registered via the dynamic SQLite
-provider, whose registry does not store `additional_parameters`.
-
-### The snapshot id column
-
-Every watermark row records the DuckLake snapshot its batch committed in, so the watermark table
-must carry the column named by `watermark_snapshot_id_column`:
-
-```sql
-ALTER TABLE my_catalog.main.ingest_watermark ADD COLUMN min_commit_snapshot_id BIGINT;
-```
-
-The key is **required** whenever a watermark is configured; a spec without it fails at startup.
-The column must be `BIGINT` and nullable — it is written on every insert, but leaving it nullable
-lets an existing table be migrated without a rewrite.
-
-**The value is a lower bound, not an exact id** — hence the `min_` prefix in the suggested column
-name. The true snapshot is the recorded value or higher, never lower, so compare with `>=` / `<=`
-rather than `=`, and **take the greatest value recorded for the batch**, which is what a correction
-appends:
-
-```sql
--- batches whose data is visible as of snapshot N
-SELECT batch_id, max(min_commit_snapshot_id) AS commit_snapshot_id
-FROM ingest_watermark WHERE batch_id IS NOT NULL
-GROUP BY batch_id HAVING max(min_commit_snapshot_id) <= N
-UNION ALL
--- rows written before the batch id column existed carry none; the earlier code corrected those
--- in place, so for them the recorded value is already exact and is read directly
-SELECT NULL, min_commit_snapshot_id FROM ingest_watermark
-WHERE batch_id IS NULL AND min_commit_snapshot_id <= N;
-```
-
-Two details in that query are each the difference between a right and a wrong answer, not
-refinements:
-
-**`max(...)` per batch.** Reading the raw column answers **too early** for a corrected batch: the
-row as first written keeps its predicted id, and the exact id lives in the appended correction row.
-A batch that predicted snapshot 4 but committed in 7 is reported by
-`WHERE min_commit_snapshot_id <= 5` as visible at 5, when it is not.
-
-**`WHERE batch_id IS NOT NULL`, with the legacy rows handled separately.** On a table migrated into
-the batch id column, every row written before it carries NULL — and SQL groups those into a single
-NULL "batch". Grouping them admits or excludes the entire history together on one `max`: with
-historical batches at snapshots 2 and 3 the grouped form returns **one** row where there are two,
-and a single historical batch at snapshot 9 would hide every earlier one from `N = 5`. Those rows
-need no `max` anyway, because the code that wrote them corrected in place.
-
-The bound holds unconditionally. DuckLake assigns the snapshot id at COMMIT and does not expose
-the pending one, so what gets written is `max(snapshot_id) + 1` — the same formula DuckLake uses,
-read just before the transaction opens. The committed id can only be that or higher, because
-`max(snapshot_id)` never decreases (even aggressive `ducklake_expire_snapshots` retains the newest
-snapshot, and ids are never reused) and a concurrent writer taking the id first merely pushes the
-commit higher.
-
-In practice the bound is tight: immediately after committing, the id is verified against
-`begin_snapshot` of the batch's files. If a concurrent writer won the race, the exact id is
-recorded by **appending a correction row** — the watermark table is append-only, and no row is ever
-updated in place. That step improves accuracy rather than correctness: if it is skipped, or the
-process dies before it runs, the column still satisfies its contract and no reader is misled.
-
-### Reading the exact snapshot (`watermark_batch_id_column`)
-
-A correction has to attach to something, and watermark rows carry no key — two batches in the same
-group can aggregate identically — so the correction is keyed by batch id. The key is **required**
-whenever a watermark is configured, so that there is one behaviour to reason about: the table is
-always append-only and the correction is always an append.
-
-**Migrating an existing watermark table.** Add the column, then the key. A queue whose
-`watermark_table` is set but whose `watermark_batch_id_column` is missing fails at startup, naming
-the key:
-
-```sql
-ALTER TABLE my_catalog.main.ingest_watermark ADD COLUMN batch_id UUID;
-```
-
-**Use `UUID`, not `VARCHAR`.** The value is a UUID, and the native type is 16 bytes where its text
-is 36. The column is distinct on every row, so it compresses no better than its raw bytes and the
-difference is close to the full ratio — measured over 50,000 rows, the column costs 1,001,297 bytes
-as `UUID` against 1,986,297 as `VARCHAR`, so roughly 20 bytes per row against 40. In Parquet it is
-written as `FIXED_LEN_BYTE_ARRAY(16)` with the standard `UUID` logical type, which Arrow and Spark
-readers understand. A `VARCHAR` column still works if you have one already.
-
-Do the `ALTER TABLE` first. Nothing verifies at startup that the column exists in the table, so
-setting the key against a table without the column fails every batch at commit instead — see the
-warning below.
-
-Every row of a batch carries the same batch id, and the exact snapshot of a batch is the greatest
-recorded value for that id:
-
-```sql
-SELECT batch_id, max(min_commit_snapshot_id) AS commit_snapshot_id
-FROM ingest_watermark WHERE batch_id IS NOT NULL GROUP BY batch_id;
-```
-
-That is exact rather than a heuristic: a correction can only ever raise the value, and at most one
-is written per batch.
-
-A correction row carries **only** the batch id and the snapshot — group columns and aggregates are
-NULL — so existing aggregate queries are unaffected by it: `sum(row_count)` and `max(max_ts)` skip
-NULLs. Only a reader that wants the exact snapshot needs the per-batch rule above.
-
-**Do not fold aggregates into that `GROUP BY batch_id`.** A batch holds one row per group, so
-`any_value(row_count) ... GROUP BY batch_id` keeps one group and drops the rest — correct for a
-watermark with no group columns, and silently short for every other kind:
-
-```sql
--- WRONG for a grouped watermark: undercounts to a single group per batch
-SELECT sum(row_count) FROM (
-    SELECT batch_id, any_value(row_count) AS row_count
-    FROM ingest_watermark GROUP BY batch_id);
-
--- Right: the counts need no deduplication, because corrections contribute NULL
-SELECT sum(row_count) FROM ingest_watermark;
-```
-
-The batch id is needed for the *snapshot*, not for the counts. The one query it does change is
-`count(*)`: correction rows are rows, so count the observations instead with
-`count(row_count)`, or filter on `batch_id IS NULL` to see only corrections.
-
-> **Column names are not verified against the table at startup.** A watermark column named in the
-> config but absent from the table fails the batch at commit — `FilesNotRegisteredException`, no
-> files registered, repeating for every batch — and the underlying error does not name the column.
-> This applies to every `watermark_*` column, and `watermark_batch_id_column` is the one most
-> likely to be missed, since it is the only one needing an `ALTER TABLE` on an existing table.
-
-Without the column configured nothing changes and nothing breaks: no correction is written and the
-column simply stays the lower bound it is specified as. The exact snapshot for a batch can still be
-recovered at any time by reading `begin_snapshot` from `ducklake_data_file` for that batch's files.
-
-Never predict this id yourself without the verification step: a lost race commits silently, with
-no error.
-
-### Data inlining must be off
-
-DuckLake can keep a small write (ten rows or fewer by default) in the catalog database instead of
-writing a Parquet file, until `ducklake_flush_inlined_data` runs. The watermark table is written with
-`INSERT`, one row per batch, so with inlining on its rows would pile up in the catalog database.
-Target tables are unaffected: their files are registered, and inlining only applies to inserts.
-
-So when any queue configures a watermark table, startup checks each watermark table and **fails
-unless inlining is disabled for it**:
-
-- its catalog must be attached with `DATA_INLINING_ROW_LIMIT 0`. Leaving the parameter out fails too,
-  because the default limit is 10:
-
-  ```sql
-  ATTACH 'ducklake:catalog.ducklake' AS lake (DATA_PATH 'data/', DATA_INLINING_ROW_LIMIT 0);
-  ```
-
-- an option stored with `set_option` takes precedence over the `ATTACH` parameter, the most specific
-  scope winning: the table's own, else its schema's, else the catalog's. The one that applies to the
-  watermark table must not be above 0. Options on other tables and schemas are not checked.
-
-The error lists every problem with its fix, for example:
-
-```
-catalog 'lake': ATTACH parameter DATA_INLINING_ROW_LIMIT 10. Set it to 0
-catalog 'lake', watermark table 'main.ingest_watermark': the catalog option data_inlining_row_limit = 10 takes precedence over the ATTACH parameter. CALL "lake".set_option('data_inlining_row_limit', 0, schema => 'main', table_name => 'ingest_watermark')
-```
-
-The suggested `set_option` is on the watermark table itself, so it overrides the wider scopes without
-changing any other table. With no watermark configured, nothing is checked.
 
 ## Publishing
 

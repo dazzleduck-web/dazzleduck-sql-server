@@ -288,24 +288,21 @@ S3. Treat the numbers as directional until they are repeated against a real buck
 - **`SidecarRows` is not needed.** It, `Batch.sidecarRows()` and their plumbing through
   `IngestionResult` go away. The attribute type registry becomes a sidecar view over the
   typed attribute maps, which `doc/ATTRIBUTE_TYPE_REGISTRY_SPEC.md` should be revised to say.
-- **The watermark.** `doc/DUCKLAKE_NO_INLINING_SPEC.md` converts the watermark's `INSERT` to a
-  write-then-register through `SidecarRows`. Its rows are a `GROUP BY` over the base rows, so it can
-  be a sidecar view instead, except for the snapshot id, which is known only at commit. Its
-  correction rows stay as #514 made them.
+- **The watermark.** Removed (Task 7 of `doc/DUCKDB_2_UPGRADE_PLAN.md`). Its per-batch MIN, MAX
+  and row counts were a `GROUP BY` over the base rows, so a sidecar view can produce them; the
+  commit's snapshot id, known only at commit, has no sidecar equivalent.
 - **Inlining.** Unaffected: every sidecar file is registered, and registration is never inlined.
 
 ## Open questions
 
 1. **Dynamic queues.** How the SQLite queue registry stores a queue's sidecars: a JSON column, or a
    child table keyed by queue.
-2. **The watermark as a sidecar.** Whether the snapshot id can be supplied at commit so the
-   watermark needs no code of its own.
-3. **Azure and GCS.** Their SDKs are heavier than the S3 one. The alternative is a small DuckDB
+2. **Azure and GCS.** Their SDKs are heavier than the S3 one. The alternative is a small DuckDB
    extension that copies a local file through DuckDB's own file system, which would reuse DuckDB's
    secrets for every cloud and need no Java SDK, at the cost of DuckDB's S3 writer and its 2.0
    `HEAD` requests.
-4. **Upload tuning for large batches.** H is fastest for small batches but not for 1M rows, where F
+3. **Upload tuning for large batches.** H is fastest for small batches but not for 1M rows, where F
    was faster on 1.5.6. Whether part size, `max_concurrent_uploads` or a separate pool for parts
    closes that gap.
-5. **Real S3.** The benchmark against a real bucket, before staging is recommended as the production
+4. **Real S3.** The benchmark against a real bucket, before staging is recommended as the production
    setting.
