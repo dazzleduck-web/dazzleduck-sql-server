@@ -60,6 +60,18 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     private final String tableName;
     private final String schemaName;
     private final WatermarkSpec watermarkSpec;
+    /** For tests: runs in each attempt's transaction, after its statements and before its commit. */
+    private Runnable beforeCommit = () -> { };
+
+    /**
+     * Registration attempts when the commit fails with a DuckLake transaction conflict. Such a
+     * conflict is decided before DuckLake writes anything, so nothing was registered and the same
+     * files can be registered again in a new transaction, whose snapshot includes whatever the
+     * conflicting transaction committed. Without the duckdb/ducklake#1895 fix, a DELETE on the
+     * table (a retention job's, say) that commits while a batch is being registered conflicts with
+     * it; the retry turns that into a short delay instead of a batch the client must resend.
+     */
+    static final int MAX_ATTEMPTS = 5;
 
     public DuckLakePostIngestionTask(IngestionResult ingestionResult,
                                      String catalogName,
@@ -93,13 +105,61 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         }
     }
 
+    void beforeCommitForTesting(Runnable hook) {
+        this.beforeCommit = hook;
+    }
+
+    /**
+     * Registers the files in one transaction, retried as a whole when its commit fails with a
+     * transaction conflict (see {@link #MAX_ATTEMPTS}). Any other failure is thrown at once: a
+     * rejected statement is {@link FilesNotRegisteredException}, and any other commit error has an
+     * unknown outcome, so retrying it could register the batch twice.
+     */
+    private void addFilesInTransaction(List<String> files) throws SQLException {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                addFilesOnce(files);
+                return;
+            } catch (SQLException e) {
+                if (attempt >= MAX_ATTEMPTS || !isTransactionConflict(e)) {
+                    throw e;
+                }
+                logger.info("Registering {} files in {}.{}.{} conflicted with a concurrent transaction; retrying ({}/{})",
+                        files.size(), catalogName, schemaName, tableName, attempt + 1, MAX_ATTEMPTS);
+                backOff(attempt, e);
+            }
+        }
+    }
+
+    /** DuckLake's error for a commit refused by its conflict check, before anything was written. */
+    static boolean isTransactionConflict(SQLException e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t.getMessage() != null && t.getMessage().contains("Transaction conflict")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A short, growing, jittered pause, so writers that conflicted together do not again. */
+    private static void backOff(int attempt, SQLException conflict) throws SQLException {
+        long millis = 20L * attempt + java.util.concurrent.ThreadLocalRandom.current().nextLong(20);
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            conflict.addSuppressed(interrupted);
+            throw conflict;
+        }
+    }
+
     /**
      * Adds files to DuckLake table within a transaction.
      * All files are added atomically - if any file fails, all changes are rolled back.
      * Precomputed watermark rows join the same transaction, so the registered files and their
      * watermark commit or roll back together.
      */
-    private void addFilesInTransaction(List<String> files) throws SQLException {
+    private void addFilesOnce(List<String> files) throws SQLException {
         List<String> queries = new ArrayList<>(files.stream()
                 .map(file -> ADD_FILE_QUERY.formatted(
                         escapeLiteral(catalogName), escapeLiteral(tableName), escapeLiteral(file), escapeLiteral(schemaName)))
@@ -108,13 +168,13 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         boolean hasWatermark = watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty();
         try (Connection conn = ConnectionPool.getConnection()) {
             if (!hasWatermark) {
-                executeInTxn(conn, queries, files);
+                executeInTxn(conn, queries, files, beforeCommit);
                 return;
             }
             long predictedSnapshotId = predictNextSnapshotId(conn);
             UUID batchId = UUID.randomUUID();
             queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows, predictedSnapshotId, batchId));
-            executeInTxn(conn, queries, files);
+            executeInTxn(conn, queries, files, beforeCommit);
             verifySnapshotId(conn, files, predictedSnapshotId, batchId);
         }
     }
@@ -131,6 +191,11 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
      * reported as itself.
      */
     static void executeInTxn(Connection conn, List<String> queries, List<String> files) throws SQLException {
+        executeInTxn(conn, queries, files, () -> { });
+    }
+
+    static void executeInTxn(Connection conn, List<String> queries, List<String> files, Runnable beforeCommit)
+            throws SQLException {
         boolean oldAutoCommit = conn.getAutoCommit();
         conn.setAutoCommit(false);
         Throwable primary = null;
@@ -145,6 +210,7 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
                 rollbackQuietly(conn, rejected);
                 throw rejected;
             }
+            beforeCommit.run();
             try {
                 conn.commit();
             } catch (SQLException e) {

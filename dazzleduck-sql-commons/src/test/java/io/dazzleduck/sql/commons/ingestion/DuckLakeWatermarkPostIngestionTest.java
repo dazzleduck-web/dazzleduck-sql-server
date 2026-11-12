@@ -146,6 +146,43 @@ class DuckLakeWatermarkPostIngestionTest {
     }
 
     /**
+     * A registration whose commit conflicts with a concurrent DELETE is retried as a whole, its
+     * watermark rows included: the batch lands once, with one batch id, and the snapshot id written
+     * is still a lower bound of the snapshot the retry committed in.
+     */
+    @Test
+    void aRetriedRegistrationWritesItsWatermarkOnce() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "INSERT INTO %s.main.facts VALUES ('old', 'xx', TIMESTAMP '2026-01-01', 0.0)".formatted(CATALOG));
+        }
+        List<String> files = writeBatchFiles();
+        List<List<String>> rows = computeRows(files);
+        var task = new DuckLakePostIngestionTask(result(files, rows), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark"));
+        java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+        task.beforeCommitForTesting(() -> {
+            if (attempts.incrementAndGet() == 1) {
+                try (Connection other = ConnectionPool.getConnection()) {
+                    ConnectionPool.execute(other, "DELETE FROM %s.main.facts WHERE county = 'old'".formatted(CATALOG));
+                } catch (java.sql.SQLException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
+        task.execute();
+
+        assertEquals(2, attempts.get(), "the first commit conflicted");
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(List.of("4"), collect(conn, "SELECT count(*)::VARCHAR AS r FROM %s.main.facts".formatted(CATALOG)));
+            assertEquals(List.of("3|1"), collect(conn, ("SELECT count(*)::VARCHAR || '|' || count(DISTINCT batch_id)::VARCHAR AS r "
+                    + "FROM %s.main.ingest_watermark").formatted(CATALOG)), "three groups, one batch");
+            assertEquals(List.of("true"), collect(conn, ("SELECT (max(w.min_commit_snapshot_id) <= min(f.begin_snapshot))::VARCHAR AS r "
+                    + "FROM %1$s.main.ingest_watermark w, __ducklake_metadata_%1$s.ducklake_data_file f "
+                    + "WHERE f.path LIKE '%%b1.parquet'").formatted(CATALOG)), "a lower bound of the committed snapshot");
+        }
+    }
+
+    /**
      * A TIMESTAMPTZ source's MIN/MAX are rendered in UTC, so whatever the zones (here a Tokyo JVM and a
      * Los Angeles DuckDB) a TIMESTAMPTZ watermark column stores the exact instant and a TIMESTAMP column
      * the UTC clock time. Whole-minute values matter: the JDBC driver's own rendering drops zero seconds
