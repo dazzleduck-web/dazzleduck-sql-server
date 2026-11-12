@@ -46,6 +46,16 @@ class WatermarkKeysRejectedTest {
                 { ingestion_queue = "q1", catalog = "lake", schema = "main", table = "logs",
                   additional_parameters { WATERMARK_TABLE = "ingest_watermark" } }
                 """).validate());
+        assertThrows(IllegalArgumentException.class, () -> provider("""
+                { ingestion_queue = "q1", catalog = "lake", schema = "main", table = "logs",
+                  additional_parameters { "watermark.table" = "ingest_watermark" } }
+                """).validate());
+    }
+
+    @Test
+    void anUnrelatedKeyThatStartsWithWatermarkStillLoads() {
+        assertDoesNotThrow(() -> new QueueIdToTableMapping(
+                "q1", "lake", "main", "logs", Map.of("watermarks_enabled", "true"), null, null, null));
     }
 
     @Test

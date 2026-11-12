@@ -100,7 +100,7 @@
         <!-- the commit: the one thing that carries the accent -->
         <line x1="838" y1="260" x2="838" y2="330" stroke="#0D7C86" stroke-width="1.8" marker-end="url(#ar-acc)"></line>
         <text x="854" y="284" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.8">add_data_files</text>
-        <text x="854" y="316" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="#0D7C86">ONE TRANSACTION</text>
+        <text x="854" y="301" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="#0D7C86">ONE TRANSACTION</text>
 
         <rect x="814" y="334" width="176" height="66" rx="3" fill="#FFFFFF" stroke="#0D7C86" stroke-width="1.4"></rect>
         <text x="902" y="360" text-anchor="middle" font-size="12.5" fill="#14202B">catalog</text>

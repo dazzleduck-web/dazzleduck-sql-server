@@ -87,15 +87,19 @@ public record QueueIdToTableMapping(
     /**
      * Ingestion watermarks were removed. A mapping that still configures one fails when it is built
      * (for a configured mapping, at startup) rather than have its watermark table silently stop
-     * receiving rows. Matched in any case and on the flattened key, so a nested
-     * {@code watermark { table = ... }} is caught too.
+     * receiving rows. A key is one when it starts with {@code watermark_}, or {@code watermark.} as a
+     * nested {@code watermark { table = ... }} flattens to, in any case and with HOCON's quotes
+     * around a dotted key removed.
      */
     static void rejectWatermarkKeys(String ingestionQueue, Map<String, String> additionalParameters) {
         if (additionalParameters == null) {
             return;
         }
         List<String> keys = additionalParameters.keySet().stream()
-                .filter(key -> key.toLowerCase(Locale.ROOT).startsWith("watermark"))
+                .filter(key -> {
+                    String plain = key.replace("\"", "").toLowerCase(Locale.ROOT);
+                    return plain.startsWith("watermark_") || plain.startsWith("watermark.");
+                })
                 .sorted()
                 .toList();
         if (!keys.isEmpty()) {
