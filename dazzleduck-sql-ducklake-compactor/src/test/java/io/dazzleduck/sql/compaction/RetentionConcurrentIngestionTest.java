@@ -96,7 +96,7 @@ class RetentionConcurrentIngestionTest {
             addFile(ingest, recent);
 
             execute(retention, "BEGIN");
-            assertEquals(3 * ROWS_PER_FILE, executeDelete(retention, cutoffAtHour(recent)));
+            assertEquals(3 * ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent)));
             // Ingestion keeps landing data while the DELETE is uncommitted.
             addFile(ingest, recent + 1);
             execute(retention, "COMMIT");
@@ -139,7 +139,7 @@ class RetentionConcurrentIngestionTest {
             addFile(ingest, recent);
 
             execute(retention, "BEGIN");
-            assertEquals(2 * ROWS_PER_FILE, executeDelete(retention, cutoffAtHour(recent)));
+            assertEquals(2 * ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent)));
             addFile(ingest, 12);
             SQLException conflict = assertThrows(SQLException.class, () -> execute(retention, "COMMIT"));
             assertTrue(conflict.getMessage().toLowerCase().contains("conflict"), conflict.getMessage());
@@ -151,6 +151,40 @@ class RetentionConcurrentIngestionTest {
 
             assertEquals(3 * ROWS_PER_FILE, executeDelete(retention, cutoffAtHour(recent)));
             assertEquals(ROWS_PER_FILE, count(ingest, "SELECT count(*) FROM " + TABLE));
+        }
+    }
+
+    /**
+     * The statistics and the DELETE share one snapshot. A file committed after the statistics were
+     * read, here one straddling the boundary, would otherwise be seen by the DELETE and partly
+     * deleted, writing a delete file. The DELETE does not see it, and the commit conflicts instead.
+     */
+    @Test
+    void aFileCommittedMidTransactionIsNeverPartlyDeleted() throws Exception {
+        try (Connection ingest = duplicate(); Connection retention = duplicate()) {
+            addFile(ingest, 0);
+            int recent = 60 * 24;
+            addFile(ingest, recent);
+
+            execute(retention, "BEGIN");
+            assertEquals(ROWS_PER_FILE, deleteInOpenTransaction(retention, cutoffAtHour(recent), () -> {
+                try {
+                    addRange(ingest, 24, recent + 24);
+                } catch (SQLException e) {
+                    throw new RuntimeException(e);
+                }
+            }), "only the file the snapshot shows");
+            assertThrows(SQLException.class, () -> execute(retention, "COMMIT"));
+            try {
+                execute(retention, "ROLLBACK");
+            } catch (SQLException alreadyRolledBack) {
+                // a failed COMMIT may already have ended the transaction
+            }
+
+            assertEquals(0, activeDeleteFiles(ingest));
+            assertEquals(ROWS_PER_FILE, executeDelete(retention, cutoffAtHour(recent)),
+                    "the next cycle sees the straddling file, lowers the boundary below it, and drops the old file");
+            assertEquals(0, activeDeleteFiles(ingest));
         }
     }
 
@@ -254,15 +288,29 @@ class RetentionConcurrentIngestionTest {
                 + "ignore_extra_columns => true, allow_missing => true)").formatted(CATALOG, file));
     }
 
-    /** Runs the DELETE retention would run for the cutoff; 0 when it would run none. */
+    /** One file of two rows, stamped hour {@code from} and hour {@code to}. */
+    private void addRange(Connection connection, int from, int to) throws SQLException {
+        Path file = staging.resolve("batch-%d.parquet".formatted(fileSequence.incrementAndGet()));
+        execute(connection, ("COPY (SELECT TIMESTAMP '2026-01-01' + INTERVAL (h) HOUR AS ts, h::BIGINT AS id "
+                + "FROM (VALUES (%d), (%d)) v(h)) TO '%s' (FORMAT parquet)").formatted(from, to, file));
+        execute(connection, ("CALL ducklake_add_data_files('%s', 'events', '%s', schema => 'main', "
+                + "ignore_extra_columns => true, allow_missing => true)").formatted(CATALOG, file));
+    }
+
+    /** Retention's delete for the cutoff, in its own transaction as the job runs it. */
     private static long executeDelete(Connection connection, Instant cutoff) throws SQLException {
-        var sql = DuckLakeDataRetention.deleteStatement(connection, POLICY, cutoff);
-        if (sql.isEmpty()) {
-            return 0;
-        }
-        try (Statement statement = connection.createStatement()) {
-            return statement.executeLargeUpdate(sql.get());
-        }
+        return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff);
+    }
+
+    /** Retention's delete, in a transaction the caller has begun and commits. */
+    private static long deleteInOpenTransaction(Connection connection, Instant cutoff) throws SQLException {
+        return deleteInOpenTransaction(connection, cutoff, () -> { });
+    }
+
+    /** The same, running {@code beforeDelete} between the statistics read and the DELETE. */
+    private static long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
+            throws SQLException {
+        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, cutoff, beforeDelete);
     }
 
     private static Instant cutoffAtHour(int hour) {

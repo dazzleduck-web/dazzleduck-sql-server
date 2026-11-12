@@ -14,6 +14,7 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.time.ZoneOffset;
 import java.util.List;
 
@@ -192,8 +193,84 @@ class DuckLakeDataRetentionTest {
                         List.of(expired, new DuckLakeDataRetention.FileRange(5L, 50L, true, true)), 100L),
                 "a file with NULLs does not move the boundary, or it would hold retention back forever");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
+                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 150L, true, true)), 100L),
+                "nor does a file with NULLs that straddles the cutoff");
+        assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
                         List.of(expired, new DuckLakeDataRetention.FileRange(null, null, true, true)), 100L),
                 "a file of NULLs only does not move the boundary");
+        assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
+                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L),
+                "a file without statistics does not move the boundary either");
+        assertTrue(DuckLakeDataRetention.fileBoundary(
+                        List.of(new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L).isEmpty(),
+                "and is never counted as expired");
+    }
+
+    @Test
+    void aFileWithoutStatisticsForTheColumnDoesNotStopRetention() throws Exception {
+        Path catalog = tmp.resolve("catalog.ducklake");
+        Path data = Files.createDirectories(tmp.resolve("data"));
+        run(catalog, data,
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+                "CREATE TABLE lake.main.logs (id INTEGER)",
+                // written before the time column existed: no statistics for it
+                "INSERT INTO lake.main.logs VALUES (1)",
+                "ALTER TABLE lake.main.logs ADD COLUMN ts TIMESTAMP",
+                "INSERT INTO lake.main.logs VALUES (2, TIMESTAMP '2026-08-01')",
+                "INSERT INTO lake.main.logs VALUES (3, TIMESTAMP '2026-11-10')",
+                "CREATE TABLE lake.main.retention_policy (table_name VARCHAR, time_column VARCHAR, retention VARCHAR)",
+                "INSERT INTO lake.main.retention_policy VALUES ('lake.main.logs', 'ts', '30 days')");
+
+        CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
+        DataRetention.Outcome outcome;
+        try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
+                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+            outcome = retention.enforce(DB);
+        }
+
+        assertEquals(0, outcome.failedTables());
+        assertEquals(1, outcome.rowsDeleted(), "the August file");
+        assertEquals(0, count(catalog, data, "SELECT count(*) FROM lake.main.logs WHERE id = 2"));
+        assertEquals(2, count(catalog, data, "SELECT count(*) FROM lake.main.logs"),
+                "the row without a time and the recent row are kept");
+    }
+
+    @Test
+    void retentionMustSpellOutAUnit() {
+        assertEquals(Duration.ofDays(30), RetentionPolicy.parse("a.b.c", "ts", "30 days").retention());
+        assertEquals(Duration.ofHours(12), RetentionPolicy.parse("a.b.c", "ts", "12h").retention());
+        assertEquals(Duration.ofDays(14), RetentionPolicy.parse("a.b.c", "ts", "2 weeks").retention());
+        assertEquals(Duration.ofMinutes(90), RetentionPolicy.parse("a.b.c", "ts", "90 min").retention());
+        assertEquals(Duration.ofSeconds(45), RetentionPolicy.parse("a.b.c", "ts", "45S").retention());
+        assertTrue(RetentionPolicy.parse("a.b.c", "ts", " Unlimited ").unlimited());
+        // a bare number is milliseconds to HOCON, 'm' minutes; both would delete nearly everything
+        for (String misread : List.of("30", "6m", "500ms", "10us", "0 days", "-1 days", "1.5 days", "30 months",
+                "99999999999999999999 days")) {
+            assertThrows(IllegalArgumentException.class, () -> RetentionPolicy.parse("a.b.c", "ts", misread), misread);
+        }
+    }
+
+    @Test
+    void theCutoffIsTruncatedToWhatTheColumnHolds() throws Exception {
+        Instant cutoff = Instant.parse("2026-10-12T10:00:00.700300Z");
+        long second = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.parse("2026-10-12T10:00:00Z"));
+        assertEquals(second, DuckLakeDataRetention.toMicros("TIMESTAMP_S", cutoff));
+        assertEquals(second + 700_000, DuckLakeDataRetention.toMicros("TIMESTAMP_MS", cutoff));
+        assertEquals(second + 700_300, DuckLakeDataRetention.toMicros("TIMESTAMP", cutoff));
+        assertEquals(second + 700_300, DuckLakeDataRetention.toMicros("TIMESTAMP_NS", cutoff));
+        // written exactly, so the cast cannot round it
+        assertEquals("CAST('2026-10-12 10:00:00.000000' AS TIMESTAMP_S)", DuckLakeDataRetention.cutoffLiteral(
+                "TIMESTAMP_S", Instant.EPOCH.plus(DuckLakeDataRetention.toMicros("TIMESTAMP_S", cutoff), ChronoUnit.MICROS)));
+
+        // nanosecond statistics are floored to microseconds, also before 1970
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:");
+             Statement s = c.createStatement();
+             ResultSet rs = s.executeQuery("SELECT " + DuckLakeDataRetention.toMicrosSql("TIMESTAMP_NS", "'1969-12-31 23:59:59.9999999'")
+                     + ", " + DuckLakeDataRetention.toMicrosSql("TIMESTAMP_NS", "'2026-01-01 00:00:00.0000009'"))) {
+            assertTrue(rs.next());
+            assertEquals(-1, rs.getLong(1));
+            assertEquals(ChronoUnit.MICROS.between(Instant.EPOCH, Instant.parse("2026-01-01T00:00:00Z")), rs.getLong(2));
+        }
     }
 
     @Test

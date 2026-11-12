@@ -146,8 +146,13 @@ statistics. No DELETE runs when no file lies entirely below the cutoff.
   expires. Partitioning the table by time, for example by day, keeps files from straddling.
 - Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
   not move the boundary; its expired rows are deleted with a delete file.
-- A table with a data file that has no statistics for the time column is skipped and logged, since
-  that file could hold any time.
+- A data file without statistics for the time column, such as one written before the column was
+  added, is treated the same way and logged: it could hold any time.
+- The statistics are read and the DELETE runs in one transaction, so a file committed meanwhile is
+  never partly deleted; the commit conflicts instead, and the next cycle retries.
+- `retention` is a whole number and a unit of at least seconds: `s`, `min`, `h`, `d`, `w`, or the
+  unit spelled out (`30 days`, `90 minutes`). A bare number and `m` are rejected rather than read
+  as milliseconds and minutes, as they would be in the config file.
 - Rows that cannot be used (a name that is not a plain identifier, an unknown duration) are logged
   and skipped. A table that fails, such as one without the named column, does not stop the others.
 - The dropped files are removed from storage by the regular housekeeping job once they fall out of
