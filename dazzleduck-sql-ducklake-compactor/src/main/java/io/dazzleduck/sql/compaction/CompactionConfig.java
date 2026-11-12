@@ -206,6 +206,10 @@ public record CompactionConfig(
             if (!names.add(tier.name())) {
                 throw new IllegalArgumentException("Duplicate compaction tier name: " + tier.name());
             }
+            // a tier's name is also its metrics' type tag, which these jobs use
+            if (tier.name().equals(CompactionState.HOUSEKEEPING_KIND) || tier.name().equals(CompactionState.RETENTION_KIND)) {
+                throw new IllegalArgumentException("Compaction tier name '%s' is reserved".formatted(tier.name()));
+            }
             if (tier.enabled() && tier.maxFileSize() <= tier.minFileSize()) {
                 throw new IllegalArgumentException(
                         "Compaction tier '%s': max_file_size (%d) must be greater than min_file_size (%d)"

@@ -302,7 +302,7 @@ public class CompactionService implements Closeable {
      * concurrently-running tiers each measure only their own file-size range.
      */
     private ActiveFiles queryActiveFiles(String database, String tierName, long minSizeInclusive, long maxSizeExclusive) {
-        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
+        String mdDatabase = DuckLakeCatalogs.metadataCatalog(database);
         String sql = ("SELECT COUNT(*) AS total, COALESCE(SUM(file_size_bytes), 0) AS total_bytes "
                 + "FROM %s.ducklake_data_file WHERE end_snapshot IS NULL "
                 + "AND file_size_bytes >= %d AND file_size_bytes < %d")
@@ -332,7 +332,7 @@ public class CompactionService implements Closeable {
      * a concurrently-running {@link #runTier} may be using (a JDBC Connection is not concurrency-safe).
      */
     private void refreshFileCounts(String database) {
-        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
+        String mdDatabase = DuckLakeCatalogs.metadataCatalog(database);
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
         for (CompactionTier tier : config.tiers()) {
             sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""

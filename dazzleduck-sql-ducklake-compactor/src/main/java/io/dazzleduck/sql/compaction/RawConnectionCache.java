@@ -21,6 +21,7 @@ final class RawConnectionCache implements AutoCloseable {
     private final List<String> connectionSettings;
     private final String purpose;
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
+    private volatile boolean closed;
 
     /** @param purpose names the job in log messages, e.g. "housekeeping" */
     RawConnectionCache(String startupScript, List<String> connectionSettings, String purpose) {
@@ -45,6 +46,10 @@ final class RawConnectionCache implements AutoCloseable {
             if (existing != null) {
                 return existing;
             }
+            if (closed) {
+                // a job still running at shutdown must not open an instance nothing will close
+                throw new SQLException("the %s connections are closed".formatted(purpose));
+            }
             Connection opened = RawConnections.open(startupScript, settings);
             connections.put(key, opened);
             return opened;
@@ -63,6 +68,9 @@ final class RawConnectionCache implements AutoCloseable {
 
     @Override
     public void close() {
+        synchronized (this) {
+            closed = true;
+        }
         connections.values().forEach(this::closeQuietly);
         connections.clear();
     }

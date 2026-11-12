@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.compaction;
 
 import org.duckdb.DuckDBConnection;
+import org.duckdb.DuckDBDriver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,7 +42,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * these tests fails there with a "Transaction conflict" error.
  *
  * <p>The extension is downloaded from the release once per platform into {@code target/}; the tests
- * are skipped when it cannot be downloaded. {@code -Dducklake.extension.path} uses a local build
+ * are skipped when it cannot be downloaded, except in CI, where they fail. {@code -Dducklake.extension.path} uses a local build
  * instead (the file must be named {@code ducklake.duckdb_extension}).
  *
  * <p>All connections are duplicates of one DuckDB instance attached to a DuckDB-file catalog, so
@@ -68,6 +69,8 @@ class RetentionConcurrentIngestionTest {
         Path extension = patchedExtension();
         Properties properties = new Properties();
         properties.setProperty("allow_unsigned_extensions", "true");
+        // as RawConnections opens the job's connections: streamed results change when a scan starts
+        properties.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
         instance = DriverManager.getConnection("jdbc:duckdb:", properties);
         staging = Files.createDirectories(tempDir.resolve("staging"));
         try (Statement statement = instance.createStatement()) {
@@ -204,19 +207,22 @@ class RetentionConcurrentIngestionTest {
     void continuousIngestionAndRetentionNeverConflict() throws Exception {
         int ingesters = 3;
         int windowHours = 24;
-        Duration runFor = Duration.ofSeconds(5);
+        // at least this long, and until retention has deleted a few times, but never past the cap
+        Duration minimum = Duration.ofSeconds(5);
+        Duration cap = Duration.ofSeconds(60);
+        int wantedDeletes = 5;
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
         InFlight inFlight = new InFlight();
         AtomicLong rowsIngested = new AtomicLong();
         AtomicLong rowsDeleted = new AtomicLong();
         AtomicInteger deletes = new AtomicInteger();
         List<Throwable> errors = new CopyOnWriteArrayList<>();
-        Instant deadline = Instant.now().plus(runFor);
 
         List<Thread> threads = new ArrayList<>();
         for (int i = 0; i < ingesters; i++) {
             threads.add(new Thread(() -> {
                 try (Connection ingest = duplicate()) {
-                    while (Instant.now().isBefore(deadline)) {
+                    while (!stop.get()) {
                         int hour = inFlight.claim();
                         try {
                             addFile(ingest, hour);
@@ -233,7 +239,7 @@ class RetentionConcurrentIngestionTest {
         }
         threads.add(new Thread(() -> {
             try (Connection retention = duplicate()) {
-                while (Instant.now().isBefore(deadline)) {
+                while (!stop.get()) {
                     long deleted = executeDelete(retention, cutoffAtHour(inFlight.oldest() - windowHours));
                     if (deleted > 0) {
                         rowsDeleted.addAndGet(deleted);
@@ -247,13 +253,19 @@ class RetentionConcurrentIngestionTest {
         }, "retention"));
 
         threads.forEach(Thread::start);
+        Instant start = Instant.now();
+        while (Instant.now().isBefore(start.plus(cap)) && errors.isEmpty()
+                && (Instant.now().isBefore(start.plus(minimum)) || deletes.get() < wantedDeletes)) {
+            Thread.sleep(100);
+        }
+        stop.set(true);
         for (Thread thread : threads) {
-            thread.join(runFor.plusMinutes(1).toMillis());
+            thread.join(Duration.ofMinutes(1).toMillis());
             assertFalse(thread.isAlive(), thread.getName() + " did not stop");
         }
 
         assertEquals(List.of(), errors.stream().map(Throwable::toString).toList());
-        assertTrue(deletes.get() >= 5, "retention deleted only " + deletes.get() + " time(s)");
+        assertTrue(deletes.get() >= wantedDeletes, "retention deleted only " + deletes.get() + " time(s) in " + cap);
         try (Connection check = duplicate()) {
             assertEquals(rowsIngested.get() - rowsDeleted.get(), count(check, "SELECT count(*) FROM " + TABLE));
             assertEquals(0, activeDeleteFiles(check));
@@ -299,7 +311,7 @@ class RetentionConcurrentIngestionTest {
 
     /** Retention's delete for the cutoff, in its own transaction as the job runs it. */
     private static long executeDelete(Connection connection, Instant cutoff) throws SQLException {
-        return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff);
+        return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff, Long.MIN_VALUE).rows();
     }
 
     /** BEGIN, as the job does: the type is looked up first, outside the transaction. */
@@ -318,7 +330,7 @@ class RetentionConcurrentIngestionTest {
     /** The same, running {@code beforeDelete} between the statistics read and the DELETE. */
     private static long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
             throws SQLException {
-        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, beforeDelete);
+        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, Long.MIN_VALUE, beforeDelete).rows();
     }
 
     private static Instant cutoffAtHour(int hour) {
@@ -345,6 +357,18 @@ class RetentionConcurrentIngestionTest {
     private static long activeDeleteFiles(Connection connection) throws SQLException {
         return count(connection, "SELECT count(*) FROM __ducklake_metadata_%s.ducklake_delete_file WHERE end_snapshot IS NULL"
                 .formatted(CATALOG));
+    }
+
+    /**
+     * Skips the tests locally, as when offline, but fails them in CI (which sets {@code CI}): there a
+     * skip would let a regression to stock DuckLake pass unnoticed.
+     */
+    private static void cannotDownload(String what) {
+        String message = "could not download the patched DuckLake extension " + what;
+        if (System.getenv("CI") != null) {
+            fail(message);
+        }
+        Assumptions.abort(message);
     }
 
     /** The patched extension for this platform: a local build, or the pinned release, downloaded once. */
@@ -379,10 +403,13 @@ class RetentionConcurrentIngestionTest {
             HttpResponse<Path> response = client.send(
                     HttpRequest.newBuilder(uri).timeout(Duration.ofMinutes(5)).build(),
                     HttpResponse.BodyHandlers.ofFile(partial));
-            Assumptions.assumeTrue(response.statusCode() == 200,
-                    () -> "could not download the patched DuckLake extension " + uri + ": HTTP " + response.statusCode());
+            if (response.statusCode() != 200) {
+                Files.deleteIfExists(partial);
+                cannotDownload(uri + ": HTTP " + response.statusCode());
+            }
         } catch (IOException e) {
-            Assumptions.abort("could not download the patched DuckLake extension " + uri + ": " + e);
+            Files.deleteIfExists(partial);
+            cannotDownload(uri + ": " + e);
         }
         Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         return target.toAbsolutePath();

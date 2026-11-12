@@ -192,6 +192,12 @@ class DuckLakeDataRetentionTest {
         assertTrue(DuckLakeDataRetention.fileBoundary(
                         List.of(new DuckLakeDataRetention.FileRange(100L, 120L, true, true)), 100L).isEmpty(),
                 "nothing in it below the cutoff");
+        assertTrue(DuckLakeDataRetention.fileBoundary(
+                        List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L, 90L).isEmpty(),
+                "its rows below 90 were deleted already, and its statistics still say 10 to 20");
+        assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
+                        List.of(new DuckLakeDataRetention.FileRange(10L, 95L, true, true)), 100L, 90L),
+                "it may have rows from 90 to 95 left");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
                         List.of(expired, new DuckLakeDataRetention.FileRange(5L, 50L, true, true)), 100L),
                 "a file with NULLs does not move the boundary, or it would hold retention back forever");
