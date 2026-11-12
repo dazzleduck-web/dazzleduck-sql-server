@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.dazzleduck.sql</groupId>
         <artifactId>dazzleduck-parent</artifactId>
-        <version>0.2.25-SNAPSHOT</version>
+        <version>0.3.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>dazzleduck-sql-otel-collector</artifactId>
@@ -93,12 +93,12 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.2.25-SNAPSHOT</version>
+            <version>0.3.0-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-common</artifactId>
-            <version>0.2.25-SNAPSHOT</version>
+            <version>0.3.0-SNAPSHOT</version>
         </dependency>
 
         <!-- Logging -->

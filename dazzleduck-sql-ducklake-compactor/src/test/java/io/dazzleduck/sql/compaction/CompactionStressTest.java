@@ -53,24 +53,24 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>Excluded from the default build (see the {@code stress} profile in this module's pom). Knobs,
  * all system properties:
  * <ul>
- *   <li>{@code compaction.stress.duration} (ISO-8601, default {@code PT60S})</li>
+ *   <li>{@code compaction.stress.duration} (ISO-8601, default {@code PT3M})</li>
  *   <li>{@code compaction.stress.writers} (default 4)</li>
  *   <li>{@code compaction.stress.readers} (default 2)</li>
  *   <li>{@code compaction.stress.seed} (default: random, printed; fixes each thread's random choices, though thread timing still varies between runs)</li>
  *   <li>{@code ducklake.extension.path}: a DuckLake extension file to {@code LOAD} instead of
- *       installing the stock one, e.g. a patched build from DUCKLAKE_PATCH.md's releases. The file
- *       must be named {@code ducklake.duckdb_extension}: DuckDB derives the entry point from it.</li>
+ *       installing the stock one, e.g. a locally built or patched DuckLake. The file must be named
+ *       {@code ducklake.duckdb_extension}: DuckDB derives the entry point from it.</li>
  * </ul>
  *
- * <p>The stock extension (DuckDB v1.5.5 and v1.5.6) fails this test: it lacks duckdb/ducklake#1482,
- * so two concurrent deletes on one data file leave it with two active delete files, and deleted
- * rows come back. Run it against the patched build ({@code v1.5.6-dazzleduck.1} or later, which
- * has macOS builds).
+ * <p>Stock DuckLake 1.5 failed this test: two concurrent deletes on one data file left it with two
+ * active delete files, and deleted rows came back (duckdb/ducklake#1482, carried by the
+ * {@code dazzleduck-web/ducklake} 1.5 patch). DuckLake 2.0 checks deletes and compactions per file
+ * upstream, so the stock extension is run.
  */
 @Tag("stress")
 class CompactionStressTest {
 
-    static final Duration DURATION = Duration.parse(System.getProperty("compaction.stress.duration", "PT60S"));
+    static final Duration DURATION = Duration.parse(System.getProperty("compaction.stress.duration", "PT3M"));
     static final int WRITERS = Integer.getInteger("compaction.stress.writers", 4);
     static final int READERS = Integer.getInteger("compaction.stress.readers", 2);
     static final long SEED = Long.getLong("compaction.stress.seed", new Random().nextLong());
@@ -86,14 +86,20 @@ class CompactionStressTest {
     /**
      * {@code ducklake_delete_orphaned_files} deletes any Parquet file under DATA_PATH that the catalog
      * does not know and that is older than this, including files an unfinished transaction has
-     * written but not yet committed. Seconds are safe here only because every write in this test is a
-     * DuckLake INSERT/DELETE/UPDATE that writes and commits in one sub-second transaction. Ingestion
-     * that writes with COPY first and registers later with {@code ducklake_add_data_files} (the otel
-     * collector) needs hours, or deleting would lose data.
+     * written but not yet committed. So it must exceed the longest a commit can take: every write
+     * here is one DuckLake INSERT/DELETE/UPDATE, but its commit retries up to
+     * {@link #COMMIT_RETRIES} times, waiting 100 ms x 1.5^n (each wait capped at 60 s), which is up
+     * to about 15 minutes. A 20-second age once deleted the file of a commit that retried for 28
+     * seconds, and the commit then landed pointing at it. Longer than the run, so the cleaner scans
+     * concurrently but deletes nothing here. Ingestion that writes with COPY first and registers
+     * later with {@code ducklake_add_data_files} (the otel collector) needs hours.
      */
-    static final Duration ORPHAN_AGE = Duration.ofSeconds(20);
+    static final Duration ORPHAN_AGE = Duration.ofMinutes(16);
 
-    // Small bands so files move through both tiers within a one-minute run.
+    /** DuckLake's commit retries, as the compactor and the otel collector configure them. */
+    static final int COMMIT_RETRIES = 30;
+
+    // Small bands so files move through both tiers within one run.
     static final CompactionTier MINOR = new CompactionTier(
             "minor", true, Duration.ofSeconds(1), 0, 32 * 1024L, 0, List.of());
     static final CompactionTier MAJOR = new CompactionTier(
@@ -132,8 +138,8 @@ class CompactionStressTest {
         String connectionString = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
                 postgres.getHost(), postgres.getFirstMappedPort());
         String load = EXTENSION_PATH.isBlank()
-                ? "INSTALL ducklake; LOAD ducklake;"
-                : "LOAD '%s';".formatted(EXTENSION_PATH);
+                ? "INSTALL ducklake; LOAD ducklake; SET ducklake_max_retry_count = %d;".formatted(COMMIT_RETRIES)
+                : "LOAD '%s'; SET ducklake_max_retry_count = %d;".formatted(EXTENSION_PATH, COMMIT_RETRIES);
         startupScript = "%s\nATTACH 'ducklake:postgres:%s' AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);"
                 .formatted(load, connectionString, CATALOG, dataPath);
 
@@ -156,7 +162,9 @@ class CompactionStressTest {
                 List.of(), 0, 100_000, true, REWRITE_DELETE_THRESHOLD);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         state = new CompactionState(registry, config.databases(), List.of("minor", "major"));
-        runLog = new CompactionRunLog(config.runHistorySize());
+        // filesMerged sums every run of the test, so keep them all, not the last run_history_size:
+        // a longer run would otherwise drop a tier's early merges and report it never merged.
+        runLog = new CompactionRunLog(Integer.MAX_VALUE);
         housekeeper = new DuckLakeHousekeeper(startupScript, config.snapshotRetention(), List.of(),
                 config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
         service = new CompactionService(config, startupScript,

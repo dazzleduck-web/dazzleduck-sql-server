@@ -3,6 +3,7 @@ package io.dazzleduck.sql.commons.util;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import io.dazzleduck.sql.commons.AstNodes;
 import io.dazzleduck.sql.commons.Transformations;
 import io.dazzleduck.sql.common.types.DataType;
 
@@ -65,7 +66,7 @@ public class SchemaUtils {
 
     private static void processReferenceWithCast(DataType.Struct result, JsonNode node) {
         String[] names = getColumnNames(node.get("child"));
-        DataType type = DataType.getDataType(node.get("cast_type"));
+        DataType type = DataType.getDataType(AstNodes.castType(node));
         result.add(names, type);
     }
 

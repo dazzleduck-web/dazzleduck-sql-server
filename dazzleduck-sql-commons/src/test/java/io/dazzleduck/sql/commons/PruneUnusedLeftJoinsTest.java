@@ -766,7 +766,7 @@ public class PruneUnusedLeftJoinsTest {
         JsonNode map = pruned.path("statements").path(0).path("node").path("cte_map").path("map");
         for (JsonNode entry : map) {
             if (key.equalsIgnoreCase(entry.path("key").asText())) {
-                return countJoins(entry.path("value").path("query").path("node"));
+                return countJoins(AstNodes.cteBody(entry));
             }
         }
         return -1;
@@ -940,7 +940,7 @@ public class PruneUnusedLeftJoinsTest {
      *  counter, so while this entry survives, no join in the body is eliminable. */
     private static final String LAMBDA_VIEW_BODY =
             "SELECT f.f_id, f.f_col, a.a_name, b.b_name, " +
-            "list_filter([f.a_id], r -> r > 0) AS flt " +
+            "list_filter([f.a_id], lambda r: r > 0) AS flt " +
             "FROM f " +
             "LEFT JOIN a ON f.a_id = a.a_id " +
             "LEFT JOIN b ON f.b_id = b.b_id";

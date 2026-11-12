@@ -37,11 +37,6 @@ final class RawConnections {
     static Connection open(String startupScript, List<String> connectionSettings) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
-        // The images this module ships bake in a patched DuckLake extension (see
-        // DUCKLAKE_PATCH.md) that isn't signed with DuckDB Labs' key, so a startup script's
-        // `LOAD ducklake` fails without this. Must be a connection property, not a `SET` statement:
-        // DuckDB rejects changing it once the database instance is already running.
-        properties.setProperty("allow_unsigned_extensions", "true");
         Connection connection = DriverManager.getConnection("jdbc:duckdb:", properties);
         try (Statement statement = connection.createStatement()) {
             for (String sql : splitStatements(startupScript)) {

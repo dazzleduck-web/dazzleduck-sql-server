@@ -71,7 +71,16 @@ public class Fingerprint {
         return hexString.toString();
     }
 
+    /**
+     * Replaces every constant with a placeholder, except inside a type: DuckDB 2.0 serializes a
+     * cast's type parameters ({@code DECIMAL(10,2)}, {@code VARCHAR(10)}) as constants, and they are
+     * part of the query's shape, not its values. A TYPE node is matched and returned unchanged.
+     */
     private static JsonNode getFingerprintedTree(JsonNode tree) throws JsonProcessingException {
-        return Transformations.transform(tree, Transformations.IS_CONSTANT, Transformations.REPLACE_CONSTANT);
+        return Transformations.transform(tree,
+                n -> IS_TYPE.apply(n) || Transformations.IS_CONSTANT.apply(n),
+                n -> IS_TYPE.apply(n) ? n : Transformations.REPLACE_CONSTANT.apply(n));
     }
+
+    private static final java.util.function.Function<JsonNode, Boolean> IS_TYPE = Transformations.isClass("TYPE");
 }

@@ -194,9 +194,8 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-25.jdk/Contents/Home
 # Run tests
 ./mvnw test -pl dazzleduck-sql-ducklake-compactor
 
-# Build Docker image (Jib, no daemon required); bakes in the patched DuckLake extension
-# (see DUCKLAKE_PATCH.md), so the download step must be explicitly enabled here
-./mvnw jib:dockerBuild -pl dazzleduck-sql-ducklake-compactor -Dducklake.extension.download.skip=false
+# Build Docker image (Jib, no daemon required)
+./mvnw jib:dockerBuild -pl dazzleduck-sql-ducklake-compactor
 ```
 
 ## Running
@@ -218,6 +217,11 @@ docker run \
   --conf 'dazzleduck_sql_compaction.databases=[mydb]' \
   --conf 'dazzleduck_sql_compaction.startup_script_provider.script_location=/config/startup.sql'
 ```
+
+The Jib image installs the stock DuckLake extension from DuckDB's extension repository the first
+time the startup script attaches a catalog, so the container needs network access to
+`extensions.duckdb.org` on first start. The native image (`Dockerfile.native`) has it
+pre-installed and runs offline.
 
 ## Telemetry
 

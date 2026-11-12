@@ -326,6 +326,7 @@ public class QueryServer implements Closeable {
                        CompressionUtil.CodecType codec) throws IOException {
         boolean headersSent = false;
         Statement registered = null;
+        long started = System.nanoTime();
         try {
             try (DuckDBConnection connection = ConnectionPool.getConnection();
                  Statement statement = connection.createStatement();
@@ -380,8 +381,13 @@ public class QueryServer implements Closeable {
             }
         } catch (SQLException | IOException | RuntimeException e) {
             // DuckDB reports a query timeout and a cancel from close() the same way; while not
-            // closing, an interrupt can only be the timeout.
-            boolean timedOut = !closing && isInterrupt(e);
+            // closing, an interrupt can only be the timeout. DuckDB 2.0 reports a timeout of a
+            // streamed result as "Invalid result set" instead, so that failure once the timeout has
+            // passed counts as the timeout too. Any other late failure (a client disconnecting from
+            // a long stream, a genuine query error) keeps its own outcome.
+            boolean timedOut = !closing && (isInterrupt(e)
+                    || (causedBy(e, "Invalid result set")
+                        && System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(timeoutSeconds())));
             String outcome = timedOut ? "timeout" : "error";
             if (headersSent) {
                 log.warn("Query result stream failed after the response started; aborting the connection", e);
@@ -406,8 +412,13 @@ public class QueryServer implements Closeable {
     }
 
     private static boolean isInterrupt(Throwable e) {
+        return causedBy(e, "INTERRUPT Error");
+    }
+
+    /** Whether {@code e} or one of its causes has a message containing {@code text}. */
+    private static boolean causedBy(Throwable e, String text) {
         for (Throwable c = e; c != null; c = c.getCause()) {
-            if (c.getMessage() != null && c.getMessage().contains("INTERRUPT Error")) {
+            if (c.getMessage() != null && c.getMessage().contains(text)) {
                 return true;
             }
         }

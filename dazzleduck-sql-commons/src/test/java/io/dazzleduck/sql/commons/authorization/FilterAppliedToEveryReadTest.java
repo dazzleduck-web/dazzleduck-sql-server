@@ -2,6 +2,7 @@ package io.dazzleduck.sql.commons.authorization;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.dazzleduck.sql.common.Headers;
+import io.dazzleduck.sql.commons.AstNodes;
 import io.dazzleduck.sql.commons.ConnectionPool;
 import io.dazzleduck.sql.commons.Transformations;
 import org.duckdb.DuckDBConnection;
@@ -498,7 +499,7 @@ public class FilterAppliedToEveryReadTest {
                 "SELECT count(*) FROM orders a TABLESAMPLE 50% JOIN orders b USING (id)"), grants().get(0));
         String sql = Transformations.parseToSql(conn, authorized);
         JsonNode statement = Transformations.getFirstStatementNode(authorized);
-        JsonNode body = statement.get("cte_map").get("map").get(0).get("value").get("query").get("node");
+        JsonNode body = AstNodes.cteBody(statement.get("cte_map").get("map").get(0));
         assertTrue(body.get("from_table").get("sample").isNull(), "the shared body is not sampled: " + sql);
         JsonNode join = statement.get("from_table");
         assertTrue(!join.get("left").get("sample").isNull(), "a keeps its sample: " + sql);

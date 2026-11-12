@@ -125,32 +125,18 @@ build_multi_arch() {
   local maven_module="$1"
   local arch="$2"
   local goal
-  # Only the compactor bakes in the patched DuckLake extension (see DUCKLAKE_PATCH.md); the
-  # download step is skipped by default so plain test/install/verify don't need network access
-  # to a GitHub release. Arrays are expanded as ${a[@]+"${a[@]}"} because macOS's /bin/bash
-  # (3.2) treats an empty "${a[@]}" as an unbound variable under set -u.
-  # The download is bound to generate-resources, and a jib goal invoked on its own runs no
-  # lifecycle phase, so that phase must run first (as release.yml's `package jib:build` does);
-  # otherwise jib fails on the missing target/ducklake-extension/linux_<arch> directory.
-  # (Only generate-resources, not package: re-packaging the shaded jar isn't needed here.)
-  local phases=()
-  local extra_args=()
-  if [[ "$maven_module" == "dazzleduck-sql-ducklake-compactor" ]]; then
-    phases+=("generate-resources")
-    extra_args+=("-Dducklake.extension.download.skip=false")
-  fi
 
   # runtime uses named executions with arch hardcoded; others use -Djib.architecture
   if [[ "$maven_module" == "dazzleduck-sql-runtime" ]]; then
     goal=$(jib_goal "jib:build@docker-${arch}")
     echo ""
     echo "▶ $maven_module ($arch)"
-    "$MVN" ${phases[@]+"${phases[@]}"} "$goal" -pl "$maven_module" -DskipTests -f "$ROOT/pom.xml" ${extra_args[@]+"${extra_args[@]}"}
+    "$MVN" "$goal" -pl "$maven_module" -DskipTests -f "$ROOT/pom.xml"
   else
     goal=$(jib_goal "jib:build")
     echo ""
     echo "▶ $maven_module ($arch)"
-    "$MVN" ${phases[@]+"${phases[@]}"} "$goal" -pl "$maven_module" -Djib.architecture="$arch" -DskipTests -f "$ROOT/pom.xml" ${extra_args[@]+"${extra_args[@]}"}
+    "$MVN" "$goal" -pl "$maven_module" -Djib.architecture="$arch" -DskipTests -f "$ROOT/pom.xml"
   fi
 }
 
@@ -160,7 +146,7 @@ build_single_arch() {
   goal=$(jib_goal "jib:build")
   echo ""
   echo "▶ $maven_module"
-  "$MVN" ${phases[@]+"${phases[@]}"} "$goal" -pl "$maven_module" -DskipTests -f "$ROOT/pom.xml"
+  "$MVN" "$goal" -pl "$maven_module" -DskipTests -f "$ROOT/pom.xml"
 }
 
 push_manifests() {

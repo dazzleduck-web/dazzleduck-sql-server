@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.delta;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.dazzleduck.sql.commons.AstNodes;
 import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.expressions.*;
 import io.delta.kernel.expressions.Column;
@@ -242,19 +243,18 @@ public class Transformations {
 
     // TODO
     private static Expression toLiteral(JsonNode literal) throws IOException {
-        JsonNode value = literal.get("value");
-        String type = value.get("type").get("id").asText();
+        String type = AstNodes.constantTypeId(literal);
+        String value = AstNodes.constantText(literal);
 
         return switch (type) {
-            case "INTEGER" -> Literal.ofInt(value.get("value").asInt());
-            case "VARCHAR" -> Literal.ofString(value.get("value").asText());
-            case "BOOLEAN" -> Literal.ofBoolean(value.get("value").asBoolean());
-            case "DATE" -> Literal.ofDate(Integer.parseInt(value.get("value").toString()));
-            case "TIMESTAMP" ->
-                    Literal.ofTimestamp(Long.parseLong(value.get("value").toString()));
-            case "FLOAT" -> Literal.ofFloat((float) value.get("value").asDouble());
-            case "DOUBLE" -> Literal.ofDouble(value.get("value").asDouble());
-            case "BLOB" -> Literal.ofBinary(value.get("value").textValue().getBytes(StandardCharsets.UTF_8));
+            case "INTEGER" -> Literal.ofInt(AstNodes.integerConstant(literal).intValue());
+            case "VARCHAR" -> Literal.ofString(value);
+            case "BOOLEAN" -> Literal.ofBoolean(Boolean.parseBoolean(value));
+            case "DATE" -> Literal.ofDate(Integer.parseInt(value));
+            case "TIMESTAMP" -> Literal.ofTimestamp(Long.parseLong(value));
+            case "FLOAT" -> Literal.ofFloat(Float.parseFloat(value));
+            case "DOUBLE" -> Literal.ofDouble(Double.parseDouble(value));
+            case "BLOB" -> Literal.ofBinary(value.getBytes(StandardCharsets.UTF_8));
             default -> throw new UnsupportedOperationException("Unsupported literal type: " + type);
         };
     }
@@ -268,7 +268,7 @@ public class Transformations {
         JsonNode child = cast.get("child");
         Expression childExpr = toDeltaPredicate(child);
         String sourceType = String.valueOf(((Literal) childExpr).getDataType()).toUpperCase();;
-        String castType = cast.get("cast_type").get("id").asText().toUpperCase();;
+        String castType = AstNodes.castType(cast).get("id").asText().toUpperCase();
 
         if (!canCast(sourceType, castType)) {
             throw new UnsupportedOperationException("Casting from " + sourceType + " to " + castType + " is not supported");

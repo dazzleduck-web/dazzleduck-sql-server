@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 public class FingerprintTest {
 
@@ -21,5 +22,14 @@ public class FingerprintTest {
             res[i] = Fingerprint.generate(sqls[i]);
         }
         assertEquals (1, Arrays.stream(res).distinct().toArray().length);
+    }
+
+    /** DuckDB 2.0 serializes a cast's type parameters as constants; they are shape, not values. */
+    @Test
+    public void castTypeParametersArePartOfTheShape() throws SQLException, IOException {
+        assertNotEquals(Fingerprint.generate("select x::DECIMAL(10,2) from t"),
+                Fingerprint.generate("select x::DECIMAL(18,4) from t"));
+        assertEquals(Fingerprint.generate("select x::DECIMAL(10,2) from t where y = 1"),
+                Fingerprint.generate("select x::DECIMAL(10,2) from t where y = 2"));
     }
 }

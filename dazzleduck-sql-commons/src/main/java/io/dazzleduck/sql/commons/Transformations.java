@@ -127,6 +127,18 @@ public class Transformations {
      */
     public static final Function<JsonNode, JsonNode> REPLACE_CONSTANT = node -> {
         JsonNode result = node.deepCopy();
+        if (result.get(AstNodes.FIELD_LITERAL) instanceof ObjectNode literal) {
+            // DuckDB 2.0: an untyped literal; placeholders by the type it binds to, as below.
+            String id = AstNodes.constantTypeId(result);
+            if (TYPE_VARCHAR.equals(id)) {
+                literal.put(AstNodes.FIELD_TEXT, "?");
+            } else if (TYPE_INTEGER.equals(id)) {
+                literal.put(AstNodes.FIELD_TEXT, "-1");
+            } else if (TYPE_DECIMAL.equals(id)) {
+                literal.put(AstNodes.FIELD_TEXT, "-0.1");
+            }
+            return result;
+        }
         ObjectNode valueNode = (ObjectNode) result.get(FIELD_VALUE);
         ObjectNode type = (ObjectNode) valueNode.get(FIELD_TYPE);
         String id = type.get("id").asText();
@@ -272,6 +284,7 @@ public class Transformations {
             from_table.put(FIELD_TABLE_NAME, statTable);
             from_table.put(FIELD_SCHEMA_NAME, "");
             from_table.put(FIELD_CATALOG_NAME, "");
+            AstNodes.forgetQualifiedName(from_table);
             JsonNode where = firstStatementNode.get(FIELD_WHERE_CLAUSE);
             if (where == null || where instanceof NullNode) {
                 return query;
@@ -491,6 +504,9 @@ public class Transformations {
         if (children != null) {
             return children;
         }
+        if (node.get(AstNodes.FIELD_ARGUMENTS) != null) {
+            return AstNodes.arguments(node);
+        }
         JsonNode child = node.get(FIELD_CHILD);
 
         if(child != null) {
@@ -546,11 +562,9 @@ public class Transformations {
         if (matching.apply(input)) {
             changeFunction.accept(input);
         }
-        var children = (ArrayNode) input.get(FIELD_CHILDREN);
-        if (children == null) {
-            return;
-        }
-        for (var c : children) {
+        JsonNode children = input.get(FIELD_CHILDREN);
+        Iterable<JsonNode> next = children != null ? children : AstNodes.arguments(input);
+        for (var c : next) {
             changeMatching(c, matching, changeFunction);
         }
     }
@@ -585,9 +599,23 @@ public class Transformations {
      */
     public static String rewriteTableAsThis(String sql, String inputCatalog, String inputSchema, String inputTable)
             throws SQLException, JsonProcessingException {
+        return rewriteTableAsThis(sql, inputCatalog, inputSchema, inputTable, "", "");
+    }
+
+    /**
+     * As {@link #rewriteTableAsThis(String, String, String, String)}, for the body of a view in
+     * {@code viewCatalog}.{@code viewSchema}: a table reference that leaves out its catalog or schema
+     * resolves to the view's, as DuckDB binds it. DuckDB 2.0 returns a view's body as bound, qualified
+     * by schema but not by catalog ({@code FROM main.logs}).
+     */
+    public static String rewriteTableAsThis(String sql, String inputCatalog, String inputSchema, String inputTable,
+                                            String viewCatalog, String viewSchema)
+            throws SQLException, JsonProcessingException {
         JsonNode ast = parseToTree(sql);
         int[] count = {0};
-        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, count);
+        Set<String> cteNames = new HashSet<>();
+        collectAllCteNames(ast, cteNames);
+        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, viewCatalog, viewSchema, cteNames, count);
         if (count[0] == 0) {
             throw new IllegalArgumentException(
                     "input_table '%s.%s.%s' not found in view body: %s"
@@ -601,7 +629,16 @@ public class Transformations {
         return parseToSql(ast);
     }
 
-    private static void replaceBaseTableNode(JsonNode node, String catalog, String schema, String table, int[] count) {
+    /** Case-folded names of every CTE declared anywhere in {@code node}. */
+    private static void collectAllCteNames(JsonNode node, Set<String> out) {
+        if (node == null || !node.isContainerNode()) return;
+        if (node.isObject()) collectCteNames(node, out);
+        node.forEach(child -> collectAllCteNames(child, out));
+    }
+
+    private static void replaceBaseTableNode(JsonNode node, String catalog, String schema, String table,
+                                             String defaultCatalog, String defaultSchema, Set<String> cteNames,
+                                             int[] count) {
         if (node == null || node instanceof NullNode || !node.isContainerNode()) return;
         if (count[0] > 1) return; // already invalid — no point scanning further
         if (node.isObject()) {
@@ -610,18 +647,28 @@ public class Transformations {
                 String nodeCatalog = node.get(ExpressionConstants.FIELD_CATALOG_NAME).asText("");
                 String nodeSchema  = node.get(ExpressionConstants.FIELD_SCHEMA_NAME).asText("");
                 String nodeTable   = node.get(ExpressionConstants.FIELD_TABLE_NAME).asText("");
+                // An unqualified name may be a CTE, which shadows the table; it keeps no defaults.
+                boolean maybeCte = nodeCatalog.isEmpty() && nodeSchema.isEmpty()
+                        && cteNames.contains(foldCase(nodeTable));
+                if (!maybeCte) {
+                    if (nodeCatalog.isEmpty()) nodeCatalog = defaultCatalog;
+                    if (nodeSchema.isEmpty()) nodeSchema = defaultSchema;
+                }
                 if (catalog.equals(nodeCatalog) && schema.equals(nodeSchema) && table.equals(nodeTable)) {
                     count[0]++;
                     ObjectNode obj = (ObjectNode) node;
                     obj.put(ExpressionConstants.FIELD_CATALOG_NAME, "");
                     obj.put(ExpressionConstants.FIELD_SCHEMA_NAME, "");
                     obj.put(ExpressionConstants.FIELD_TABLE_NAME, "__this");
+                    AstNodes.forgetQualifiedName(obj);
                     return; // don't recurse into the node we just mutated
                 }
             }
-            node.fields().forEachRemaining(e -> replaceBaseTableNode(e.getValue(), catalog, schema, table, count));
+            node.fields().forEachRemaining(e -> replaceBaseTableNode(e.getValue(), catalog, schema, table,
+                    defaultCatalog, defaultSchema, cteNames, count));
         } else {
-            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, count));
+            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, defaultCatalog, defaultSchema,
+                    cteNames, count));
         }
     }
 
@@ -697,8 +744,9 @@ public class Transformations {
             // `WITH x AS (…) SELECT … UNION SELECT …` hangs the WITH on the set operation itself.
             Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
                     collector, visibleCteNames);
-            collectAllTableRefsFromStatement(statement.get(FIELD_LEFT), catalogName, schemaName, collector, localCteNames);
-            collectAllTableRefsFromStatement(statement.get(FIELD_RIGHT), catalogName, schemaName, collector, localCteNames);
+            for (JsonNode branch : AstNodes.setOperationBranches(statement)) {
+                collectAllTableRefsFromStatement(branch, catalogName, schemaName, collector, localCteNames);
+            }
             collectAllTableRefsFromExpression(statement.get(FIELD_MODIFIERS), catalogName, schemaName, collector, localCteNames);
         } else if (NODE_TYPE_RECURSIVE_CTE_NODE.equals(type)) {
             Set<String> localCteNames = collectAllTableRefsFromCteBodies(statement, catalogName, schemaName,
@@ -769,7 +817,7 @@ public class Transformations {
         JsonNode map = cteMap == null ? null : cteMap.get(FIELD_MAP);
         if (map != null && map.isArray()) {
             for (JsonNode entry : map) {
-                collectAllTableRefsFromStatement(entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE),
+                collectAllTableRefsFromStatement(AstNodes.cteBody(entry),
                         catalogName, schemaName, collector, CteScope.copyOf(localCteNames));
                 localCteNames.add(entry.get(FIELD_KEY).asText());
             }
@@ -796,10 +844,9 @@ public class Transformations {
             case NODE_TYPE_TABLE_FUNCTION -> {
                 var function = fromNode.get(FIELD_FUNCTION);
                 var functionName = function.get(FIELD_FUNCTION_NAME).asText();
-                var functionChildren = function.get(FIELD_CHILDREN);
-                boolean allConstant = functionChildren != null && functionChildren.isArray()
-                        && !functionChildren.isEmpty()
-                        && extractPathsFromTableFunctionChild(functionChildren.get(0), functionName, collector);
+                var functionArguments = AstNodes.arguments(function);
+                boolean allConstant = !functionArguments.isEmpty()
+                        && extractPathsFromTableFunctionChild(functionArguments.get(0), functionName, collector);
                 if (!allConstant) {
                     // A path that is not (entirely) a constant -- read_parquet((SELECT ..)),
                     // read_parquet(['/allowed/a', '/secret/' || 'b']), getvariable(..) -- cannot be
@@ -1177,8 +1224,7 @@ public class Transformations {
             // have already processed, so an index we still hold stays valid.
             for (int i = cteRefs.size() - 1; i >= 0; i--) {
                 int idx = cteRefs.get(i);
-                ObjectNode cteBody = (ObjectNode) outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP)
-                        .get(idx).get("value").get("query").get("node");
+                ObjectNode cteBody = (ObjectNode) AstNodes.cteBody(outerCopy.get(FIELD_CTE_MAP).get(FIELD_MAP).get(idx));
                 if (isStarFilterCteBody(cteBody)) {
                     // Row-filter wrapper `SELECT * FROM <view> WHERE <filter>` (the RLS authorizer's
                     // output): its own STAR hides the real column usage, which lives in the CTE's
@@ -1336,7 +1382,7 @@ public class Transformations {
             String cloneName = uniqueCteKey(map, cteName + "__c" + i);
             ObjectNode cloneEntry = (ObjectNode) original.deepCopy();
             cloneEntry.put(FIELD_KEY, cloneName);
-            ObjectNode cloneBody = (ObjectNode) cloneEntry.path("value").path("query").path("node");
+            ObjectNode cloneBody = (ObjectNode) AstNodes.cteBody(cloneEntry);
             Set<String> cols = perConsumer.get(i);
             if (cols != null) {
                 anyPruned |= pruneViewBodyInto(cloneBody, cloneBody.get(FIELD_FROM_TABLE),
@@ -1387,8 +1433,8 @@ public class Transformations {
         if (map.isArray()) {
             for (int i = 0; i < map.size(); i++) {
                 if (i == selfIndex) continue;
-                JsonNode body = map.get(i).path("value").path("query").path("node");
-                if (body.isObject() && referencesTable((ObjectNode) body, cteName, false)) {
+                JsonNode body = AstNodes.cteBody(map.get(i));
+                if (body != null && body.isObject() && referencesTable((ObjectNode) body, cteName, false)) {
                     consumers.add((ObjectNode) body);
                 }
             }
@@ -1423,7 +1469,7 @@ public class Transformations {
             if (NODE_TYPE_BASE_TABLE.equals(asText(obj, FIELD_TYPE))
                     && sameIdentifier(table, asText(obj, FIELD_TABLE_NAME))) {
                 n++;
-                if (rename != null) obj.put(FIELD_TABLE_NAME, rename);
+                if (rename != null) AstNodes.forgetQualifiedName(obj).put(FIELD_TABLE_NAME, rename);
             }
             var it = obj.fields();
             while (it.hasNext()) {
@@ -1524,8 +1570,8 @@ public class Transformations {
         if (map == null || !map.isArray()) return List.of();
         List<Integer> found = new ArrayList<>();
         for (int i = 0; i < map.size(); i++) {
-            JsonNode body = map.get(i).path("value").path("query").path("node");
-            if (!NODE_TYPE_SELECT_NODE.equals(asText(body, FIELD_TYPE))) continue;
+            JsonNode body = AstNodes.cteBody(map.get(i));
+            if (body == null || !NODE_TYPE_SELECT_NODE.equals(asText(body, FIELD_TYPE))) continue;
             JsonNode from = body.get(FIELD_FROM_TABLE);
             if (isViewRef(from, view)
                     && (view.isQualified() || !referencesOuterCte(body, from))) {
@@ -2239,7 +2285,8 @@ public class Transformations {
                 var node = fromNode.get(FIELD_SUBQUERY).get(FIELD_NODE);
                 var type = node.get(FIELD_TYPE).asText();
                 if (type.equals(NODE_TYPE_SET_OPERATION_NODE)) {
-                    return getTableFunctionNode(node.get(FIELD_RIGHT), returnParent);
+                    List<JsonNode> branches = AstNodes.setOperationBranches(node);
+                    return getTableFunctionNode(branches.get(branches.size() - 1), returnParent);
                 } else if (type.equals(NODE_TYPE_SELECT_NODE)) {
                     return getTableFunctionNode(node, returnParent);
                 }
@@ -2285,7 +2332,8 @@ public class Transformations {
                         return getSelectForTableFunction(subQueryNode);
                     }
                     case NODE_TYPE_SET_OPERATION_NODE -> {
-                        if(subQueryNode.get(FIELD_RIGHT).get(FIELD_FROM_TABLE).get(FIELD_TYPE).asText().equals(NODE_TYPE_TABLE_FUNCTION)) {
+                        List<JsonNode> branches = AstNodes.setOperationBranches(subQueryNode);
+                        if(branches.get(branches.size() - 1).get(FIELD_FROM_TABLE).get(FIELD_TYPE).asText().equals(NODE_TYPE_TABLE_FUNCTION)) {
                             return statementNode;
                         }
                         return null;
@@ -2317,11 +2365,10 @@ public class Transformations {
         if (tableFunction == null) {
             throw new IllegalStateException("No table function found in tree: " + tree);
         }
-        JsonNode childrenNode = tableFunction.get(FIELD_CHILDREN);
-        if (childrenNode == null || !childrenNode.isArray()) {
-            throw new IllegalStateException("Table function has no children array. Function: " + tableFunction);
+        List<JsonNode> children = AstNodes.arguments(tableFunction);
+        if (children.isEmpty()) {
+            throw new IllegalStateException("Table function has no arguments. Function: " + tableFunction);
         }
-        ArrayNode children = (ArrayNode) childrenNode;
         JsonNode partition = null;
         for( var c :  children){
             if(isHivePartition(c)){
@@ -2351,11 +2398,11 @@ public class Transformations {
             case NODE_TYPE_TABLE_FUNCTION -> {
                 var function = fromNode.get(FIELD_FUNCTION);
                 var functionName = function.get(FIELD_FUNCTION_NAME).asText();
-                var functionChildren = function.get(FIELD_CHILDREN);
-                if (functionChildren == null || !functionChildren.isArray() || functionChildren.isEmpty()) {
-                    throw new IllegalStateException("TABLE_FUNCTION node has no children. Function: " + functionName);
+                var functionArguments = AstNodes.arguments(function);
+                if (functionArguments.isEmpty()) {
+                    throw new IllegalStateException("TABLE_FUNCTION node has no arguments. Function: " + functionName);
                 }
-                var firstChild = functionChildren.get(0);
+                var firstChild = functionArguments.get(0);
                 extractPathsFromTableFunctionChild(firstChild, functionName, collector);
             }
             case NODE_TYPE_SUBQUERY -> {
@@ -2367,16 +2414,14 @@ public class Transformations {
                 }
             }
 
-            case NODE_TYPE_SET_OPERATION_NODE -> {
-                getAllTablesOrPathsFromSelect(fromNode.get(FIELD_LEFT), catalogName, schemaName, collector);
-                getAllTablesOrPathsFromSelect(fromNode.get(FIELD_RIGHT), catalogName, schemaName, collector);
-            }
+            case NODE_TYPE_SET_OPERATION_NODE -> getAllTablesOrPathsFromSetOperationNode(fromNode, catalogName, schemaName, collector);
         }
     }
 
     private static void getAllTablesOrPathsFromSetOperationNode(JsonNode setOperation, String catalogName, String schemaName, List<CatalogSchemaTable> collector) {
-        getAllTablesOrPathsFromSelect(setOperation.get(FIELD_LEFT), catalogName, schemaName, collector);
-        getAllTablesOrPathsFromSelect(setOperation.get(FIELD_RIGHT), catalogName, schemaName, collector);
+        for (JsonNode branch : AstNodes.setOperationBranches(setOperation)) {
+            getAllTablesOrPathsFromSelect(branch, catalogName, schemaName, collector);
+        }
     }
 
     /**
@@ -2395,16 +2440,13 @@ public class Transformations {
             JsonNode functionNameNode = child.get(FIELD_FUNCTION_NAME);
             if (functionNameNode != null && "list_value".equals(functionNameNode.asText())) {
                 // Extract all paths from list_value children
-                JsonNode listChildren = child.get(FIELD_CHILDREN);
                 boolean allConstant = true;
-                if (listChildren != null && listChildren.isArray()) {
-                    for (JsonNode listChild : listChildren) {
-                        String path = extractConstantValue(listChild);
-                        if (path != null) {
-                            collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
-                        } else {
-                            allConstant = false;
-                        }
+                for (JsonNode listChild : AstNodes.arguments(child)) {
+                    String path = AstNodes.constantText(listChild);
+                    if (path != null) {
+                        collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
+                    } else {
+                        allConstant = false;
                     }
                 }
                 return allConstant;
@@ -2412,27 +2454,13 @@ public class Transformations {
             return false;
         } else {
             // Direct constant value
-            String path = extractConstantValue(child);
+            String path = AstNodes.constantText(child);
             if (path != null) {
                 collector.add(new CatalogSchemaTable(null, null, path, TableType.TABLE_FUNCTION, functionName));
                 return true;
             }
             return false;
         }
-    }
-
-    /**
-     * Extracts the string value from a constant node.
-     */
-    private static String extractConstantValue(JsonNode node) {
-        JsonNode valueNode = node.get(FIELD_VALUE);
-        if (valueNode != null) {
-            JsonNode innerValue = valueNode.get(FIELD_VALUE);
-            if (innerValue != null) {
-                return innerValue.asText();
-            }
-        }
-        return null;
     }
 
     private static boolean isHivePartition(JsonNode node) {
@@ -2458,11 +2486,10 @@ public class Transformations {
         if (rightNode == null) {
             throw new IllegalStateException("Partition node has no 'right' field. Node: " + node);
         }
-        JsonNode childrenNode = rightNode.get(FIELD_CHILDREN);
-        if (childrenNode == null || !childrenNode.isArray()) {
-            throw new IllegalStateException("Partition right node has no 'children' array. Node: " + rightNode);
+        List<JsonNode> children = AstNodes.arguments(rightNode);
+        if (children.isEmpty()) {
+            throw new IllegalStateException("Partition right node has no arguments. Node: " + rightNode);
         }
-        ArrayNode children = (ArrayNode) childrenNode;
         String[][] res = new String[children.size()][];
         int index = 0;
         for(JsonNode  c : children) {
@@ -2481,19 +2508,12 @@ public class Transformations {
         return res;
     }
 
-    public static String getCast(String schema) throws SQLException, JsonProcessingException {
-        var query = String.format("select null::struct(%s)", schema);
-        var statement = Transformations.getFirstStatementNode(Transformations.parseToTree(query));
-        var selectList = (ArrayNode)statement.get("select_list");
-        var firstSelect = selectList.get(0);
-        var castType= firstSelect.get("cast_type");
-        var childType = (ArrayNode) castType.get("type_info").get("child_types");
-        List<String> childTypeString = new ArrayList<>();
-        for( var c : childType){
-            var exp = "null::%s as %s".formatted(getStructChildTypeString(c), getStrcutChildNameString(c));
-            childTypeString.add(exp);
-        }
-        return "select "  + String.join(",", childTypeString) + " where false";
+    /**
+     * A query returning no rows whose columns are the fields of {@code schema} (a STRUCT field list,
+     * e.g. {@code a INT, b VARCHAR}), with their types.
+     */
+    public static String getCast(String schema) {
+        return "select unnest(null::STRUCT(%s)) where false".formatted(schema);
     }
 
     /**
@@ -2516,91 +2536,19 @@ public class Transformations {
             throw new IllegalStateException("Expected CONSTANT class but got: " + (classNode != null ? classNode.asText() : "null"));
         }
 
-        var valueNode = constant.get(FIELD_VALUE);
-        if (valueNode == null) {
-            throw new IllegalStateException("CONSTANT node has no value field");
+        String valueType = AstNodes.constantTypeId(constant);
+        if (valueType == null) {
+            throw new IllegalStateException("CONSTANT node has no type. Node: " + constant);
         }
-
-        JsonNode typeNode = valueNode.get(FIELD_TYPE);
-        if (typeNode == null) {
-            throw new IllegalStateException("CONSTANT value has no type field");
-        }
-
-        JsonNode idNode = typeNode.get("id");
-        if (idNode == null) {
-            throw new IllegalStateException("CONSTANT type has no id field");
-        }
-
-        String valueType = idNode.asText();
         switch (valueType) {
             case TYPE_VARCHAR -> {
-                return (T) valueNode.get(FIELD_VALUE).asText();
+                return (T) AstNodes.constantText(constant);
             }
             default -> throw new IllegalStateException(
                     "Unsupported constant type: " + valueType + ". Only VARCHAR is currently supported. Node: " + constant);
         }
     }
 
-    private static String structCast(JsonNode node) {
-        var typeInfo = (ArrayNode) node.get("type_info").get("child_types");
-        List<String> res = new ArrayList<>();
-        for(JsonNode n : typeInfo) {
-            var s = getStructChildTypeString(n);
-            var first = n.get("first").asText();
-            res.add(first + " " + s);
-        }
-        return "STRUCT (" + String.join(",", res) + ")";
-    }
-
-    private static String mapCast(JsonNode node) {
-        var typeInfo = (ArrayNode)node.get("type_info").get("child_type").get("type_info").get("child_types");
-        if (typeInfo == null || typeInfo.size() < 2) {
-            throw new IllegalStateException("MAP type info must have at least 2 child types. Node: " + node);
-        }
-        var key = getTypeString(typeInfo.get(0).get("second"));    // Fixed: use index 0 for key
-        var value = getTypeString(typeInfo.get(1).get("second")); // index 1 for value
-        return "Map(" + key +"," + value +")";
-    }
-
-    private static String listCast(JsonNode node){
-        var childType = getTypeString(node.get("type_info").get("child_type"));
-        return childType + "[]";
-    }
-
-    public static String decimalCast(JsonNode node) {
-        var width = node.get("type_info").get("width");
-        var scale = node.get("type_info").get("scale");
-        return String.format("DECIMAL(%s,%s)", width, scale);
-    }
-
-    private static String getStructChildTypeString(JsonNode jsonNode){
-        return getTypeString(jsonNode.get("second"));
-    }
-
-    private static String getStrcutChildNameString(JsonNode jsonNode) {
-        return jsonNode.get("first").asText();
-    }
-
-    private static String getTypeString(JsonNode jsonNode){
-        var id = jsonNode.get("id").asText();
-        switch (id) {
-            case TYPE_STRUCT -> {
-                return structCast(jsonNode);
-            }
-            case TYPE_MAP -> {
-                return mapCast(jsonNode);
-            }
-            case TYPE_LIST -> {
-                return listCast(jsonNode);
-            }
-            case TYPE_DECIMAL -> {
-                return decimalCast(jsonNode);
-            }
-            default -> {
-                return id;
-            }
-        }
-    }
     /**
      * Applies a row cap and a request offset to the outermost SELECT node - a thin delegate over
      * {@link #applyOffset} then {@link #capLimit}, kept for callers compiled against it.
@@ -2719,14 +2667,16 @@ public class Transformations {
      * <p>It is also not expressible by merging: {@code %} is a syntactic form, not a scalar, so
      * there is no {@code least(cap, 3%)} to emit ({@code Parser Error}), and a percent limit is a
      * separate LIMIT_PERCENT_MODIFIER node - appending a row LIMIT beside it produced
-     * {@code LIMIT (3) % LIMIT 5}, which does not parse.
+     * {@code LIMIT (3) % LIMIT 5}, which does not parse. DuckDB 2.0 serializes it as a
+     * LIMIT_MODIFIER with {@code limit_type} PERCENTAGE instead, which a cap would otherwise read as
+     * a row count: capping {@code LIMIT 10%} at 5 would keep it a percentage of the whole table.
      *
      * <p>Only reached when a cap or an offset is actually being applied, so a query with
      * {@code LIMIT n%} and no cap is left alone.
      */
     private static void rejectPercentLimit(ArrayNode modifiers) {
         for (JsonNode modifier : modifiers) {
-            if (LIMIT_PERCENT_MODIFIER_TYPE.equals(modifier.path(FIELD_TYPE).asText())) {
+            if (AstNodes.isPercentLimit(modifier)) {
                 throw new IllegalArgumentException(
                         "'LIMIT n%' is not supported when a row cap or offset applies: a percent "
                         + "limit is a fraction of the result, so the whole result must be built "
@@ -2755,7 +2705,7 @@ public class Transformations {
      * to get wrong.
      */
     private static void rejectNonLiteralLimit(JsonNode ownLimit) {
-        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+        if (ownLimit == null || ownLimit.isNull() || AstNodes.isNullConstant(ownLimit)) {
             return;
         }
         Long literal = literalIntOf(ownLimit);
@@ -2795,12 +2745,12 @@ public class Transformations {
      * <p>An unlimited query stays unlimited: there is nothing to subtract from. That covers an
      * absent LIMIT and an explicit {@code LIMIT NULL}, which SQL reads as <i>unlimited</i> - it
      * parses as a CONSTANT whose value is NULL, not as JSON null, so without the
-     * {@link #isNullConstant} check it took the arithmetic path and
+     * {@link AstNodes#isNullConstant} check it took the arithmetic path and
      * {@code greatest(subtract(NULL, 5), 0)} collapsed to {@code LIMIT 0}, i.e. an empty page for
      * a query that asked for every row.
      */
     private static JsonNode remainingAfterOffset(JsonNode ownLimit, long offset) {
-        if (ownLimit == null || ownLimit.isNull() || isNullConstant(ownLimit)) {
+        if (ownLimit == null || ownLimit.isNull() || AstNodes.isNullConstant(ownLimit)) {
             return NullNode.getInstance();
         }
         if (offset == 0) {
@@ -2817,7 +2767,7 @@ public class Transformations {
      * and the emitted SQL stays a plain {@code LIMIT n}.
      */
     private static JsonNode cappedLimit(JsonNode existing, long cap) {
-        if (existing == null || existing.isNull() || isNullConstant(existing)) {
+        if (existing == null || existing.isNull() || AstNodes.isNullConstant(existing)) {
             return ExpressionFactory.constant(cap);
         }
         return ExpressionFactory.constant(Math.min(literalIntOf(existing), cap));
@@ -2866,13 +2816,6 @@ public class Transformations {
         return ExpressionFactory.createFunction(name, "", "", args);
     }
 
-    /** True for a CONSTANT node whose value is NULL - i.e. an explicit {@code LIMIT/OFFSET NULL}. */
-    private static boolean isNullConstant(JsonNode node) {
-        return node != null
-                && CONSTANT_CLASS.equals(node.path(FIELD_CLASS).asText())
-                && node.path(FIELD_VALUE).path(FIELD_IS_NULL).asBoolean(false);
-    }
-
     /**
      * DuckDB {@code type.id} values whose serialized constant is a plain integer. Anything else -
      * DECIMAL, DOUBLE, FLOAT - is <b>not</b> read as a literal, because DuckDB serializes a
@@ -2894,15 +2837,10 @@ public class Transformations {
                 || !CONSTANT_CLASS.equals(node.path(FIELD_CLASS).asText())) {
             return null;
         }
-        JsonNode value = node.get(FIELD_VALUE);
-        if (value == null || value.path(FIELD_IS_NULL).asBoolean(false)) {
+        if (!INTEGER_CONSTANT_TYPE_IDS.contains(AstNodes.constantTypeId(node))) {
             return null;
         }
-        if (!INTEGER_CONSTANT_TYPE_IDS.contains(value.path(FIELD_TYPE).path(FIELD_ID).asText())) {
-            return null;
-        }
-        JsonNode inner = value.get(FIELD_VALUE);
-        return inner != null && inner.isIntegralNumber() ? inner.asLong() : null;
+        return AstNodes.integerConstant(node);
     }
 
     private static String escapeSpecialChar(String sql) {
@@ -3179,7 +3117,7 @@ public class Transformations {
         for (JsonNode entry : mapArray) {
             String cteName = entry.get(FIELD_KEY).asText();
             Set<String> namesVisibleInBody = CteScope.copyOf(withDeclared);
-            ObjectNode cteBody = (ObjectNode) entry.get(FIELD_VALUE).get(FIELD_QUERY).get(FIELD_NODE);
+            ObjectNode cteBody = (ObjectNode) AstNodes.cteBody(entry);
             renameBaseTablesInStatementNode(cteBody, namesVisibleInBody, injection);
             withDeclared.add(cteName);
         }
@@ -3203,8 +3141,9 @@ public class Transformations {
             }
             case NODE_TYPE_SET_OPERATION_NODE -> {
                 Set<String> visible = walkNestedCtes(statementNode, visibleCteNames, injection);
-                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_LEFT), visible, injection);
-                renameBaseTablesInStatementNode((ObjectNode) statementNode.get(FIELD_RIGHT), visible, injection);
+                for (JsonNode branch : AstNodes.setOperationBranches(statementNode)) {
+                    renameBaseTablesInStatementNode((ObjectNode) branch, visible, injection);
+                }
                 walkExpressionsForSubqueries(statementNode.get(FIELD_MODIFIERS), visible, injection);
             }
             case NODE_TYPE_RECURSIVE_CTE_NODE -> {
@@ -3307,6 +3246,7 @@ public class Transformations {
                 mutable.put(FIELD_TABLE_NAME, cteKey);
                 mutable.put(FIELD_SCHEMA_NAME, "");
                 mutable.put(FIELD_CATALOG_NAME, "");
+                AstNodes.forgetQualifiedName(mutable);
                 // The AT clause now lives in the body; on the CTE reference DuckDB would ignore it.
                 // A sample stays here (see cteKeyFor).
                 if (mutable.has(FIELD_AT_CLAUSE)) mutable.putNull(FIELD_AT_CLAUSE);

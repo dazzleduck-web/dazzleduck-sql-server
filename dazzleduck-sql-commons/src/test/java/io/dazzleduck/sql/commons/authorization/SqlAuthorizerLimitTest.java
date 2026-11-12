@@ -3,6 +3,7 @@ package io.dazzleduck.sql.commons.authorization;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.dazzleduck.sql.commons.ConnectionPool;
+import io.dazzleduck.sql.commons.AstNodes;
 import io.dazzleduck.sql.commons.ExpressionConstants;
 import io.dazzleduck.sql.commons.Transformations;
 import org.junit.jupiter.api.Test;
@@ -35,9 +36,7 @@ public class SqlAuthorizerLimitTest {
         for (JsonNode modifier : modifiers) {
             if (modifier.get(ExpressionConstants.FIELD_TYPE).asText()
                     .equals(ExpressionConstants.LIMIT_MODIFIER_TYPE)) {
-                return modifier.get(ExpressionConstants.FIELD_LIMIT)
-                        .get(ExpressionConstants.FIELD_VALUE)
-                        .get(ExpressionConstants.FIELD_VALUE).asLong();
+                return AstNodes.integerConstant(modifier.get(ExpressionConstants.FIELD_LIMIT));
             }
         }
         throw new AssertionError("No LIMIT_MODIFIER found in: " + authorized);
@@ -328,14 +327,21 @@ public class SqlAuthorizerLimitTest {
         throw new AssertionError("no LIMIT_MODIFIER in " + tree);
     }
 
+    /** DuckDB 2.0 keeps digit separators in an integer literal's text ({@code 1_000}). */
+    @Test
+    public void testCapLimit_readsDigitSeparators() throws Exception {
+        assertEquals(10L, extractLimit(Transformations.capLimit(
+                Transformations.parseToTree("SELECT * FROM range(5000) LIMIT 1_000"), 10L)));
+        assertEquals(1000L, extractLimit(Transformations.capLimit(
+                Transformations.parseToTree("SELECT * FROM range(5000) LIMIT 1_000"), 5000L)));
+    }
+
     @Test
     public void testCapLimit_doesNotTouchTheOffset() throws Exception {
         JsonNode query = Transformations.parseToTree("SELECT * FROM range(100) LIMIT 50 OFFSET 5");
         JsonNode out = Transformations.capLimit(query, 10L);
         assertEquals(10L, extractLimit(out), "cap must bound the limit");
-        assertEquals(5L, limitModifier(out).get(ExpressionConstants.FIELD_OFFSET)
-                .get(ExpressionConstants.FIELD_VALUE)
-                .get(ExpressionConstants.FIELD_VALUE).asLong(),
+        assertEquals(5L, AstNodes.integerConstant(limitModifier(out).get(ExpressionConstants.FIELD_OFFSET)),
                 "capLimit must leave OFFSET 5 untouched");
     }
 

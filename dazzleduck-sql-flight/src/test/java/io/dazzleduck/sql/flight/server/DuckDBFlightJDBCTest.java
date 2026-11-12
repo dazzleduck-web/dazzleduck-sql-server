@@ -121,6 +121,23 @@ public class DuckDBFlightJDBCTest {
         }
     }
 
+    /**
+     * DuckDB 2.0's driver reports a NULL-typed column as {@code Types.OTHER} named "NULL"; the
+     * server maps it to Arrow's Null type instead of failing the prepare with "Unmapped JDBC type".
+     */
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    public void nullTypedColumn() throws SQLException {
+        try (Connection connection = getConnection();
+             Statement statement = connection.createStatement();
+             var rs = statement.executeQuery("SELECT NULL AS n, 1 AS i")) {
+            assertTrue(rs.next(), "Should have one row");
+            assertNull(rs.getObject(1), "a NULL-typed column reads as null");
+            assertEquals(1, rs.getInt(2), "the other column keeps its type");
+            assertFalse(rs.next(), "Should have exactly one row");
+        }
+    }
+
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     public void setAndGetParam() throws SQLException {

@@ -258,7 +258,7 @@
 },
 {
   "name":"org.duckdb.ProfilerPrintFormat",
-  "fields":[{"name":"GRAPHVIZ"}, {"name":"HTML"}, {"name":"JSON"}, {"name":"NO_OUTPUT"}, {"name":"QUERY_TREE"}, {"name":"QUERY_TREE_OPTIMIZER"}]
+  "methods":[{"name":"getName","parameterTypes":[] }]
 },
 {
   "name":"org.duckdb.QueryProgress",

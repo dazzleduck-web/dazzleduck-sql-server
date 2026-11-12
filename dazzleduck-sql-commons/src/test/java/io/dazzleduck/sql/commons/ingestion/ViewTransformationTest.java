@@ -100,6 +100,19 @@ class ViewTransformationTest {
         assertTrue(ex.getMessage().contains("multiple") || ex.getMessage().contains("times"), ex.getMessage());
     }
 
+    /**
+     * A view body as DuckDB 2.0 returns it, qualified by schema only, with a CTE named like the
+     * input table: the base table reference resolves to the view's catalog, the CTE reference
+     * shadows it and is not a second match.
+     */
+    @Test
+    void rewrite_cteNamedLikeTheTable_isNotASecondMatch() throws Exception {
+        String sql = "WITH logs AS (SELECT * FROM main.logs) SELECT * FROM logs";
+        String result = Transformations.rewriteTableAsThis(sql, CATALOG, "main", "logs", CATALOG, "main");
+        assertTrue(result.contains("__this"), result);
+        assertTrue(result.contains("FROM logs"), "the CTE reference stays: " + result);
+    }
+
     @Test
     void rewrite_differentCatalogNotMatched() throws Exception {
         String sql    = "SELECT * FROM %s.main.logs".formatted(CATALOG);
