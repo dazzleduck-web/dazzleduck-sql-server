@@ -73,26 +73,34 @@ class DuckLakePostIngestionConflictRetryTest {
 
         AtomicInteger attempts = new AtomicInteger();
         String batch = file("new", "('banana','fruit')");
-        RuntimeException e = assertThrows(RuntimeException.class, () -> register(batch, () -> {
+        FilesNotRegisteredException e = assertThrows(FilesNotRegisteredException.class, () -> register(batch, () -> {
             attempts.incrementAndGet();
             execute("INSERT INTO %s VALUES ('x', 'y')".formatted(TABLE));
             execute("DELETE FROM %s WHERE b = 'x'".formatted(TABLE));
         }));
 
         assertEquals(DuckLakePostIngestionTask.MAX_ATTEMPTS, attempts.get());
-        assertTrue(e.getCause() instanceof SQLException sql && DuckLakePostIngestionTask.isTransactionConflict(sql),
-                () -> "the last conflict is reported: " + e.getCause());
-        assertEquals(List.of("apple"), names(), "nothing of the batch was registered");
+        assertTrue(e.getCause() instanceof SQLException sql && DuckLakePostIngestionTask.isConcurrentDeleteConflict(sql),
+                () -> "the last conflict is the cause: " + e.getCause());
+        assertEquals(List.of(batch), e.files(), "nothing was registered, so the queue may delete the files");
+        assertEquals(List.of("apple"), names());
     }
 
     @Test
-    void onlyATransactionConflictIsRetried() {
-        assertTrue(DuckLakePostIngestionTask.isTransactionConflict(new SQLException(
+    void onlyAConflictWithAConcurrentDeleteIsRetried() {
+        assertTrue(DuckLakePostIngestionTask.isConcurrentDeleteConflict(new SQLException(
                 "TransactionContext Error: Failed to commit: Failed to commit DuckLake transaction.\n"
                         + "Transaction conflict - attempting to insert into table with index \"1\" - but another transaction has deleted from it")));
-        assertTrue(DuckLakePostIngestionTask.isTransactionConflict(new SQLException("commit failed",
-                new SQLException("Transaction conflict - attempting to insert"))), "found in a cause too");
-        assertFalse(DuckLakePostIngestionTask.isTransactionConflict(new SQLException(
+        assertTrue(DuckLakePostIngestionTask.isConcurrentDeleteConflict(new SQLException("commit failed",
+                new SQLException("TRANSACTION CONFLICT - attempting to insert ... but another transaction has deleted from it"))),
+                "in a cause too, in any case");
+        assertTrue(DuckLakePostIngestionTask.isConcurrentDeleteConflict(new SQLException(
+                "Transaction conflict - attempting to insert into table with index \"2\" - but another transaction has deleted inlined data from it")),
+                "a delete of rows inlined in the catalog");
+        assertFalse(DuckLakePostIngestionTask.isConcurrentDeleteConflict(new SQLException(
+                "Transaction conflict - attempting to insert into table with index \"1\" - but another transaction has altered it")),
+                "the same files under a changed schema could lose columns");
+        assertFalse(DuckLakePostIngestionTask.isConcurrentDeleteConflict(new SQLException(
                 "IO Error: Could not connect to the metadata catalog")), "an unknown commit outcome is never retried");
     }
 
@@ -105,9 +113,7 @@ class DuckLakePostIngestionConflictRetryTest {
 
     private void register(String file, Runnable beforeCommit) {
         var result = new IngestionResult("q", 1L, "app", Map.of(), 1L, List.of(file));
-        var task = new DuckLakePostIngestionTask(result, CATALOG, "logs", "main", Map.of());
-        task.beforeCommitForTesting(beforeCommit);
-        task.execute();
+        new DuckLakePostIngestionTask(result, CATALOG, "logs", "main", Map.of(), beforeCommit).execute();
     }
 
     private static void execute(String sql) {

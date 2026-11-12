@@ -157,10 +157,9 @@ class DuckLakeWatermarkPostIngestionTest {
         }
         List<String> files = writeBatchFiles();
         List<List<String>> rows = computeRows(files);
-        var task = new DuckLakePostIngestionTask(result(files, rows), CATALOG, "facts", "main",
-                watermarkParams("ingest_watermark"));
         java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
-        task.beforeCommitForTesting(() -> {
+        var task = new DuckLakePostIngestionTask(result(files, rows), CATALOG, "facts", "main",
+                watermarkParams("ingest_watermark"), () -> {
             if (attempts.incrementAndGet() == 1) {
                 try (Connection other = ConnectionPool.getConnection()) {
                     ConnectionPool.execute(other, "DELETE FROM %s.main.facts WHERE county = 'old'".formatted(CATALOG));
