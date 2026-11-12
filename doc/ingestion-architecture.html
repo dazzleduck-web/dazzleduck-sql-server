@@ -306,7 +306,7 @@
       <h2>The commit is the boundary</h2>
       <p>
         A batch's files are registered in one transaction. Either all of them are visible, or none are:
-        the queue deletes files it knows were not registered, and the rest stay as orphans until
+        the queue deletes local files it knows were not registered, and the rest stay as orphans until
         <code>ducklake_delete_orphaned_files</code> runs.
       </p>
     </div>

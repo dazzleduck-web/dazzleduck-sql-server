@@ -75,8 +75,9 @@ re-read what was just written.
 
 A batch's files are registered in **one transaction**, one `ducklake_add_data_files` call per file:
 either all of them become visible, or none do. When a statement is rejected, so nothing was
-registered, the queue deletes the files; when the commit's outcome is unknown it keeps them, and an
-unregistered one stays in the data path as an orphan until `ducklake_delete_orphaned_files` runs. The
+registered, the queue deletes the files if they are local (object-store files are left); when the
+commit's outcome is unknown it keeps them. An unregistered file stays in the data path as an orphan
+until `ducklake_delete_orphaned_files` runs. The
 OTel collector's compactor runs it; the standalone compactor does not. A commit that conflicts with a concurrent DELETE on the table
 registered nothing and is retried; see "Registration conflicts" in the README.
 
