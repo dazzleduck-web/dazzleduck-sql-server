@@ -9,8 +9,10 @@ What this spec measured still applies to the compactor's data retention job, whi
 ingested tables. Inlining covers deletes: at the default limit, deleting a few rows of a Parquet file
 puts them in the catalog's `ducklake_inlined_delete_<n>` tables instead of a delete file. Retention
 drops whole files where it can, which writes neither, but the rows it deletes from a file holding
-NULL times, or without statistics, go to the catalog. Attach catalogs retention runs against with
-`DATA_INLINING_ROW_LIMIT 0`; no check enforces it today.
+NULL times, or without statistics, go to the catalog. Keep the effective limit at 0 for the tables
+retention deletes from: attach with `DATA_INLINING_ROW_LIMIT 0`, and set no option above 0 with
+`set_option` on the catalog, schema or table, which takes precedence over the attach parameter (see
+the resolution order below). No check enforces it today.
 
 Earlier status: accepted; partly implemented. The open questions were settled (see the last section):
 the collector refuses to start, the watermark's `INSERT` becomes a write-then-register, and its

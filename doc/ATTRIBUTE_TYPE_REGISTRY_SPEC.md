@@ -375,8 +375,8 @@ registering a file: `ducklake_add_data_files` with a one-row file at the default
 10 registered it as a data file and put nothing in the catalog's inlined-data tables.
 
 So writing Parquet and registering it is immune by construction, which is one more point in its
-favour. The separate no-inlining rule (`doc/DUCKLAKE_NO_INLINING_SPEC.md`) covers the paths that do
-insert. **This spec does not depend on it.**
+favour. The separate no-inlining rule (`doc/DUCKLAKE_NO_INLINING_SPEC.md`) covered the one ingestion
+path that inserted, the watermark, which has since been removed. **This spec does not depend on it.**
 
 ## Deliberately out of scope
 
