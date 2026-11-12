@@ -39,9 +39,13 @@ public class CompactionState {
     private static final String SATURATED_METRIC = "ducklake.compaction.saturated";
     private static final String SPILL_PEAK_METRIC = "ducklake.compaction.spill_peak_bytes";
     private static final String RSS_PEAK_METRIC = "ducklake.compaction.rss_peak_bytes";
+    private static final String ROWS_DELETED_METRIC = "ducklake.retention.rows_deleted";
 
     /** Failure kind used for housekeeping cycles, which aren't a tier. */
     static final String HOUSEKEEPING_KIND = "housekeeping";
+
+    /** Failure kind used for data-retention cycles, which aren't a tier either. */
+    static final String RETENTION_KIND = "retention";
 
     private final MeterRegistry registry;
     private final List<String> tierNames;
@@ -235,6 +239,7 @@ public class CompactionState {
             Map<String, AtomicLong> counters = new HashMap<>();
             List<String> kinds = new ArrayList<>(tierNames);
             kinds.add(HOUSEKEEPING_KIND);
+            kinds.add(RETENTION_KIND);
             for (String kind : kinds) {
                 counters.put(kind, new AtomicLong(0));
             }
@@ -268,6 +273,13 @@ public class CompactionState {
 
     public void addFilesRewritten(String db, long delta) {
         if (delta > 0) filesRewritten.computeIfAbsent(db, k -> new AtomicLong(0)).addAndGet(delta);
+    }
+
+    /** Counts the rows a data-retention cycle deleted from one table, tagged by database and table. */
+    public void addRowsDeleted(String db, String table, long delta) {
+        if (delta > 0) {
+            registry.counter(ROWS_DELETED_METRIC, "database", db, "table", table).increment(delta);
+        }
     }
 
     public long getFilesRewritten(String db) {
@@ -335,7 +347,10 @@ public class CompactionState {
         lastSuccessTimes.computeIfAbsent(db, k -> new AtomicReference<>()).set(Instant.now());
     }
 
-    /** {@code kind} is a tier's name, or {@link #HOUSEKEEPING_KIND} for a housekeeping failure. */
+    /**
+     * {@code kind} is a tier's name, {@link #HOUSEKEEPING_KIND} for a housekeeping failure, or
+     * {@link #RETENTION_KIND} for a data-retention failure.
+     */
     public void recordFailure(String db, String kind) {
         failureCounters(db).get(kind).incrementAndGet();
     }

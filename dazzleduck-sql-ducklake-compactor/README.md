@@ -37,6 +37,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |
 | `rewrite_deletes_enabled` | `true` | Each housekeeping cycle first runs `ducklake_rewrite_data_files`, rewriting data files with enough deleted rows so their delete files are dropped |
 | `rewrite_delete_threshold` | unset | Fraction (0–1) of a file's rows that must be deleted before it is rewritten; unset uses the catalog's `rewrite_delete_threshold` option (DuckLake default 0.95) |
+| `data_retention` | off | Deletes expired rows of the tables listed in a policy table (see [Data retention](#data-retention)) |
 | `health_port` | `8080` | Port for the `GET /health` endpoint |
 | `startup_script_provider` | — | How to load the startup SQL (attach catalogs, load extensions) |
 | `config_provider` | — | Optional: overlay config values read from a table (see below) |
@@ -101,6 +102,64 @@ Disabling a tier (`enabled = false`) is the direct way to turn it off. Simply ra
 `frequency` to a very large value is **not** equivalent — with the old hardcoded minor/major design
 that could starve the other tier of any chance to run at all; with independent per-tier schedules
 that's no longer true, but `enabled` is still the explicit way to say "don't run this."
+
+### Data retention
+
+A separate housekeeping job deletes rows older than each table's retention. Which tables expire, by
+which column and after how long is read from a policy table (or a view) on every cycle, so a change
+applies from the next cycle without a restart:
+
+```sql
+CREATE TABLE lake.main.retention_policy (
+  table_name  VARCHAR,  -- catalog.schema.table
+  time_column VARCHAR,  -- a DATE or TIMESTAMP column holding the row's age (UTC)
+  retention   VARCHAR   -- a duration such as '30 days' or '12h', or 'unlimited'
+);
+INSERT INTO lake.main.retention_policy VALUES
+  ('lake.main.logs',   'ts',         '30 days'),
+  ('lake.main.ai_txn', 'event_date', 'unlimited');
+```
+
+```hocon
+data_retention {
+  enabled = true
+  frequency = 1 hour
+  policy_table = "lake.main.retention_policy"
+  connection_settings = ["SET enable_external_file_cache = false"]
+}
+```
+
+A retention is a lower bound, not an exact cut: the job deletes whole data files only, and leaves
+the rest for a later cycle. For every table of a configured database it reads the min/max
+statistics of the time column for each live data file from the catalog, and lowers the cutoff to a
+file boundary, one that no file has rows on both sides of. It then runs:
+
+```sql
+DELETE FROM lake.main.logs WHERE ts < CAST('2026-09-01 00:00:00.000000' AS TIMESTAMP)
+```
+
+That DELETE matches whole files, so DuckLake drops them without writing delete files or rewriting
+anything. It reads only the time column of the files it drops; every other file is pruned by its
+statistics. No DELETE runs when no file lies entirely below the cutoff.
+
+- A file that straddles the cutoff holds back the files above its minimum until its newest row
+  expires. Partitioning the table by time, for example by day, keeps files from straddling.
+- Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
+  not move the boundary; its expired rows are deleted with a delete file.
+- A table with a data file that has no statistics for the time column is skipped and logged, since
+  that file could hold any time.
+- Rows that cannot be used (a name that is not a plain identifier, an unknown duration) are logged
+  and skipped. A table that fails, such as one without the named column, does not stop the others.
+- The dropped files are removed from storage by the regular housekeeping job once they fall out of
+  `snapshot_retention`.
+- Metrics: `ducklake.retention.rows_deleted` (tagged `database`, `table`), the
+  `ducklake.compaction.duration` timer with `type=retention`, and `ducklake.compaction.failures`
+  with `type=retention` for a cycle with a failed table or an unreadable policy table.
+
+Without the duckdb/ducklake#1895 fix, which the DuckLake patch has from `v1.5.6-dazzleduck.3`,
+every such DELETE conflicts with any concurrent insert into the table. Under continuous ingestion
+it then keeps failing and is only retried on the next cycle. With the fix it conflicts only with
+inserted files whose column statistics could hold rows below the boundary.
 
 ### Connections
 

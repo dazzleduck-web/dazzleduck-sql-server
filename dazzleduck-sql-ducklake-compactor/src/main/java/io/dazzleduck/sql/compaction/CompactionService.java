@@ -26,6 +26,8 @@ public class CompactionService implements Closeable {
     private final String startupScript;
     private final TierCompactor tierCompactor;
     private final Housekeeper housekeeper;
+    // null when data retention is off
+    private final DataRetention dataRetention;
     private final CompactionState state;
     private final CompactionRunLog runLog;
 
@@ -61,10 +63,27 @@ public class CompactionService implements Closeable {
 
     public CompactionService(CompactionConfig config, String startupScript, TierCompactor tierCompactor,
                              Housekeeper housekeeper, CompactionState state, CompactionRunLog runLog) {
+        this(config, startupScript, tierCompactor, housekeeper, null, state, runLog);
+    }
+
+    /**
+     * @param dataRetention deletes expired rows on {@code config.dataRetention()}'s schedule, or
+     *                      {@code null} to run no retention
+     */
+    public CompactionService(CompactionConfig config, String startupScript, TierCompactor tierCompactor,
+                             Housekeeper housekeeper, DataRetention dataRetention, CompactionState state,
+                             CompactionRunLog runLog) {
+        if (dataRetention != null && !config.dataRetention().enabled()) {
+            throw new IllegalArgumentException("a DataRetention was given but data_retention is not enabled");
+        }
+        if (dataRetention == null && config.dataRetention().enabled()) {
+            logger.warn("data_retention is enabled but no DataRetention was given, so retention will not run");
+        }
         this.config = config;
         this.startupScript = startupScript;
         this.tierCompactor = tierCompactor;
         this.housekeeper = housekeeper;
+        this.dataRetention = dataRetention;
         this.state = state;
         this.runLog = runLog;
         long enabledTiers = config.tiers().stream().filter(CompactionTier::enabled).count();
@@ -75,11 +94,13 @@ public class CompactionService implements Closeable {
             t.setDaemon(false);
             return t;
         });
-        // Housekeeping and the whole-catalog file-count refresh share this pool. Sized to 2x database
-        // count so a database's housekeeping and its (now separate) file-count refresh don't contend
-        // for a single thread — the file-count refresh is exactly the traffic we moved off the
-        // per-cycle control path, so it must not be starved by it.
-        this.housekeepingScheduler = Executors.newScheduledThreadPool(Math.max(1, housekeepingThreads * 2), r -> {
+        // Housekeeping, the whole-catalog file-count refresh and data retention share this pool. One
+        // thread per job per database, so a database's housekeeping and its (now separate) file-count
+        // refresh don't contend for a single thread — the file-count refresh is exactly the traffic
+        // we moved off the per-cycle control path, so it must not be starved by it — and a long
+        // retention delete does not hold up either.
+        int jobsPerDatabase = dataRetention != null ? 3 : 2;
+        this.housekeepingScheduler = Executors.newScheduledThreadPool(Math.max(1, housekeepingThreads * jobsPerDatabase), r -> {
             Thread t = new Thread(r, "housekeeping");
             t.setDaemon(false);
             return t;
@@ -108,15 +129,25 @@ public class CompactionService implements Closeable {
             // adding a full COUNT(*) FILTER aggregate per tier at cycle rate against a shared catalog.
             housekeepingScheduler.scheduleWithFixedDelay(
                     () -> refreshFileCounts(db), 0, fileCountSeconds, TimeUnit.SECONDS);
+            if (dataRetention != null) {
+                // First run at startup, so a compactor that restarts more often than the frequency
+                // still enforces retention.
+                housekeepingScheduler.scheduleWithFixedDelay(
+                        () -> runRetention(db), 0, config.dataRetention().frequency().toSeconds(), TimeUnit.SECONDS);
+            }
         }
 
         logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping every {}s, "
-                        + "file-count refresh every {}s",
+                        + "file-count refresh every {}s, data retention {}",
                 config.databases().size(), config.tiers().size(),
                 config.tiers().stream()
                         .map(t -> t.name() + (t.enabled() ? "" : " (disabled)"))
                         .reduce((a, b) -> a + ", " + b).orElse(""),
-                housekeepingSeconds, fileCountSeconds);
+                housekeepingSeconds, fileCountSeconds,
+                dataRetention != null
+                        ? "every %ds from %s".formatted(config.dataRetention().frequency().toSeconds(),
+                                config.dataRetention().policyTable())
+                        : "off");
     }
 
     public CompactionStats getStats() {
@@ -250,6 +281,21 @@ public class CompactionService implements Closeable {
         }
     }
 
+    void runRetention(String database) {
+        try {
+            DataRetention.Outcome outcome = dataRetention.enforce(database);
+            if (outcome.failedTables() > 0) {
+                state.recordFailure(database, CompactionState.RETENTION_KIND);
+            }
+            logger.info("Data retention completed for {}: {} row(s) deleted from {} table(s), {} failed",
+                    database, outcome.rowsDeleted(), outcome.tables(), outcome.failedTables());
+        } catch (Throwable t) {
+            // Never let it escape: a Runnable that throws cancels its schedule for good.
+            state.recordFailure(database, CompactionState.RETENTION_KIND);
+            logger.error("Data retention cycle failed for {} — scheduler will continue", database, t);
+        }
+    }
+
     /**
      * Counts live files and sums their bytes in {@code [minSizeInclusive, maxSizeExclusive)} in one
      * query — the COUNT the compactor already ran, now with a same-round-trip {@code SUM(file_size_bytes)}
@@ -339,6 +385,9 @@ public class CompactionService implements Closeable {
         }
         closeQuietly(tierCompactor);
         closeQuietly(housekeeper);
+        if (dataRetention != null) {
+            closeQuietly(dataRetention);
+        }
         countingConnections.values().forEach(connection -> {
             try {
                 connection.close();

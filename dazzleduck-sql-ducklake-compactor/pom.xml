@@ -43,7 +43,7 @@
              DUCKLAKE_PATCH.md for how these three properties relate and how to update them.
              ducklake.patch.built.for.duckdb.version MUST equal the parent pom's duckdb.version,
              enforced by DuckLakePatchVersionTest. -->
-        <ducklake.patch.release>v1.5.6-dazzleduck.2</ducklake.patch.release>
+        <ducklake.patch.release>v1.5.6-dazzleduck.3</ducklake.patch.release>
         <ducklake.patch.built.for.duckdb.version>1.5.6.0</ducklake.patch.built.for.duckdb.version>
         <!-- The DuckDB library-version string (not duckdb.version) DuckDB uses to name its
              extension cache directory, e.g. ~/.duckdb/extensions/v1.5.6/linux_amd64/. Verified via

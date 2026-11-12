@@ -25,7 +25,8 @@ public record CompactionConfig(
         int healthPort,
         int runHistorySize,
         boolean rewriteDeletesEnabled,
-        Double rewriteDeleteThreshold
+        Double rewriteDeleteThreshold,
+        DataRetentionConfig dataRetention
 ) {
     private static final String CONFIG_PATH = "dazzleduck_sql_compaction";
 
@@ -37,6 +38,15 @@ public record CompactionConfig(
                             int healthPort, int runHistorySize) {
         this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
                 healthPort, runHistorySize, false, null);
+    }
+
+    /** Data retention off, for callers (mostly tests) written before it existed. */
+    public CompactionConfig(List<String> databases, List<CompactionTier> tiers, Duration housekeepingFrequency,
+                            Duration snapshotRetention, List<String> housekeepingConnectionSettings,
+                            int healthPort, int runHistorySize, boolean rewriteDeletesEnabled,
+                            Double rewriteDeleteThreshold) {
+        this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
+                healthPort, runHistorySize, rewriteDeletesEnabled, rewriteDeleteThreshold, DataRetentionConfig.DISABLED);
     }
     private static final String TIERS_KEY = "compaction_tiers";
 
@@ -67,7 +77,8 @@ public record CompactionConfig(
                 c.hasPath("run_history_size")
                         ? c.getInt("run_history_size") : CompactionRunLog.DEFAULT_CAPACITY,
                 !c.hasPath("rewrite_deletes_enabled") || c.getBoolean("rewrite_deletes_enabled"),
-                rewriteDeleteThreshold(c)
+                rewriteDeleteThreshold(c),
+                DataRetentionConfig.from(c)
         );
     }
 
