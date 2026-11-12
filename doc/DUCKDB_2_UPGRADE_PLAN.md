@@ -9,7 +9,8 @@ extension, release `v1.5.6-dazzleduck.2` of
 `v2.0-cyanoptera`).
 
 The plan moves to DuckDB 2.0 with a new DuckLake fork, builds three features on top
-of it, and reshapes the otel-collector's attribute columns. Six tasks, in order:
+of it, reshapes the otel-collector's attribute columns, and removes ingestion watermarks.
+Seven tasks, in order:
 
 | # | Task | Spec | Depends on |
 |---|------|------|------------|
@@ -19,6 +20,7 @@ of it, and reshapes the otel-collector's attribute columns. Six tasks, in order:
 | 4 | Aggregation sidecars | [Sidecar views spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/526) (PR #526, `doc/SIDECAR_VIEWS_SPEC.md`) | 2, 3 |
 | 5 | Aggregation background task | none yet | 1, 4 |
 | 6 | Live aggregation view | [Live aggregation spec](https://github.com/dazzleduck-web/dazzleduck-sql-server/pull/527) (PR #527, `LIVE_AGGREGATION_SPEC.md`) | 1 (retention), 2, 5 |
+| 7 | Remove ingestion watermark support | none needed | none; land before 4 |
 
 ---
 
@@ -235,9 +237,9 @@ current hour.
 
 **To decide in the spec:**
 
-- When an hour counts as closed: a fixed delay after the hour ends, or a
-  watermark from ingestion. Late rows for a closed hour are aggregated again on
-  the next run.
+- When an hour counts as closed: a fixed delay after the hour ends. Ingestion
+  watermarks are removed in this release (Task 7), so they are not an option.
+  Late rows for a closed hour are aggregated again on the next run.
 - Several intervals: roll hourly into daily and daily into weekly, each its own
   table or the same table.
 - Change data feed: deleting and re-inserting changes `table_changes` output for
@@ -270,3 +272,52 @@ into `agg`.
 
 **Open items** from the spec review: late rows widening the merge and multiple
 intervals, retention, and access modes (RESTRICTED and RESTRICT_READ_ONLY).
+
+---
+
+## Task 7: Remove Ingestion Watermark Support
+
+Remove the per-batch watermark that ingestion commits with each file registration, configured
+with the `watermark_*` keys of a queue mapping's `additional_parameters`. Not affected: the
+`row_id_watermark` of the live aggregation view (Task 6), which is that view's own column.
+
+**What goes:**
+
+- `WatermarkSpec`, and `IngestionResult.watermarkRows`.
+- The watermark rows `ParquetIngestionQueue` and `PartitionedIngestionQueue` compute at write
+  time, and the plumbing that carries the spec: `QueueIdToTableMapping`,
+  `AbstractIngestionTaskFactoryProvider`, `IngestionHandler`, `DuckLakeIngestionHandler`.
+- `DuckLakePostIngestionTask`'s watermark path: the `INSERT` in the registration transaction, the
+  snapshot id prediction (`predictNextSnapshotId`) and the appended correction rows
+  (`verifySnapshotId`). The registration becomes `ducklake_add_data_files` calls alone.
+- `DuckLakeInlining`, the startup check that inlining is off for watermark tables. Watermark tables
+  are the only tables it checks.
+- otel-collector: the commented watermark example in `reference.conf`, and the watermark entries in
+  its native-image `reflect-config.json`.
+- Tests: `DuckLakeWatermarkPostIngestionTest`, `WatermarkSpecTest`, and the watermark cases of
+  `DuckLakeInliningTest`.
+- Docs: the README sections from "Watermarks" through the inlining check, the watermark lines in
+  `dazzleduck-sql-commons/README.md`, `dazzleduck-sql-otel-collector/README.md` and `CLAUDE.md`, and
+  `doc/INGESTION_ARCHITECTURE.md` with its `ingestion-architecture.html`/`.svg` diagrams.
+- Spec sections that build on the watermark: its write-then-register conversion in
+  `doc/DUCKLAKE_NO_INLINING_SPEC.md` and `doc/ATTRIBUTE_TYPE_REGISTRY_SPEC.md` ("The watermark moves
+  to write-then-register too"), and the watermark items in `doc/SIDECAR_VIEWS_SPEC.md`, including
+  open question 2, "The watermark as a sidecar".
+
+**Configs that still set `watermark_*` keys** fail at startup, naming the keys and the queue.
+Ignoring them would silently stop the accounting a consumer relies on. Existing watermark tables
+are left as they are; dropping them is the operator's decision.
+
+**Replacement.** A consumer that needs per-batch MIN, MAX and row counts can declare them as a
+sidecar (Task 4), written in the same commit as the batch. The commit's snapshot id has no sidecar
+equivalent.
+
+**Why before Task 4.** Sidecars extend the registration transaction. Without the watermark's
+`INSERT` and its snapshot correction, that transaction is file registrations only, and sidecars do
+not need to coordinate with either.
+
+**Release note.** A breaking change: the `watermark_*` keys are rejected, and watermark tables stop
+receiving rows.
+
+**Done when** no `watermark_*` key is accepted, the code, tests and docs listed above are gone, and
+the full test suite passes.
