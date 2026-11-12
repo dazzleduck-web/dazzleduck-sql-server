@@ -45,6 +45,14 @@ class WatermarkKeysRejectedTest {
     }
 
     @Test
+    void aNonObjectAdditionalParametersOnASkippedMappingStillLoads() {
+        var provider = provider("""
+                { ingestion_queue = "q1", output_path = "/tmp/q1", additional_parameters = "x" }
+                """);
+        assertEquals(Map.of(), provider.loadMappings(), "skipped as before: it has no DuckLake table");
+    }
+
+    @Test
     void otherAdditionalParametersStillLoad() {
         var provider = provider("""
                 { ingestion_queue = "q1", catalog = "lake", schema = "main", table = "logs",

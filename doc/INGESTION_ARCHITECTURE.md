@@ -74,8 +74,9 @@ re-read what was just written.
 ## The commit
 
 A batch's files are registered in **one transaction**, one `ducklake_add_data_files` call per file:
-either all of them become visible, or none do and the Parquet files are left unregistered for
-`ducklake_cleanup_old_files` to remove. A commit that conflicts with a concurrent DELETE on the table
+either all of them become visible, or none do. When a statement is rejected, so nothing was
+registered, the queue deletes the files; when the commit's outcome is unknown it keeps them, and an
+unregistered one is reclaimed by `ducklake_delete_orphaned_files`. A commit that conflicts with a concurrent DELETE on the table
 registered nothing and is retried; see "Registration conflicts" in the README.
 
 ## What this diagram leaves out

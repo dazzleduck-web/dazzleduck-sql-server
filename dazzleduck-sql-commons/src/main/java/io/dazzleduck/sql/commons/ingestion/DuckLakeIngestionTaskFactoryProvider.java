@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import com.typesafe.config.Config;
+import com.typesafe.config.ConfigValueType;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.Transformations;
 import org.slf4j.Logger;
@@ -94,7 +95,9 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
      * rows; checked before a mapping without a DuckLake table is skipped, so no such key goes unseen.
      */
     static void rejectWatermarkKeys(String ingestionQueue, Config mapping) {
-        if (!mapping.hasPath("additional_parameters")) {
+        // Only an object can hold keys; anything else is left to whatever reads it, as before.
+        if (!mapping.hasPath("additional_parameters")
+                || mapping.getValue("additional_parameters").valueType() != ConfigValueType.OBJECT) {
             return;
         }
         List<String> keys = mapping.getConfig("additional_parameters").root().keySet().stream()
