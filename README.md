@@ -661,6 +661,21 @@ bump. The relation may be a table in the registry file itself, which the startup
 A SQLite column arrives as `VARCHAR`, so an expiration is cast for the comparison; text that will
 not cast is an error, not a row that never expires.
 
+### Registration conflicts
+
+A batch's files are registered with `ducklake_add_data_files` in one transaction. On stock DuckLake
+(duckdb/ducklake#1895) its commit fails with a transaction conflict when a DELETE on the same table
+commits meanwhile, such as the compactor's data retention job's. The registration is then retried in
+a new transaction, up to 5 attempts with a short jittered backoff, instead of failing the batch back
+to the client. The conflict is decided before DuckLake writes anything, so nothing of the failed
+attempt was registered and the same files are registered again; watermark rows are part of the
+retried transaction. When the attempts run out, the batch fails as not registered, so its files are
+deleted and the client may resend it.
+
+Only a conflict with a concurrent DELETE is retried. A conflict with an ALTER or DROP of the table is
+not, since registering the same files under a changed schema could silently drop columns, and any
+other commit failure has an unknown outcome, so retrying it could register the batch twice.
+
 ### Watermarks
 
 A queue mapping can commit a watermark row per ingested batch, in the **same transaction** as

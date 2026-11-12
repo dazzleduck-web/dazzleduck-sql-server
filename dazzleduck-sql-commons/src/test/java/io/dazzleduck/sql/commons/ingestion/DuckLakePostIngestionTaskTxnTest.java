@@ -71,7 +71,7 @@ class DuckLakePostIngestionTaskTxnTest {
     @Test
     void successCommitsAndRestoresAutoCommit() throws Exception {
         var stub = new Stub();
-        DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES);
+        DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES, () -> { });
         assertEquals(List.of("setAutoCommit(false)", "executeBatch", "commit", "setAutoCommit(true)"), stub.calls);
     }
 
@@ -81,7 +81,7 @@ class DuckLakePostIngestionTaskTxnTest {
         stub.failStatement = true;
         stub.failRollback = true;
         var e = assertThrows(FilesNotRegisteredException.class,
-                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES));
+                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES, () -> { }));
         assertEquals(FILES, e.files());
         assertEquals("invalid partition value", e.getCause().getMessage(), "the rejection reason is kept");
         assertEquals("rollback failed", e.getSuppressed()[0].getMessage());
@@ -94,7 +94,7 @@ class DuckLakePostIngestionTaskTxnTest {
         stub.failCommit = true;
         stub.failRestoreAutoCommit = true;
         var e = assertThrows(SQLException.class,
-                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES));
+                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES, () -> { }));
         assertEquals("commit failed", e.getMessage(), "the commit error, not the auto-commit one, is thrown");
         assertEquals("autocommit failed", e.getSuppressed()[0].getMessage());
         assertEquals(List.of("setAutoCommit(false)", "executeBatch", "commit", "rollback", "setAutoCommit(true)"), stub.calls);
@@ -106,9 +106,18 @@ class DuckLakePostIngestionTaskTxnTest {
         stub.failCommit = true;
         stub.failRollback = true;
         var e = assertThrows(SQLException.class,
-                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES));
+                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES, () -> { }));
         assertEquals("commit failed", e.getMessage());
         assertEquals("rollback failed", e.getSuppressed()[0].getMessage());
+    }
+
+    @Test
+    void aFailingBeforeCommitHookRollsBackSoRestoringAutoCommitCannotCommit() {
+        var stub = new Stub();
+        var e = assertThrows(IllegalStateException.class, () -> DuckLakePostIngestionTask.executeInTxn(
+                stub.connection(), List.of("q"), FILES, () -> { throw new IllegalStateException("hook failed"); }));
+        assertEquals("hook failed", e.getMessage());
+        assertEquals(List.of("setAutoCommit(false)", "executeBatch", "rollback", "setAutoCommit(true)"), stub.calls);
     }
 
     @Test
@@ -116,7 +125,7 @@ class DuckLakePostIngestionTaskTxnTest {
         var stub = new Stub();
         stub.failRestoreAutoCommit = true;
         var e = assertThrows(SQLException.class,
-                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES));
+                () -> DuckLakePostIngestionTask.executeInTxn(stub.connection(), List.of("q"), FILES, () -> { }));
         assertEquals("autocommit failed", e.getMessage());
     }
 }
