@@ -602,10 +602,16 @@ ingestion_queue_table_mapping = [
 
 `view` and `input_table` must both be set (and are mutually exclusive with `transformation`);
 both must be fully qualified as `catalog.schema.name`. The resolution is validated at startup,
-so a missing or malformed view fails fast. Because queue state refreshes when the DuckLake
-catalog's schema version changes (which includes view DDL), altering the view updates the
-transformation at runtime — no config change or restart needed. The dynamic SQLite provider
-supports the same pair via its `view_name` / `input_table` registry columns.
+so a missing or malformed view fails fast. The view is re-read on every
+`queue_config_refresh_delay_ms` tick, and right away after a failed write, so altering it updates
+the transformation at runtime — no config change or restart needed. That holds wherever the view
+lives, including a catalog other than the target table's. If a periodic re-read cannot resolve the
+view (a brief catalog error, or the view dropped, renamed, or no longer reading `input_table` exactly
+once), the queue keeps its last resolved transformation and logs a warning on each tick. If a write
+then fails, the view is re-read at once; if it still does not resolve, only that queue is affected:
+its batches are rejected with the reason until the view is fixed, and the first batch after the fix
+is written. The dynamic SQLite provider supports the same pair via its `view_name` / `input_table`
+registry columns.
 
 ### Ingestion variables
 

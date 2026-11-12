@@ -176,6 +176,100 @@ class CatalogChangeRetryTest {
     }
 
     @Test
+    void aViewInAnotherCatalogChangedUnderARunningQueueIsAppliedByRetryingTheBatch() throws Exception {
+        // As above, but the view lives in the in-memory catalog: replacing it does not move the
+        // DuckLake catalog's schema_version, so the refresh must re-read the view itself.
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "CREATE TABLE %s.%s.events_in (id BIGINT, value BIGINT, category VARCHAR)"
+                    .formatted(CATALOG, SCHEMA));
+            ConnectionPool.execute(conn, "CREATE OR REPLACE VIEW memory.main.v_events_mem AS SELECT id, value, 7 AS category FROM %s.%s.events_in"
+                    .formatted(CATALOG, SCHEMA));
+        }
+        try {
+            var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null,
+                    "memory.main.v_events_mem", CATALOG + "." + SCHEMA + ".events_in");
+            var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
+            assertTrue(handler.getTransformation(TABLE).contains("7"), "the stale body is cached");
+
+            try (Connection conn = ConnectionPool.getConnection()) {
+                ConnectionPool.execute(conn, "CREATE OR REPLACE VIEW memory.main.v_events_mem AS SELECT id, value, upper(category) AS category FROM %s.%s.events_in"
+                        .formatted(CATALOG, SCHEMA));
+            }
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                assertEquals(100, write(queue, scheduler, src1, 0).rowCount());
+                assertEquals(1, queue.getCatalogRetries());
+                assertEquals(0, queue.getCatalogRetryFailures());
+            }
+            assertEquals(33L, count("WHERE category = 'CAT1'"), "rows come from the new view body");
+        } finally {
+            ConnectionPool.execute("DROP VIEW IF EXISTS memory.main.v_events_mem");
+        }
+    }
+
+    @Test
+    void aViewThatNoLongerResolvesRejectsBatchesUntilItIsRecreated() throws Exception {
+        String createView = "CREATE OR REPLACE VIEW %s.%s.v_events AS SELECT id, value, upper(category) AS category FROM %s.%s.events_in"
+                .formatted(CATALOG, SCHEMA, CATALOG, SCHEMA);
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    "CREATE TABLE %s.%s.events_in (id BIGINT, value BIGINT, category VARCHAR)".formatted(CATALOG, SCHEMA),
+                    createView
+            });
+        }
+        var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null,
+                CATALOG + "." + SCHEMA + ".v_events", CATALOG + "." + SCHEMA + ".events_in");
+        var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "DROP VIEW %s.%s.v_events".formatted(CATALOG, SCHEMA));
+        }
+        handler.refreshNow(TABLE); // a refresh tick sees the view gone
+        assertNotNull(handler.getTargetPath(TABLE), "only the transformation is unavailable");
+        var unavailable = assertThrows(TransformationUnavailableException.class, () -> handler.getTransformation(TABLE));
+        assertTrue(unavailable.getMessage().contains("v_events"), unavailable.getMessage());
+
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            var failed = assertThrows(ExecutionException.class, () -> write(queue, scheduler, src1, 0));
+            assertTrue(hasCause(failed, TransformationUnavailableException.class), "rejected with the reason: " + failed);
+            assertEquals(0L, count(""), "nothing is written without the transformation");
+
+            // Recreated: the very next batch is written, without waiting for the refresh interval.
+            try (Connection conn = ConnectionPool.getConnection()) {
+                ConnectionPool.execute(conn, createView);
+            }
+            assertEquals(100, write(queue, scheduler, src1, 1).rowCount());
+        }
+        assertEquals(33L, count("WHERE category = 'CAT1'"), "rows come from the recreated view");
+    }
+
+    @Test
+    void anUnusableQueueWhoseRefreshFailsIsRejectedWithItsCachedReason() throws Exception {
+        var handler = new IngestionHandler() {
+            @Override public PostIngestionTask createPostIngestionTask(IngestionResult r) { return PostIngestionTask.NOOP; }
+            @Override public String getTargetPath(String queueId) { return outputDir.toString(); }
+            @Override public String[] getPartitionBy(String queueId) { return new String[0]; }
+            @Override public String getTransformation(String queueId) {
+                throw new TransformationUnavailableException("view gone");
+            }
+            @Override public void refreshNow(String queueId) { throw new IllegalStateException("catalog down"); }
+        };
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            var failed = assertThrows(ExecutionException.class, () -> write(queue, scheduler, src1, 0));
+            Throwable reason = failed.getCause();
+            while (reason != null && !(reason instanceof TransformationUnavailableException)) {
+                reason = reason.getCause();
+            }
+            assertNotNull(reason, "rejected with the cached reason: " + failed);
+            assertEquals("view gone", reason.getMessage());
+            assertEquals(1, reason.getSuppressed().length);
+            assertEquals("catalog down", reason.getSuppressed()[0].getMessage());
+        }
+    }
+
+    @Test
     void aRegistrationWithAnUnknownOutcomeIsNotRetried() throws Exception {
         // The registration commits, then fails as a dropped connection after commit would: its
         // outcome is unknown to the queue. Meanwhile the table's partitioning changed, so the
@@ -232,7 +326,7 @@ class CatalogChangeRetryTest {
         return new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
     }
 
-    private ParquetIngestionQueue queue(DuckLakeIngestionHandler handler, DeterministicScheduler scheduler) {
+    private ParquetIngestionQueue queue(IngestionHandler handler, DeterministicScheduler scheduler) {
         return new ParquetIngestionQueue("test-app", "parquet", outputDir.toString(), TABLE,
                 1L, Long.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE, Duration.ofSeconds(5),
                 handler, scheduler, new MutableClock(Instant.now(), ZoneId.systemDefault()));
@@ -275,6 +369,13 @@ class CatalogChangeRetryTest {
                     .filter(p -> registered.stream().noneMatch(r -> r.endsWith(p) || p.endsWith(r)))
                     .toList();
         }
+    }
+
+    private static boolean hasCause(Throwable t, Class<? extends Throwable> type) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (type.isInstance(c)) return true;
+        }
+        return false;
     }
 
     private static Throwable rootRegistrationFailure(ExecutionException e) {

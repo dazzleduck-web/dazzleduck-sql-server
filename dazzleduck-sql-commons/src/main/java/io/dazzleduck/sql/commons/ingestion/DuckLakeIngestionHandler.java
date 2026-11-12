@@ -34,7 +34,11 @@ import java.util.regex.Pattern;
  *       {@code stateCache.compute()} to atomically check and refresh — no DuckDB round-trip
  *       on the hot write path when state is fresh. A queue whose variables come from a relation
  *       (see {@link IngestionVariables}) re-reads them on every refresh even when the schema has
- *       not changed, because rows are data, not schema.</li>
+ *       not changed, because rows are data, not schema. A view-based transformation is also
+ *       re-read on every refresh: the view may live in a catalog other than the target table's,
+ *       whose {@code schema_version} would not move when it changes. If a periodic re-read fails,
+ *       the last resolved transformation is kept; only {@link #refreshNow} (after a failed write)
+ *       or a first build records the failure and fails the queue.</li>
  *   <li><b>queueCache</b> — the {@link ParquetIngestionQueue} instance, in an
  *       {@link IngestionQueueCache}. The queue is created exactly once per queue ID (via
  *       {@link #getOrCreateQueue}) and is never replaced unless the target path disappears and
@@ -76,11 +80,16 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * {@code refreshedAt} is the clock instant when this state was last confirmed/rebuilt.
      * {@code partitionError} is non-null when the table's partitioning cannot be reproduced by the
      * COPY path (see {@link UnsupportedPartitionTransformException}); only this queue is affected.
+     * {@code transformationError} is non-null when the queue's view-based transformation cannot be
+     * resolved (see {@link TransformationUnavailableException}); likewise scoped to this queue.
      */
     private record QueueState(String targetPath, String transformation, String[] partitionColumns,
                                String[] partitionProjections, Map<String, String> variables,
                                long schemaChangeId, Instant refreshedAt,
-                               String partitionError) {}
+                               String partitionError, String transformationError) {}
+
+    /** A transformation resolved for a queue: the SQL, or the reason it could not be resolved. */
+    private record ResolvedTransformation(String sql, String error) {}
 
     /**
      * A resolved partition column: {@code token} is the identifier placed in COPY's
@@ -163,6 +172,9 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     @Override
     public String getTransformation(String queueId) {
         QueueState s = getOrRefreshState(queueId);
+        if (s != null && s.transformationError() != null) {
+            throw new TransformationUnavailableException(s.transformationError());
+        }
         return s != null ? s.transformation() : null;
     }
 
@@ -284,14 +296,17 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     // -----------------------------------------------------------------------
 
     /**
-     * Re-checks {@code schema_version} now and rebuilds the queue's state if it changed, regardless
-     * of {@code refreshInterval}. When the schema is unchanged this is one catalog query.
+     * Refreshes the queue's state now, regardless of {@code refreshInterval}: re-checks
+     * {@code schema_version} (rebuilding the state if it changed) and re-reads a view-based
+     * transformation. Unlike a periodic refresh, a view that does not resolve is recorded as the
+     * queue's failure instead of keeping the last resolved transformation — this runs after a write
+     * failed, when that transformation is suspect.
      */
     @Override
     public void refreshNow(String queueId) {
         String key = resolveStateKey(queueId);
         if (key == null) return;
-        stateCache.compute(key, this::computeRefreshedState);
+        stateCache.compute(key, (k, existing) -> computeRefreshedState(k, existing, true));
     }
 
     /**
@@ -307,7 +322,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         return stateCache.compute(key, (k, existing) -> {
             if (existing != null && !existing.refreshedAt().plus(refreshInterval).isBefore(clock.instant()))
                 return existing; // still fresh — nothing to do
-            return computeRefreshedState(k, existing);
+            return computeRefreshedState(k, existing, false);
         });
     }
 
@@ -332,11 +347,13 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
 
     /**
      * Compute function for {@code stateCache.compute()}: checks {@code schema_version} first
-     * (cheap — one DuckDB round-trip). If unchanged, only bumps {@code refreshedAt}.
-     * If changed (or no existing state), does a full rebuild of path, transformation, and
-     * partition columns.
+     * (cheap — one DuckDB round-trip). If unchanged, bumps {@code refreshedAt} and re-reads only
+     * what can change without DDL in this catalog: variables from a relation and a view-based
+     * transformation. If changed (or no existing state), does a full rebuild of path,
+     * transformation, and partition columns. {@code forced} is true for {@link #refreshNow}; see
+     * {@link #resolveTransformationIsolated} for how it treats a view that does not resolve.
      */
-    private QueueState computeRefreshedState(String key, QueueState existing) {
+    private QueueState computeRefreshedState(String key, QueueState existing, boolean forced) {
         QueueIdToTableMapping mapping = mappingFor(key);
         if (mapping == null) return existing; // unknown queue — leave unchanged
 
@@ -350,11 +367,17 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             Map<String, String> variables = mapping.variables().hasView()
                     ? mapping.variables().resolve(mapping.ingestionQueue())
                     : existing.variables();
-            return new QueueState(existing.targetPath(), existing.transformation(),
+            // So is a view-based transformation: the view may be in another catalog (or a plain
+            // DuckDB one), whose changes do not move the target catalog's schema_version.
+            ResolvedTransformation transformation = mapping.hasViewTransformation()
+                    ? resolveTransformationIsolated(mapping, existing, forced)
+                    : new ResolvedTransformation(existing.transformation(), existing.transformationError());
+            return new QueueState(existing.targetPath(), transformation.sql(),
                     existing.partitionColumns(), existing.partitionProjections(), variables,
-                    existing.schemaChangeId(), clock.instant(), existing.partitionError());
+                    existing.schemaChangeId(), clock.instant(), existing.partitionError(),
+                    transformation.error());
         }
-        return buildState(mapping, currentSchemaChangeId, clock.instant(), existing == null);
+        return buildState(mapping, currentSchemaChangeId, clock.instant(), existing, forced);
     }
 
     /**
@@ -363,11 +386,13 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * called from {@link #getOrRefreshState}.
      */
     private static QueueState buildState(QueueIdToTableMapping mapping, long schemaChangeId, Instant refreshedAt,
-                                         boolean firstBuild) {
+                                         QueueState previous, boolean forced) {
+        boolean firstBuild = previous == null;
         String path           = fetchPath(mapping.catalog(), mapping.schema(), mapping.table());
-        String transformation = resolveTransformation(mapping);
+        ResolvedTransformation resolved = resolveTransformationIsolated(mapping, previous, forced);
+        String transformation = resolved.sql();
         Map<String, String> variables = mapping.variables().resolve(mapping.ingestionQueue());
-        if (firstBuild) {
+        if (firstBuild && resolved.error() == null) {
             warnIfClaimsColumnMissing(mapping, transformation);
         }
         List<ResolvedPartition> partitions;
@@ -378,26 +403,70 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             logger.error("Queue '{}' ({}.{}.{}) cannot be ingested until its partitioning is changed: {}",
                     mapping.ingestionQueue(), mapping.catalog(), mapping.schema(), mapping.table(), e.getMessage());
             return new QueueState(path, transformation, new String[0], new String[0], variables,
-                    schemaChangeId, refreshedAt, e.getMessage());
+                    schemaChangeId, refreshedAt, e.getMessage(), resolved.error());
         }
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
                 .filter(java.util.Objects::nonNull).toArray(String[]::new);
         return new QueueState(path, transformation, tokens, projections, variables, schemaChangeId,
-                refreshedAt, null);
+                refreshedAt, null, resolved.error());
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
     private static QueueState buildState(QueueIdToTableMapping mapping, Instant refreshedAt) {
         long schemaChangeId = fetchSchemaChangeId(mapping.catalog(), mapping.schema(), mapping.table());
-        return buildState(mapping, schemaChangeId, refreshedAt, true);
+        return buildState(mapping, schemaChangeId, refreshedAt, null, false);
     }
 
-    private static String resolveTransformation(QueueIdToTableMapping mapping) {
-        if (mapping.hasViewTransformation()) {
-            return resolveViewTransformationStatic(mapping.view(), mapping.inputTable());
+    /**
+     * Resolves the queue's transformation, isolating a view that cannot be resolved to this queue:
+     * the failure is returned instead of thrown, so the handler and every other queue keep working.
+     *
+     * <p>How a failure is applied depends on why the state is being read:
+     * <ul>
+     *   <li>A periodic refresh ({@code forced == false}) with a previously resolved transformation
+     *       keeps that transformation and logs a warning on every tick. The failure may be a brief
+     *       catalog error, and the kept SQL reads only the batch, so it still writes correctly.</li>
+     *   <li>A forced refresh ({@link #refreshNow}: a write failed, or the queue is already unusable)
+     *       or a first build records the failure, so this queue's writes are rejected with the
+     *       reason until the view resolves again.</li>
+     * </ul>
+     */
+    private static ResolvedTransformation resolveTransformationIsolated(QueueIdToTableMapping mapping,
+                                                                        QueueState previous,
+                                                                        boolean forced) {
+        if (!mapping.hasViewTransformation()) {
+            return new ResolvedTransformation(mapping.transformation(), null);
         }
-        return mapping.transformation();
+        try {
+            String sql = resolveViewTransformationStatic(mapping.view(), mapping.inputTable());
+            if (previous != null && previous.transformationError() != null) {
+                logger.info("Queue '{}': view '{}' resolves again; ingestion resumes",
+                        mapping.ingestionQueue(), mapping.view());
+            } else if (previous != null && !sql.equals(previous.transformation())) {
+                logger.info("Queue '{}': view '{}' changed; transformation is now: {}",
+                        mapping.ingestionQueue(), mapping.view(), sql);
+            }
+            return new ResolvedTransformation(sql, null);
+        } catch (RuntimeException e) {
+            boolean hasLastGood = previous != null && previous.transformationError() == null
+                    && previous.transformation() != null;
+            if (!forced && hasLastGood) {
+                // Logged every tick while it lasts; the message is enough, the stack is at debug.
+                logger.warn("Queue '{}': could not re-read view '{}'; keeping its last resolved "
+                                + "transformation until a refresh succeeds or a write fails: {}",
+                        mapping.ingestionQueue(), mapping.view(), e.getMessage());
+                logger.atDebug().setCause(e).log("Queue '{}': view '{}' re-read failure",
+                        mapping.ingestionQueue(), mapping.view());
+                return new ResolvedTransformation(previous.transformation(), null);
+            }
+            String error = "Queue '%s' cannot be ingested until its view '%s' resolves: %s"
+                    .formatted(mapping.ingestionQueue(), mapping.view(), e.getMessage());
+            if (previous == null || !error.equals(previous.transformationError())) {
+                logger.error(error, e);
+            }
+            return new ResolvedTransformation(null, error);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -730,10 +799,11 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     private static String fetchViewDefinition(String catalog, String schema, String viewName) {
+        // Scalar subquery: one row, NULL when the view is missing (collectFirst throws on no rows).
         String query = """
-                SELECT sql
-                FROM duckdb_views()
-                WHERE database_name = '%s' AND schema_name = '%s' AND view_name = '%s'
+                SELECT (SELECT sql
+                        FROM duckdb_views()
+                        WHERE database_name = '%s' AND schema_name = '%s' AND view_name = '%s')
                 """.formatted(catalog, schema, viewName);
         try {
             String fullSql = ConnectionPool.collectFirst(query, String.class);
