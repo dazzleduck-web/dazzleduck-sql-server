@@ -123,7 +123,7 @@ public class DuckLakeDataRetention implements DataRetention {
             tables++;
             Timer.Sample sample = metrics.startTimer();
             try {
-                String key = database + "|" + policy.name().toLowerCase(Locale.ROOT);
+                String key = deletedBelowKey(database, policy);
                 Deletion deletion = deleteExpired(connection, policy, now.minus(policy.retention()),
                         deletedBelow.getOrDefault(key, Long.MIN_VALUE));
                 deletion.boundary().ifPresent(boundary -> deletedBelow.merge(key, boundary, Math::max));
@@ -141,12 +141,19 @@ public class DuckLakeDataRetention implements DataRetention {
                 metrics.stopTimer(sample, "retention", "delete", database);
             }
         }
+        // Forget tables whose policy is gone or changed column, so a new one starts afresh
+        List<String> current = policies.stream().map(p -> deletedBelowKey(database, p)).toList();
+        deletedBelow.keySet().removeIf(key -> key.startsWith(database + "|") && !current.contains(key));
         if (failed > 0) {
             // The policy table may live elsewhere and still be readable while the DuckLake
             // catalog's connection is dead.
             evictIfBroken(database, connection);
         }
         return new Outcome(tables, rowsDeleted, failed);
+    }
+
+    private static String deletedBelowKey(String database, RetentionPolicy policy) {
+        return (database + "|" + policy.name() + "|" + policy.timeColumn()).toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -277,7 +284,11 @@ public class DuckLakeDataRetention implements DataRetention {
         try (Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(pin)) {
             // Fetched, so the scan has certainly started even with streamed results (RawConnections):
             // a read that never started scopes nothing, and the DELETE would conflict with every insert.
-            rs.next();
+            if (!rs.next()) {
+                // Nothing in this snapshot is older than the cutoff. The statistics, read later, could
+                // show a file committed since, which this DELETE could not see.
+                return Deletion.NONE;
+            }
         }
         OptionalLong boundary = boundary(connection, policy, type, cutoff, deletedBelow);
         if (boundary.isEmpty()) {
@@ -426,7 +437,7 @@ public class DuckLakeDataRetention implements DataRetention {
      * boundary rather than hold retention back forever.
      *
      * <p>There is something to delete when a droppable file lies entirely below the boundary, or a
-     * file holding NULLs may have rows between {@code deletedBelow} and the boundary; those are
+     * file holding NULLs may have rows between {@code deletedBelow} and a higher boundary; those are
      * deleted with a delete file. Its statistics do not change after that, so without
      * {@code deletedBelow} it would start a DELETE that finds nothing every cycle. A file without
      * statistics never starts a delete on its own: it could hold anything, and would be scanned in
@@ -436,10 +447,6 @@ public class DuckLakeDataRetention implements DataRetention {
      * is every later file's, and a file passed over had its minimum at or above a boundary that has
      * only gone down since.
      */
-    static OptionalLong fileBoundary(List<FileRange> files, long cutoff) {
-        return fileBoundary(files, cutoff, Long.MIN_VALUE);
-    }
-
     static OptionalLong fileBoundary(List<FileRange> files, long cutoff, long deletedBelow) {
         List<FileRange> droppable = files.stream()
                 .filter(FileRange::droppable)
@@ -456,7 +463,7 @@ public class DuckLakeDataRetention implements DataRetention {
         }
         long at = boundary;
         boolean anyToDelete = droppable.stream().anyMatch(f -> f.max() < at)
-                || files.stream().anyMatch(f -> f.hasStats() && f.hasNulls() && f.min() != null
+                || at > deletedBelow && files.stream().anyMatch(f -> f.hasStats() && f.hasNulls() && f.min() != null
                         && f.min() < at && f.max() >= deletedBelow);
         return anyToDelete ? OptionalLong.of(boundary) : OptionalLong.empty();
     }

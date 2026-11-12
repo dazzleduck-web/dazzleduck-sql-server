@@ -178,19 +178,19 @@ class DuckLakeDataRetentionTest {
         DuckLakeDataRetention.FileRange chained = new DuckLakeDataRetention.FileRange(25L, 40L, false, true);
 
         assertEquals(java.util.OptionalLong.of(100L),
-                DuckLakeDataRetention.fileBoundary(List.of(expired, fresh), 100L), "nothing straddles the cutoff");
+                DuckLakeDataRetention.fileBoundary(List.of(expired, fresh), 100L, Long.MIN_VALUE), "nothing straddles the cutoff");
         assertEquals(java.util.OptionalLong.of(30L),
-                DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, fresh), 100L));
+                DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, fresh), 100L, Long.MIN_VALUE));
         assertEquals(java.util.OptionalLong.of(25L),
-                DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, chained), 100L),
+                DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, chained), 100L, Long.MIN_VALUE),
                 "lowering to 30 makes the 25-40 file straddle, so it drops again");
-        assertTrue(DuckLakeDataRetention.fileBoundary(List.of(straddles, fresh), 100L).isEmpty(),
+        assertTrue(DuckLakeDataRetention.fileBoundary(List.of(straddles, fresh), 100L, Long.MIN_VALUE).isEmpty(),
                 "no file lies entirely below the boundary");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
-                        List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L),
+                        List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L, Long.MIN_VALUE),
                 "a file with NULLs cannot be dropped whole, but its expired rows are still deleted");
         assertTrue(DuckLakeDataRetention.fileBoundary(
-                        List.of(new DuckLakeDataRetention.FileRange(100L, 120L, true, true)), 100L).isEmpty(),
+                        List.of(new DuckLakeDataRetention.FileRange(100L, 120L, true, true)), 100L, Long.MIN_VALUE).isEmpty(),
                 "nothing in it below the cutoff");
         assertTrue(DuckLakeDataRetention.fileBoundary(
                         List.of(new DuckLakeDataRetention.FileRange(10L, 20L, true, true)), 100L, 90L).isEmpty(),
@@ -198,20 +198,23 @@ class DuckLakeDataRetentionTest {
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
                         List.of(new DuckLakeDataRetention.FileRange(10L, 95L, true, true)), 100L, 90L),
                 "it may have rows from 90 to 95 left");
+        assertTrue(DuckLakeDataRetention.fileBoundary(
+                        List.of(new DuckLakeDataRetention.FileRange(10L, 150L, true, true)), 100L, 100L).isEmpty(),
+                "the boundary has not moved since the last DELETE, which took all its rows below it");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 50L, true, true)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 50L, true, true)), 100L, Long.MIN_VALUE),
                 "a file with NULLs does not move the boundary, or it would hold retention back forever");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 150L, true, true)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 150L, true, true)), 100L, Long.MIN_VALUE),
                 "nor does a file with NULLs that straddles the cutoff");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, true, true)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, true, true)), 100L, Long.MIN_VALUE),
                 "a file of NULLs only does not move the boundary");
         assertEquals(java.util.OptionalLong.of(100L), DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L, Long.MIN_VALUE),
                 "a file without statistics does not move the boundary either");
         assertTrue(DuckLakeDataRetention.fileBoundary(
-                        List.of(new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L).isEmpty(),
+                        List.of(new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L, Long.MIN_VALUE).isEmpty(),
                 "and is never counted as expired");
     }
 

@@ -1,5 +1,7 @@
 package io.dazzleduck.sql.compaction;
 
+import io.dazzleduck.sql.commons.util.HeaderUtils;
+
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.Locale;
@@ -122,6 +124,6 @@ record RetentionPolicy(String catalog, String schema, String table, String timeC
     }
 
     private static String quote(String identifier) {
-        return '"' + identifier + '"';
+        return HeaderUtils.quoteIdentifier(identifier);
     }
 }
