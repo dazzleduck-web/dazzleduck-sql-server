@@ -311,7 +311,7 @@ class RetentionConcurrentIngestionTest {
 
     /** Retention's delete for the cutoff, in its own transaction as the job runs it. */
     private static long executeDelete(Connection connection, Instant cutoff) throws SQLException {
-        return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff);
+        return DuckLakeDataRetention.deleteExpired(connection, POLICY, cutoff, 0).rows();
     }
 
     /** BEGIN, as the job does: the type is looked up first, outside the transaction. */
@@ -331,7 +331,7 @@ class RetentionConcurrentIngestionTest {
     /** The same, running {@code beforeDelete} between the statistics read and the DELETE. */
     private long deleteInOpenTransaction(Connection connection, Instant cutoff, Runnable beforeDelete)
             throws SQLException {
-        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, beforeDelete);
+        return DuckLakeDataRetention.deleteInTransaction(connection, POLICY, type, cutoff, 0, beforeDelete).rows();
     }
 
     private static Instant cutoffAtHour(int hour) {

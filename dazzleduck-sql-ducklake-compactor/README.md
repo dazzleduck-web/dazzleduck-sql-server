@@ -129,6 +129,7 @@ data_retention {
   frequency = 1 hour
   policy_table = "lake.main.retention_policy"
   connection_settings = ["SET enable_external_file_cache = false"]
+  max_files_per_cycle = 1000   # 0 = no cap
 }
 ```
 
@@ -150,7 +151,16 @@ is pruned by its statistics. Before it, the job checks that a row older than the
 runs no DELETE when none does.
 
 - A file that straddles the cutoff holds back the files above its minimum until its newest row
-  expires. Partitioning the table by time, for example by day, keeps files from straddling.
+  expires. Partitioning the table by time, for example by day, keeps files from straddling. How
+  far the boundary lags the cutoff is the `ducklake.retention.boundary_lag` gauge (seconds), and a
+  lag longer than the retention itself, such as from one row stamped far in the future, is logged
+  as a warning.
+- One table's DELETE drops at most `max_files_per_cycle` files, the oldest, so the first run on a
+  table with a long backlog drains it over several cycles rather than in one transaction that
+  could outlast the catalog's idle-transaction timeout. Files that overlap so that none of them can
+  be dropped alone are dropped together, past the cap.
+- A file whose time column holds a value before year 1, from a corrupt value, is treated like one
+  without statistics.
 - Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
   not move the boundary; its expired rows are deleted with a delete file.
 - A data file without statistics for the time column, such as one written before the column was
@@ -163,7 +173,8 @@ runs no DELETE when none does.
 - The statistics are read and the DELETE runs in one transaction, so a file committed meanwhile is
   never partly deleted; the commit conflicts instead, and the next cycle retries.
 - A failed table does not stop the others. Each cycle opens its own connection, running the
-  startup script, and closes it at the end.
+  startup script, and closes it at the end; shutdown closes it at once, aborting a running DELETE,
+  which rolls back.
 - `retention` is a whole number and a unit of at least seconds: `s`, `min`, `h`, `d`, `w`, or the
   unit spelled out (`30 days`, `90 minutes`). A bare number and `m` are rejected rather than read
   as milliseconds and minutes, as they would be in the config file.
@@ -174,7 +185,8 @@ runs no DELETE when none does.
   and skipped. A table that fails, such as one without the named column, does not stop the others.
 - The dropped files are removed from storage by the regular housekeeping job once they fall out of
   `snapshot_retention`.
-- Metrics: `ducklake.retention.rows_deleted` (tagged `database`, `table`), the
+- Metrics: `ducklake.retention.rows_deleted` and `ducklake.retention.boundary_lag` (tagged
+  `database`, `table`), the
   `ducklake.compaction.duration` timer with `type=retention`, and `ducklake.compaction.failures`
   with `type=retention` for a cycle with a failed table or an unreadable policy table.
 

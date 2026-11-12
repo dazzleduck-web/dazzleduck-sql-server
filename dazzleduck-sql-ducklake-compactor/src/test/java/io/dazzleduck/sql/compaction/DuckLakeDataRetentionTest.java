@@ -112,7 +112,7 @@ class DuckLakeDataRetentionTest {
         CompactionState state = new CompactionState(registry, List.of(DB), List.of());
         DataRetention.Outcome outcome;
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
             outcome = retention.enforce(DB);
         }
 
@@ -156,7 +156,7 @@ class DuckLakeDataRetentionTest {
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
         DataRetention.Outcome outcome;
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
             outcome = retention.enforce(DB);
         }
 
@@ -177,18 +177,18 @@ class DuckLakeDataRetentionTest {
         DuckLakeDataRetention.FileRange fresh = new DuckLakeDataRetention.FileRange(150L, 200L, false, true);
         DuckLakeDataRetention.FileRange chained = new DuckLakeDataRetention.FileRange(25L, 40L, false, true);
 
-        assertEquals(100L, DuckLakeDataRetention.fileBoundary(List.of(expired, fresh), 100L), "nothing straddles the cutoff");
-        assertEquals(30L, DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, fresh), 100L));
-        assertEquals(25L, DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, chained), 100L),
+        assertEquals(100L, DuckLakeDataRetention.fileBoundary(List.of(expired, fresh), 100L, 0), "nothing straddles the cutoff");
+        assertEquals(30L, DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, fresh), 100L, 0));
+        assertEquals(25L, DuckLakeDataRetention.fileBoundary(List.of(expired, straddles, chained), 100L, 0),
                 "lowering to 30 makes the 25-40 file straddle, so it drops again");
         assertEquals(100L, DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 150L, true, true)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(5L, 150L, true, true)), 100L, 0),
                 "a file with NULLs that straddles the cutoff does not move the boundary, or it would hold retention back forever");
         assertEquals(100L, DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, true, true)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, true, true)), 100L, 0),
                 "nor does a file of NULLs only");
         assertEquals(100L, DuckLakeDataRetention.fileBoundary(
-                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L),
+                        List.of(expired, new DuckLakeDataRetention.FileRange(null, null, false, false)), 100L, 0),
                 "nor a file without statistics");
     }
 
@@ -196,9 +196,89 @@ class DuckLakeDataRetentionTest {
     private DataRetention.Outcome enforce(Path catalog, Path data) throws Exception {
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
             return retention.enforce(DB);
         }
+    }
+
+    @Test
+    void aClosedJobStartsNoCycle() {
+        CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
+        DuckLakeDataRetention retention = new DuckLakeDataRetention("", List.of(DB), "lake.main.p", List.of(), 0, state);
+        retention.close();
+        assertThrows(IllegalStateException.class, () -> retention.enforce(DB));
+    }
+
+    @Test
+    void aCycleDropsAtMostMaxFiles() {
+        List<DuckLakeDataRetention.FileRange> files = List.of(
+                new DuckLakeDataRetention.FileRange(10L, 19L, false, true),
+                new DuckLakeDataRetention.FileRange(20L, 29L, false, true),
+                new DuckLakeDataRetention.FileRange(30L, 39L, false, true),
+                new DuckLakeDataRetention.FileRange(40L, 49L, false, true));
+        assertEquals(100L, DuckLakeDataRetention.fileBoundary(files, 100L, 0), "no cap");
+        assertEquals(100L, DuckLakeDataRetention.fileBoundary(files, 100L, 4), "at the cap");
+        assertEquals(30L, DuckLakeDataRetention.fileBoundary(files, 100L, 2), "the two oldest");
+        assertEquals(20L, DuckLakeDataRetention.fileBoundary(files, 100L, 1));
+
+        List<DuckLakeDataRetention.FileRange> overlapping = List.of(
+                new DuckLakeDataRetention.FileRange(10L, 25L, false, true),
+                new DuckLakeDataRetention.FileRange(20L, 29L, false, true));
+        assertEquals(100L, DuckLakeDataRetention.fileBoundary(overlapping, 100L, 1),
+                "no lower boundary drops either alone, so both go together rather than never");
+    }
+
+    @Test
+    void aFileWithATimeBeforeYearOneDoesNotStopRetention() {
+        long beforeYearOne = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.parse("-0005-01-01T00:00:00Z"));
+        DuckLakeDataRetention.FileRange corrupt = new DuckLakeDataRetention.FileRange(beforeYearOne, 150L, false, true);
+        DuckLakeDataRetention.FileRange expired = new DuckLakeDataRetention.FileRange(10L, 20L, false, true);
+        assertEquals(100L, DuckLakeDataRetention.fileBoundary(List.of(expired, corrupt), 100L, 0),
+                "the corrupt file does not drag the boundary to year -5");
+    }
+
+    @Test
+    void timestamptzStatisticsWithoutAnOffsetAreUtc() throws Exception {
+        String expr = "TIMESTAMP WITH TIME ZONE";
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:");
+             Statement s = c.createStatement()) {
+            s.execute("SET TimeZone = 'America/Los_Angeles'");
+            long utc = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.parse("2026-10-01T10:00:00Z"));
+            for (String value : List.of("2026-10-01 10:00:00+00", "2026-10-01 10:00:00", "2026-10-01 10:00:00.000000+00:00",
+                    "2026-10-01 03:00:00-07", "2026-10-01T10:00:00Z")) {
+                try (ResultSet rs = s.executeQuery("SELECT " + DuckLakeDataRetention.toMicrosSql(expr, "'" + value + "'"))) {
+                    assertTrue(rs.next());
+                    assertEquals(utc, rs.getLong(1), value);
+                }
+            }
+            try (ResultSet rs = s.executeQuery("SELECT " + DuckLakeDataRetention.toMicrosSql(expr, "'2026-10-01'"))) {
+                assertTrue(rs.next());
+                assertEquals(ChronoUnit.MICROS.between(Instant.EPOCH, Instant.parse("2026-10-01T00:00:00Z")), rs.getLong(1),
+                        "a date's '-01' is not an offset");
+            }
+        }
+    }
+
+    @Test
+    void theBoundaryLagIsAGauge() throws Exception {
+        Path catalog = tmp.resolve("catalog.ducklake");
+        Path data = Files.createDirectories(tmp.resolve("data"));
+        run(catalog, data,
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+                "CREATE TABLE lake.main.logs (ts TIMESTAMP)",
+                "INSERT INTO lake.main.logs VALUES (TIMESTAMP '2026-08-01')",
+                // straddles the cutoff (2026-10-12 12:00) from 2026-09-12 12:00, 30 days earlier
+                "INSERT INTO lake.main.logs VALUES (TIMESTAMP '2026-09-12 12:00:00'), (TIMESTAMP '2026-10-20')",
+                "CREATE TABLE lake.main.retention_policy (table_name VARCHAR, time_column VARCHAR, retention VARCHAR)",
+                "INSERT INTO lake.main.retention_policy VALUES ('lake.main.logs', 'ts', '30 days')");
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        CompactionState state = new CompactionState(registry, List.of(DB), List.of());
+        try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+            assertEquals(1, retention.enforce(DB).rowsDeleted());
+        }
+        assertEquals(Duration.ofDays(30).toSeconds(), registry.get("ducklake.retention.boundary_lag")
+                .tag("database", DB).tag("table", "lake.main.logs").gauge().value());
     }
 
     @Test
@@ -243,7 +323,7 @@ class DuckLakeDataRetentionTest {
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
         DataRetention.Outcome outcome;
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
             outcome = retention.enforce(DB);
         }
 
@@ -272,7 +352,7 @@ class DuckLakeDataRetentionTest {
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
         DataRetention.Outcome outcome;
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.retention_policy", List.of(), state, Clock.fixed(NOW, ZoneOffset.UTC))) {
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC))) {
             outcome = retention.enforce(DB);
         }
 
@@ -338,7 +418,7 @@ class DuckLakeDataRetentionTest {
 
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
         try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
-                "lake.main.no_such_policy", List.of(), state)) {
+                "lake.main.no_such_policy", List.of(), 0, state)) {
             assertThrows(Exception.class, () -> retention.enforce(DB));
         }
     }
@@ -387,6 +467,9 @@ class DuckLakeDataRetentionTest {
                 "data_retention { enabled = true, policy_table = \"lake.main.p; DROP TABLE x\" }")));
         DataRetentionConfig config = DataRetentionConfig.from(ConfigFactory.parseString(
                 "data_retention { enabled = true, frequency = 10 minutes, policy_table = lake.main.retention_policy }"));
+        assertEquals(DataRetentionConfig.DEFAULT_MAX_FILES_PER_CYCLE, config.maxFilesPerCycle());
+        assertThrows(IllegalArgumentException.class, () -> DataRetentionConfig.from(ConfigFactory.parseString(
+                "data_retention { enabled = true, policy_table = lake.main.p, max_files_per_cycle = -1 }")));
         assertEquals(Duration.ofMinutes(10), config.frequency());
         assertEquals("lake.main.retention_policy", config.policyTable());
     }

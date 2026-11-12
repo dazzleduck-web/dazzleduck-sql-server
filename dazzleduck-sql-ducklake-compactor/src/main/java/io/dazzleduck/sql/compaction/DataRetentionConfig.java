@@ -11,10 +11,17 @@ import java.util.regex.Pattern;
  * says which rows of which tables expire.
  */
 public record DataRetentionConfig(boolean enabled, Duration frequency, String policyTable,
-                                  List<String> connectionSettings) {
+                                  List<String> connectionSettings, int maxFilesPerCycle) {
+
+    /** The default cap on the data files one table's DELETE drops in a cycle. */
+    public static final int DEFAULT_MAX_FILES_PER_CYCLE = 1000;
 
     public static final DataRetentionConfig DISABLED =
-            new DataRetentionConfig(false, Duration.ofHours(1), null, List.of());
+            new DataRetentionConfig(false, Duration.ofHours(1), null, List.of(), DEFAULT_MAX_FILES_PER_CYCLE);
+
+    public DataRetentionConfig(boolean enabled, Duration frequency, String policyTable, List<String> connectionSettings) {
+        this(enabled, frequency, policyTable, connectionSettings, DEFAULT_MAX_FILES_PER_CYCLE);
+    }
 
     /** The policy table is interpolated into SQL, so it must be a plain, possibly qualified, name. */
     private static final Pattern RELATION =
@@ -31,6 +38,10 @@ public record DataRetentionConfig(boolean enabled, Duration frequency, String po
                 throw new IllegalArgumentException("data_retention.frequency must be at least 1 second, got " + frequency);
             }
         }
+        if (maxFilesPerCycle < 0) {
+            throw new IllegalArgumentException("data_retention.max_files_per_cycle must be 0 (no cap) or more, got "
+                    + maxFilesPerCycle);
+        }
         connectionSettings = List.copyOf(connectionSettings);
     }
 
@@ -44,6 +55,7 @@ public record DataRetentionConfig(boolean enabled, Duration frequency, String po
                 enabled,
                 r.hasPath("frequency") ? r.getDuration("frequency") : DISABLED.frequency(),
                 r.hasPath("policy_table") ? r.getString("policy_table") : null,
-                r.hasPath("connection_settings") ? r.getStringList("connection_settings") : List.of());
+                r.hasPath("connection_settings") ? r.getStringList("connection_settings") : List.of(),
+                r.hasPath("max_files_per_cycle") ? r.getInt("max_files_per_cycle") : DEFAULT_MAX_FILES_PER_CYCLE);
     }
 }

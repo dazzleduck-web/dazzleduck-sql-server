@@ -56,7 +56,7 @@ public class Main {
             DataRetentionConfig retention = config.dataRetention();
             DataRetention dataRetention = retention.enabled()
                     ? new DuckLakeDataRetention(startupScript, config.databases(), retention.policyTable(),
-                            retention.connectionSettings(), state)
+                            retention.connectionSettings(), retention.maxFilesPerCycle(), state)
                     : null;
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
             service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state, runLog);
