@@ -1,7 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import com.typesafe.config.Config;
-import com.typesafe.config.ConfigValueType;
 import io.dazzleduck.sql.common.ConfigConstants;
 import io.dazzleduck.sql.commons.Transformations;
 import org.slf4j.Logger;
@@ -53,7 +52,6 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
         Map<String, QueueIdToTableMapping> mappings = new LinkedHashMap<>();
         config.getConfigList(ConfigConstants.INGESTION_QUEUE_TABLE_MAPPING_KEY).forEach(c -> {
             String ingestionQueue = c.getString(ConfigConstants.INGESTION_QUEUE_KEY);
-            rejectWatermarkKeys(ingestionQueue, c);
             if (!c.hasPath("catalog") || !c.hasPath("schema") || !c.hasPath("table")) {
                 logger.debug("Skipping DuckLake mapping for queue '{}': missing catalog/schema/table", ingestionQueue);
                 return;
@@ -87,27 +85,6 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             mappings.put(mapping.ingestionQueue(), mapping);
         });
         return mappings;
-    }
-
-    /**
-     * Ingestion watermarks were removed. A mapping that still configures one fails at config load,
-     * {@link #validate()} at startup, rather than have its watermark table silently stop receiving
-     * rows; checked before a mapping without a DuckLake table is skipped, so no such key goes unseen.
-     */
-    static void rejectWatermarkKeys(String ingestionQueue, Config mapping) {
-        // Only an object can hold keys; anything else is left to whatever reads it, as before.
-        if (!mapping.hasPath("additional_parameters")
-                || mapping.getValue("additional_parameters").valueType() != ConfigValueType.OBJECT) {
-            return;
-        }
-        List<String> keys = mapping.getConfig("additional_parameters").root().keySet().stream()
-                .filter(key -> key.startsWith("watermark_"))
-                .sorted()
-                .toList();
-        if (!keys.isEmpty()) {
-            throw new IllegalArgumentException(("Queue '%s': ingestion watermarks are no longer supported; "
-                    + "remove %s from additional_parameters").formatted(ingestionQueue, keys));
-        }
     }
 
     @Override

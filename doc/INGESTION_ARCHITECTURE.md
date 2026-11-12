@@ -92,4 +92,3 @@ These are real parts of the path that do not change the shape above:
 ## Related
 
 - `doc/DYNAMIC_QUEUES.md` — registering queues at runtime instead of from static config
-- `PRODUCER_WATERMARK_SPEC.md` — proposed durable producer watermarks

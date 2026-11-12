@@ -542,7 +542,7 @@ configure `ingestion_queue_table_mapping` entries:
 | `table` | Yes | Target table name |
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
 | `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
-| `additional_parameters` | No | Reserved for per-queue extensions; no key is read today. Ingestion watermarks were removed, so a mapping with `watermark_*` keys fails startup under the DuckLake provider |
+| `additional_parameters` | No | Reserved for per-queue extensions; no key is read today. Ingestion watermarks were removed, so a mapping with a `watermark*` key fails to load |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
