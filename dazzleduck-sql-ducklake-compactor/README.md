@@ -143,18 +143,20 @@ That DELETE matches whole files, so DuckLake drops them without writing delete f
 anything. The exception is a file holding NULLs or without statistics for the time column (below):
 its expired rows are deleted with a delete file, which housekeeping's delete-file rewrite cleans up.
 The DELETE reads the time column of the files it drops (and of those exceptions); every other file
-is pruned by its statistics. No DELETE runs when nothing lies below the boundary.
+is pruned by its statistics. Before it, the job checks that a row older than the boundary exists, and
+runs no DELETE when none does.
 
 - A file that straddles the cutoff holds back the files above its minimum until its newest row
   expires. Partitioning the table by time, for example by day, keeps files from straddling.
 - Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
   not move the boundary; its expired rows are deleted with a delete file.
 - A data file without statistics for the time column, such as one written before the column was
-  added, does not move the boundary either, and is logged. It could hold any time, so it never
-  starts a DELETE by itself, but a DELETE that runs for the table's other files covers it too.
-- Rows still inlined in the catalog (`data_inlining_row_limit` above 0) have no file statistics and
-  are only deleted by a DELETE that runs for the table's data files. Ingestion through
-  `ducklake_add_data_files` never inlines.
+  added, does not move the boundary either, and is logged. Its expired rows are deleted with a
+  delete file.
+- Rows still inlined in the catalog (`data_inlining_row_limit` above 0) are deleted too.
+- Files holding NULLs or without statistics keep their statistics after their expired rows are
+  deleted, so each cycle's check for a row older than the boundary scans them until housekeeping's
+  delete-file rewrite replaces them.
 - The statistics are read and the DELETE runs in one transaction, so a file committed meanwhile is
   never partly deleted; the commit conflicts instead, and the next cycle retries.
 - A failed table does not stop the others. When a cycle has a failure, the job checks that its
