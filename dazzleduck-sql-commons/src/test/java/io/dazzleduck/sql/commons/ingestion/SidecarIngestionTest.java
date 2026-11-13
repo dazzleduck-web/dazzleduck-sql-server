@@ -218,6 +218,36 @@ class SidecarIngestionTest {
     }
 
     @Test
+    void aKeyValueDirectoryAboveTheInputIsNotReadAsAColumn() throws Exception {
+        // Read back as hive partitioned, category=zzz would replace every row's category.
+        Path inputDir = Files.createDirectories(tempDir.resolve("category=zzz"));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts"
+                              transformation = "SELECT category, count(*) AS n FROM __base GROUP BY ALL" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            Path input = Files.copy(src, inputDir.resolve("in.parquet"));
+            var future = queue.add(new Batch<>(null, null, input.toString(), "producer1", 0,
+                    Files.size(input), "parquet", Instant.now()));
+            scheduler.tick(1, TimeUnit.MILLISECONDS);
+            future.get(30, TimeUnit.SECONDS);
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+        assertEquals(0L, scalar("SELECT count(*) FROM %s.%s.category_counts WHERE category = 'zzz'".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aStagingPathDuckDbWouldMisreadIsNotUsed() {
+        assertEquals(tempDir, ParquetIngestionQueue.stagingRoot(tempDir));
+        for (String bad : List.of("env=prod", "a*b", "a?b", "a[1]", "a{b}")) {
+            Path dir = tempDir.resolve(bad);
+            assertFalse(ParquetIngestionQueue.isSafeStagingPath(dir), bad);
+            assertNotEquals(dir, ParquetIngestionQueue.stagingRoot(dir), "falls back to the system temp directory: " + bad);
+        }
+    }
+
+    @Test
     void aSidecarWithNoRowsForTheBatchRegistersNoFile() throws Exception {
         var handler = handler("""
                 sidecars = [{ table = "negatives", transformation = "SELECT id FROM __base WHERE value < 0" }]

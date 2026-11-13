@@ -136,7 +136,8 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
      * batch, or {@link #MULTIPLE_PARTITIONS} when the rows span more than one partition.
      */
     private int resolvePartition(Batch<String> batch) throws Exception {
-        String relation = "read_%s(['%s'])".formatted(inputFormat, batch.record());
+        // hive_partitioning off, as for the write: a key=value directory in the path is not a column.
+        String relation = "read_%s(['%s'], hive_partitioning = false)".formatted(inputFormat, batch.record());
         // hash() is unsigned; cast the modulo (0 .. numPartitions-1) to BIGINT for a clean getLong().
         String sql = ("SELECT count(DISTINCT part) AS distinct_count, min(part) AS partition "
                 + "FROM (SELECT (hash(%s) %% %d)::BIGINT AS part FROM %s)")

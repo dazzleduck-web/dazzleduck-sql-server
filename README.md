@@ -709,6 +709,11 @@ ingestion_queue_table_mapping = [{
   own file systems and secrets: S3, GCS, Azure or a local path, with no other client or credentials.
   The staging directory is deleted when the write ends. A queue without sidecars writes as before,
   straight to its output path, with no staging.
+- **Staging needs room.** The staging directory, next to the input files (or the system temp
+  directory if that path has `=`, `*`, `?`, `[` or `{`, which DuckDB would misread), holds each
+  in-flight batch's base and sidecar files. Each upload reads its file into memory as one value,
+  with up to 16 at once, and DuckDB cannot read a file over 4 GB that way: keep the bucket size well
+  below that.
 - **Failures.** If a step fails, the others are cancelled and the batch fails with nothing
   registered. Before the upload nothing has left the staging directory; files already uploaded are
   deleted where they are local, and left for `ducklake_delete_orphaned_files` on object storage. A

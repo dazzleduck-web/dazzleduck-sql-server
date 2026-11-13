@@ -31,6 +31,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * threads, not virtual: a COPY is one long native call into DuckDB, which would pin a virtual
      * thread's carrier for its whole length and starve the server's other virtual threads.
      */
+    /**
+     * Uploads staged files. Its own pool, so a batch with many partition files does not hold up other
+     * queues' sidecar COPYs; platform threads for the same reason as the COPYs.
+     */
+    private static final ExecutorService UPLOAD_EXECUTOR = Executors.newFixedThreadPool(16, runnable -> {
+        Thread thread = new Thread(runnable, "staged-upload");
+        thread.setDaemon(true);
+        return thread;
+    });
+
     private static final ExecutorService SIDECAR_COPY_EXECUTOR = Executors.newFixedThreadPool(
             Math.max(4, Runtime.getRuntime().availableProcessors()), runnable -> {
                 Thread thread = new Thread(runnable, "sidecar-copy");
@@ -502,7 +512,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         String sortOrderClause = getClause(batches.get(0).sortOrder(), "ORDER BY %s ");
 
         // Inner SQL reads from the temp Arrow files
-        var innerSql = "SELECT * FROM read_%s([%s]) %s".formatted(this.inputFormat, arrowFiles, sortOrderClause);
+        // hive_partitioning off: DuckDB would otherwise read a key=value directory in the input
+        // files' path (the temp write location) as a column, replacing a real one of that name.
+        var innerSql = "SELECT * FROM read_%s([%s], hive_partitioning = false) %s".formatted(this.inputFormat, arrowFiles, sortOrderClause);
 
         // The transformation is fetched fresh from the handler on every write (currentWriteInputs)
         // so view-based and handler-refreshed transformations are always current without caching.
@@ -675,7 +687,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      */
     private IngestionResult writeStaged(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs, String source,
                                         Attempt write) throws Exception {
-        Path stage = Path.of(writeTask.bucket().batches().get(0).record()).toAbsolutePath().getParent()
+        Path stage = stagingRoot(Path.of(writeTask.bucket().batches().get(0).record()).toAbsolutePath().getParent())
                 .resolve("dd_stage_" + UUID.randomUUID());
         Path baseDir = Files.createDirectories(stage.resolve("base"));
         List<String> uploaded = java.util.Collections.synchronizedList(new ArrayList<>());
@@ -697,7 +709,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 sidecarSql.put(sidecar.table(), constructSidecarWriteQuery(inputs, sidecar, stagedBase, file.toString()));
             }
             Map<String, CopyOutput> sidecarOutputs = write.parallel(sidecarSql, sidecarSql::get,
-                    (table, copySql) -> write.copy(copySql));
+                    (table, copySql) -> write.copy(copySql), SIDECAR_COPY_EXECUTOR);
 
             // Every staged file and where it goes: a base file keeps its path under the staging
             // directory (its hive partition directories), a sidecar file goes under its table's path.
@@ -727,7 +739,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     (destination, local) -> {
                         upload(write, local, destination, uploaded);
                         return Boolean.TRUE;
-                    });
+                    }, UPLOAD_EXECUTOR);
 
             logger.debug("Queue '{}': staged write of {} rows, base files {}, sidecar files {}",
                     queueId, baseOutput.rows(), baseFiles, sidecarFiles);
@@ -739,6 +751,28 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         } finally {
             deleteRecursively(stage);
         }
+    }
+
+    /**
+     * Where a batch is staged: next to its input files, unless that path has a character DuckDB would
+     * misread in a staged file's path. An {@code =} in any directory makes a hive partition column of
+     * it when the base is read back, and {@code * ? [ {} make a glob of the path in read_parquet and
+     * read_blob. Then the system temp directory, which must be free of them.
+     */
+    static Path stagingRoot(Path inputDirectory) {
+        if (isSafeStagingPath(inputDirectory)) {
+            return inputDirectory;
+        }
+        Path temp = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath();
+        if (isSafeStagingPath(temp)) {
+            return temp;
+        }
+        throw new IllegalStateException(("Cannot stage a batch: neither %s nor %s is usable, since a path with "
+                + "'=', '*', '?', '[' or '{' is misread by DuckDB").formatted(inputDirectory, temp));
+    }
+
+    static boolean isSafeStagingPath(Path path) {
+        return path.toString().chars().noneMatch(c -> c == '=' || c == '*' || c == '?' || c == '[' || c == '{');
     }
 
     /**
@@ -754,19 +788,21 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         }
         String list = files.stream().map(f -> "'" + f.replace("'", "''") + "'").collect(Collectors.joining(", "));
         if (inputs.partitionBy().isEmpty()) {
-            return "SELECT * FROM read_parquet([%s])".formatted(list);
+            // Explicitly off: DuckDB would otherwise detect it from a key=value directory in the path.
+            return "SELECT * FROM read_parquet([%s], hive_partitioning = false)".formatted(list);
         }
-        Map<String, String> types = write.columnTypes(source);
+        Map<String, String[]> types = write.columnTypes(source);
         String hiveTypes = inputs.partitionBy().stream().map(token -> {
             String name = token.trim();
             if (name.length() > 1 && name.startsWith("\"") && name.endsWith("\"")) {
                 name = name.substring(1, name.length() - 1).replace("\"\"", "\"");
             }
-            String type = types.get(name.toLowerCase(Locale.ROOT));
-            if (type == null) {
+            String[] column = types.get(name.toLowerCase(Locale.ROOT));
+            if (column == null) {
                 throw new IllegalStateException("Queue '%s': partition column '%s' is not in the batch's rows".formatted(queueId, name));
             }
-            return "'%s': '%s'".formatted(name.replace("'", "''"), type.replace("'", "''"));
+            // Keyed by the column's own name: DuckDB names the partition directories after it.
+            return "'%s': '%s'".formatted(column[0].replace("'", "''"), column[1].replace("'", "''"));
         }).collect(Collectors.joining(", "));
         return "SELECT * FROM read_parquet([%s], hive_partitioning = true, hive_types = {%s})".formatted(list, hiveTypes);
     }
@@ -784,9 +820,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 throw new java.io.UncheckedIOException(e);
             }
         }
-        uploaded.add(destination); // may be partly written if the upload fails
+        // Recorded once it is sure to start, as it may be partly written if it then fails.
         write.execute("COPY (SELECT content FROM read_blob('%s')) TO '%s' (FORMAT blob)"
-                .formatted(local.replace("'", "''"), destination.replace("'", "''")));
+                .formatted(local.replace("'", "''"), destination.replace("'", "''")), () -> uploaded.add(destination));
     }
 
     private static void deleteRecursively(Path dir) {
@@ -854,26 +890,29 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
             }
         }
 
-        void execute(String sql) {
+        /** Runs {@code sql}; {@code starting} runs once it is past the cancel check, just before it. */
+        void execute(String sql, Runnable starting) {
             try (var conn = ConnectionPool.getConnection(); var stmt = conn.createStatement()) {
                 statements.add(stmt);
                 if (writeTask.isCancel() || aborted.get()) {
                     throw new CopyNotStarted();
                 }
+                starting.run();
                 stmt.execute(sql);
             } catch (java.sql.SQLException e) {
                 throw new UncheckedSql(e);
             }
         }
 
-        /** Column name (lower case) to type of {@code relation}, bound with this attempt's variables. */
-        Map<String, String> columnTypes(String relation) throws java.sql.SQLException {
-            Map<String, String> types = new HashMap<>();
+        /** Column name (lower case) to its name and type in {@code relation}, bound with this attempt's variables. */
+        Map<String, String[]> columnTypes(String relation) throws java.sql.SQLException {
+            Map<String, String[]> types = new HashMap<>();
             try (var conn = ConnectionPool.getConnection(); var stmt = conn.createStatement()) {
                 applyVariables(stmt, variables);
                 try (var rs = stmt.executeQuery("DESCRIBE SELECT * FROM (%s)".formatted(relation))) {
                     while (rs.next()) {
-                        types.put(rs.getString("column_name").toLowerCase(Locale.ROOT), rs.getString("column_type"));
+                        String name = rs.getString("column_name");
+                        types.put(name.toLowerCase(Locale.ROOT), new String[]{name, rs.getString("column_type")});
                     }
                 }
             }
@@ -887,7 +926,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
          * statement the failure log shows.
          */
         <K, V, T> Map<K, T> parallel(Map<K, V> tasks, java.util.function.Function<K, String> describe,
-                                     java.util.function.BiFunction<K, V, T> run) throws Exception {
+                                     java.util.function.BiFunction<K, V, T> run, ExecutorService executor) throws Exception {
             var firstFailure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
             Map<K, java.util.concurrent.CompletableFuture<T>> futures = new LinkedHashMap<>();
             Map<K, java.util.concurrent.atomic.AtomicInteger> states = new LinkedHashMap<>();
@@ -900,7 +939,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 }
                 futures.put(task.getKey(), java.util.concurrent.CompletableFuture
                         .supplyAsync(() -> state.compareAndSet(QUEUED, STARTED) ? run.apply(task.getKey(), task.getValue()) : null,
-                                SIDECAR_COPY_EXECUTOR)
+                                executor)
                         .whenComplete((result, t) -> {
                             if (t == null) return;
                             Throwable cause = t instanceof java.util.concurrent.CompletionException && t.getCause() != null

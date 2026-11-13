@@ -7,6 +7,8 @@ import org.duckdb.DuckDBConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -67,9 +69,16 @@ final class SidecarTables {
             for (String set : SqlVariables.toSetStatements(variables, IngestionVariables.NOUN)) {
                 execute(conn, set);
             }
-            String base = emptyBase(conn, mapping, transformation, partitionProjections);
+            String relation = emptyBase(conn, mapping, transformation, partitionProjections);
+            // A batch's sidecars read its base back from staged Parquet, which changes some types
+            // (ENUM to VARCHAR, TIMESTAMP_S to TIMESTAMP, ...): check them over the same round trip.
+            Path roundTrip = Files.createTempFile("dd_sidecar_check_", ".parquet");
             int created = 0;
             try {
+                execute(conn, "COPY (SELECT * FROM (%s) LIMIT 0) TO '%s' (FORMAT parquet)"
+                        .formatted(relation, roundTrip.toString().replace("'", "''")));
+                String base = "SELECT * FROM read_parquet('%s', hive_partitioning = false)"
+                        .formatted(roundTrip.toString().replace("'", "''"));
                 for (Sidecar sidecar : mapping.sidecars()) {
                     if (ensure(conn, mapping, sidecar, base)) {
                         created++;
@@ -78,7 +87,10 @@ final class SidecarTables {
                 return created;
             } finally {
                 execute(conn, "DROP TABLE IF EXISTS " + INPUT_RELATION);
+                Files.deleteIfExists(roundTrip);
             }
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
         } catch (SQLException e) {
             throw new IllegalArgumentException("Queue '%s': could not check its sidecar tables: %s"
                     .formatted(mapping.ingestionQueue(), e.getMessage()), e);
