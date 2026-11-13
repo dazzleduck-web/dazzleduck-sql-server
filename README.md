@@ -700,15 +700,19 @@ ingestion_queue_table_mapping = [{
   not mapped back, so DuckLake would reject every file. A sidecar column of one of those types, at
   any depth, fails startup. `sum()` over `BIGINT` returns `HUGEINT`, so cast it:
   `sum(bytes)::BIGINT AS bytes`.
-- **How a batch is written.** The batch's rows, after the transformation, are stored once in an
-  in-memory DuckDB table, so the base and every sidecar read the same rows even when the
-  transformation is not deterministic (`now()`, `random()`). The base files and each sidecar's file
-  are then written by parallel `COPY`s from it, each sidecar straight to its table's data path. The
-  table holds one batch and is dropped when the write ends; DuckDB spills it to its temp directory
-  when it does not fit in memory. A queue without sidecars writes as before, with no extra step.
-- **Failures.** If any `COPY` fails, the others are cancelled and the batch fails: the files they
-  wrote are deleted where they are local, and left for `ducklake_delete_orphaned_files` on object
-  storage. A sidecar whose query returns no rows for a batch writes and registers no file.
+- **How a batch is written.** The batch is staged in a local directory next to the queue's input
+  files. The base files are written there once, from the input with the transformation applied;
+  each sidecar is then derived from those staged base files, so the base and every sidecar have the
+  same rows even when the transformation is not deterministic (`now()`, `random()`). Only when every
+  output exists is each file uploaded unchanged, in parallel, by DuckDB itself
+  (`COPY (SELECT content FROM read_blob(file)) TO 'dest' (FORMAT blob)`), so uploads use DuckDB's
+  own file systems and secrets: S3, GCS, Azure or a local path, with no other client or credentials.
+  The staging directory is deleted when the write ends. A queue without sidecars writes as before,
+  straight to its output path, with no staging.
+- **Failures.** If a step fails, the others are cancelled and the batch fails with nothing
+  registered. Before the upload nothing has left the staging directory; files already uploaded are
+  deleted where they are local, and left for `ducklake_delete_orphaned_files` on object storage. A
+  sidecar whose query returns no rows for a batch writes and registers no file.
 - **A sidecar table dropped under a running queue** is created again after the next failed batch. One
   partitioned under a running queue fails that queue's batches with the reason until it is unpartitioned.
 

@@ -156,7 +156,7 @@ class SidecarIngestionTest {
         try (var queue = queue(handler, scheduler)) {
             var failure = assertThrows(ExecutionException.class, () -> write(queue, scheduler, 0));
             assertTrue(String.valueOf(failure.getCause().getMessage()).contains("cat"), failure.toString());
-            assertEquals(1, queue.getOrphanFilesDeleted(), "the base file that was written is deleted");
+            assertEquals(0, queue.getOrphanFilesDeleted(), "the base was only staged: nothing reached the output");
             assertEquals(1, queue.getStats().failedWriteBatches());
         }
         assertEquals(0L, scalar("SELECT count(*) FROM %s.%s.%s".formatted(CATALOG, SCHEMA, TABLE)));
@@ -164,6 +164,7 @@ class SidecarIngestionTest {
         assertEquals(List.of(), parquetFilesUnder(outputDir));
         assertEquals(List.of(), parquetFilesUnder(tempDir.resolve("data").resolve(SCHEMA).resolve("bad_cast")),
                 "nothing is left of the failed sidecar's file");
+        assertEquals(List.of(), stagingDirectories(), "the staging directory is deleted");
     }
 
     @Test
@@ -173,6 +174,47 @@ class SidecarIngestionTest {
                 sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
                 """));
         assertTrue(e.getMessage().contains("exists as 'Ids'"), e.getMessage());
+    }
+
+    @Test
+    void aStagedWriteUploadsEveryFileAndLeavesNoStagingBehind() throws Exception {
+        var handler = handler("""
+                sidecars = [{ table = "category_counts"
+                              transformation = "SELECT category, count(*) AS n FROM __base GROUP BY ALL" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        IngestionResult result;
+        try (var queue = queue(handler, scheduler)) {
+            result = write(queue, scheduler, 0);
+        }
+        assertEquals(1, result.filesCreated().size());
+        assertTrue(result.filesCreated().get(0).startsWith(outputDir.toString()), result.filesCreated().toString());
+        assertTrue(Files.exists(Path.of(result.filesCreated().get(0))), "the base file was uploaded to the output path");
+        String sidecarFile = result.sidecarFiles().get("category_counts").get(0);
+        assertTrue(sidecarFile.contains("category_counts"), sidecarFile);
+        assertTrue(Files.exists(Path.of(sidecarFile)), "the sidecar file was uploaded under its table's path");
+        assertEquals(List.of(), stagingDirectories(), "the staging directory is deleted");
+    }
+
+    @Test
+    void aPartitionedBaseIsReadBackWithItsPartitionColumnsTypedNotGuessed() throws Exception {
+        execute("ALTER TABLE %s.%s.%s ADD COLUMN code VARCHAR".formatted(CATALOG, SCHEMA, TABLE));
+        execute("ALTER TABLE %s.%s.%s SET PARTITIONED BY (code)".formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                transformation = "SELECT *, printf('2026-1-%d', 1 + id % 3) AS code FROM __this"
+                sidecars = [{ table = "codes", transformation = "SELECT code, count(*) AS n FROM __base GROUP BY ALL" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        IngestionResult result;
+        try (var queue = queue(handler, scheduler)) {
+            result = write(queue, scheduler, 0);
+        }
+        assertTrue(result.filesCreated().stream().allMatch(f -> f.contains("code=")), result.filesCreated().toString());
+        // Guessed from the directory name, 2026-1-1 would be read back as the DATE 2026-01-01, and
+        // the sidecar would get '2026-01-01' for a base row whose code is '2026-1-1'.
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.codes WHERE code = '2026-1-1'".formatted(CATALOG, SCHEMA)),
+                "a VARCHAR partition value is read back as the text it was, not a guessed type");
+        assertEquals(100L, scalar("SELECT count(*) FROM %s.%s.%s WHERE code IN ('2026-1-1', '2026-1-2', '2026-1-3')".formatted(CATALOG, SCHEMA, TABLE)));
     }
 
     @Test
@@ -361,6 +403,13 @@ class SidecarIngestionTest {
     private static long scalar(String sql) throws SQLException {
         try (Connection conn = ConnectionPool.getConnection()) {
             return ConnectionPool.collectFirst(conn, sql, Long.class);
+        }
+    }
+
+    /** Staging directories a write left next to its input files. */
+    private List<Path> stagingDirectories() throws Exception {
+        try (var files = Files.list(tempDir)) {
+            return files.filter(p -> p.getFileName().toString().startsWith("dd_stage_")).toList();
         }
     }
 

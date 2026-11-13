@@ -1,15 +1,19 @@
 # Sidecar Views — Design Specification
 
-Status: **phase 1 implemented: the direct path** (*Without an uploader*) for queues of the static
-provider, with sidecar queries given as `transformation`. Not built yet: local staging and the
-uploader, `transformation_view` and its reload check, partitioned sidecar tables, and dynamic
-queues. Two findings from building it: startup also rejects sidecar columns of a type DuckLake cannot
-register from Parquet (`HUGEINT`, `UHUGEINT`, `TIMETZ`, at any depth), and a sidecar whose query
-returns no rows for a batch writes no file. The batch's transformed rows are stored once in an in-memory
-DuckDB table that the base and every sidecar `COPY` read, so they agree even for a non-deterministic
-transformation (the spec's direct path re-derived them per sidecar); a local destination is written
-the same way. Without an `input_schema`, the startup check runs over the target table's columns, not
-the transformation's output. User documentation is in the README under *Sidecars*.
+Status: **phase 1 implemented**, for queues of the static provider with sidecar queries given as
+`transformation`: local staging, with the upload done by DuckDB itself rather than an uploader.
+A batch of a queue with sidecars is written as base Parquet to a staging directory next to the
+queue's input files; each sidecar is derived from those staged base files (strategy F); every staged
+file is then uploaded unchanged with `COPY (SELECT content FROM read_blob(file)) TO 'dest'
+(FORMAT blob)`, through DuckDB's own file systems and secrets (strategy I in `tools/sidecar-bench`).
+Queues without sidecars write directly, as before. Measured against B and H on DuckDB 1.5.6 and
+2.0.0, small and large files, I had no clear loss or win (see the bench README), and it needs no
+`FileUploader`, no AWS SDK, no credentials outside DuckDB and no per-cloud code, so *The uploader*,
+*Library*, *Authentication* and *Uploader configuration* below are not pursued. Not built yet:
+`transformation_view` and its reload check, partitioned sidecar tables, and dynamic queues. Startup
+also rejects sidecar columns DuckLake cannot register from Parquet (`HUGEINT`, `UHUGEINT`, `TIMETZ`).
+Without an `input_schema`, the startup check runs over the target table's columns. User
+documentation is in the README under *Sidecars*.
 
 Replaces the producer-side `SidecarRows` mechanism specified in
 `doc/ATTRIBUTE_TYPE_REGISTRY_SPEC.md` with sidecars defined as SQL views over the rows being
