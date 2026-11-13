@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
@@ -86,7 +87,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     private record QueueState(String targetPath, String transformation, String[] partitionColumns,
                                String[] partitionProjections, Map<String, String> variables,
                                long schemaChangeId, Instant refreshedAt,
-                               String partitionError, String transformationError) {}
+                               String partitionError, String transformationError,
+                               List<SidecarTarget> sidecars, String sidecarError) {}
 
     /** A transformation resolved for a queue: the SQL, or the reason it could not be resolved. */
     private record ResolvedTransformation(String sql, String error) {}
@@ -118,7 +120,22 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         this.queueIdsToTableMappings = new ConcurrentHashMap<>(mappings);
         this.refreshInterval = refreshInterval;
         this.clock = clock;
-        mappings.forEach((id, mapping) -> stateCache.put(id, buildState(mapping, clock.instant())));
+        mappings.forEach((id, mapping) -> stateCache.put(id, buildStateWithSidecarTables(mapping, clock.instant())));
+    }
+
+    /**
+     * Builds a queue's first state. A queue whose sidecar tables cannot be created or do not match
+     * their queries fails the construction, and so startup (see {@link SidecarTables#ensure}); later,
+     * the same failure is scoped to the queue. Not while the queue's own transformation or
+     * partitioning fails: that queue cannot be written anyway, and its sidecars are resolved once it
+     * can.
+     */
+    private QueueState buildStateWithSidecarTables(QueueIdToTableMapping mapping, Instant refreshedAt) {
+        QueueState state = buildState(mapping, refreshedAt);
+        if (state.sidecarError() != null && state.transformationError() == null && state.partitionError() == null) {
+            throw new IllegalArgumentException(state.sidecarError());
+        }
+        return state;
     }
 
     /**
@@ -182,6 +199,21 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     public Map<String, String> getVariables(String queueId) {
         QueueState s = getOrRefreshState(queueId);
         return s != null ? s.variables() : Map.of();
+    }
+
+    /**
+     * The queue's sidecars, resolved against their tables. Throws
+     * {@link TransformationUnavailableException} while one of them cannot be resolved (its table was
+     * dropped or partitioned), so the queue's writes fail with the reason instead of silently
+     * leaving the sidecar out.
+     */
+    @Override
+    public List<SidecarTarget> getSidecars(String queueId) {
+        QueueState s = getOrRefreshState(queueId);
+        if (s != null && s.sidecarError() != null) {
+            throw new TransformationUnavailableException(s.sidecarError());
+        }
+        return s != null ? s.sidecars() : List.of();
     }
 
     @Override
@@ -365,10 +397,25 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             ResolvedTransformation transformation = mapping.hasViewTransformation()
                     ? resolveTransformationIsolated(mapping, existing, forced)
                     : new ResolvedTransformation(existing.transformation(), existing.transformationError());
+            // Sidecars are resolved again while they failed (a cause outside this catalog's schema,
+            // such as a transient read error or the queue's view now resolving, would otherwise pin
+            // the failure), and when the transformation they read changed.
+            // Not on every forced refresh: each failed batch forces one, and a mismatch that DDL must fix
+            // would re-run the whole check per batch; that DDL triggers a full rebuild anyway.
+            boolean recheckSidecars = (existing.sidecarError() != null && !forced)
+                    || !Objects.equals(transformation.sql(), existing.transformation());
+            ResolvedSidecars sidecars = recheckSidecars
+                    ? resolveSidecars(mapping, transformation, existing.partitionProjections(), variables, existing)
+                    : new ResolvedSidecars(existing.sidecars(), existing.sidecarError());
+            // A forced refresh that kept a sidecar failure without checking it again leaves the
+            // refresh time alone, so the periodic refresh still comes round to re-check it while
+            // failed batches keep forcing refreshes.
+            Instant refreshedAt = forced && !recheckSidecars && existing.sidecarError() != null
+                    ? existing.refreshedAt() : clock.instant();
             return new QueueState(existing.targetPath(), transformation.sql(),
                     existing.partitionColumns(), existing.partitionProjections(), variables,
-                    existing.schemaChangeId(), clock.instant(), existing.partitionError(),
-                    transformation.error());
+                    schemaChangeIdAfter(mapping, existing.schemaChangeId(), sidecars), refreshedAt,
+                    existing.partitionError(), transformation.error(), sidecars.targets(), sidecars.error());
         }
         return buildState(mapping, currentSchemaChangeId, clock.instant(), existing, forced);
     }
@@ -395,14 +442,88 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             // Isolate to this queue: the handler (and every other queue) must keep working.
             logger.error("Queue '{}' ({}.{}.{}) cannot be ingested until its partitioning is changed: {}",
                     mapping.ingestionQueue(), mapping.catalog(), mapping.schema(), mapping.table(), e.getMessage());
+            ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, new String[0], variables, previous);
             return new QueueState(path, transformation, new String[0], new String[0], variables,
-                    schemaChangeId, refreshedAt, e.getMessage(), resolved.error());
+                    schemaChangeIdAfter(mapping, schemaChangeId, sidecars), refreshedAt, e.getMessage(), resolved.error(),
+                    sidecars.targets(), sidecars.error());
         }
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
                 .filter(java.util.Objects::nonNull).toArray(String[]::new);
-        return new QueueState(path, transformation, tokens, projections, variables, schemaChangeId,
-                refreshedAt, null, resolved.error());
+        ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, projections, variables, previous);
+        return new QueueState(path, transformation, tokens, projections, variables,
+                schemaChangeIdAfter(mapping, schemaChangeId, sidecars), refreshedAt, null, resolved.error(),
+                sidecars.targets(), sidecars.error());
+    }
+
+    /**
+     * The schema version to record once the queue's sidecars are resolved. Creating a sidecar table
+     * moves the catalog's version by one; recording the version read before it would make the next
+     * refresh rebuild again. The later version is taken only when it moved by exactly the tables
+     * created, so no other process's DDL in between (which this state may not reflect) is marked as
+     * seen; otherwise the earlier one is kept, and the next refresh rebuilds.
+     */
+    private static long schemaChangeIdAfter(QueueIdToTableMapping mapping, long schemaChangeId, ResolvedSidecars sidecars) {
+        if (sidecars.tablesCreated() == 0) {
+            return schemaChangeId;
+        }
+        long now = fetchSchemaChangeId(mapping.catalog(), mapping.schema(), mapping.table());
+        return now == schemaChangeId + sidecars.tablesCreated() ? now : schemaChangeId;
+    }
+
+    /** A queue's sidecars resolved for writing, or why they cannot be. */
+    private record ResolvedSidecars(List<SidecarTarget> targets, String error, int tablesCreated) {
+        ResolvedSidecars(List<SidecarTarget> targets, String error) {
+            this(targets, error, 0);
+        }
+    }
+
+    /**
+     * Creates the queue's missing sidecar tables, checks the existing ones, and resolves them all for
+     * writing. A failure is returned, not thrown, so it stays with this queue; so is a queue whose
+     * transformation does not resolve, whose sidecars cannot be checked until it does. A table whose
+     * partitioning is unsupported does not stop them: a batch that names its partitioning in its
+     * header is still written, with its sidecars.
+     */
+    private static ResolvedSidecars resolveSidecars(QueueIdToTableMapping mapping, ResolvedTransformation transformation,
+                                                    String[] partitionProjections,
+                                                    Map<String, String> variables, QueueState previous) {
+        if (mapping.sidecars().isEmpty()) {
+            return new ResolvedSidecars(List.of(), null);
+        }
+        String error;
+        if (transformation.error() != null) {
+            error = "Queue '%s': its sidecars are resolved once the queue's own transformation is"
+                    .formatted(mapping.ingestionQueue());
+        } else {
+            try {
+                SidecarTables.Ensured ensured = SidecarTables.ensure(mapping, transformation.sql(), partitionProjections, variables);
+                int created = ensured.created();
+                List<SidecarTarget> targets = new ArrayList<>();
+                for (Sidecar sidecar : mapping.sidecars()) {
+                    targets.add(resolveSidecar(mapping, sidecar, ensured.produced().get(sidecar.table())));
+                }
+                if (previous != null && previous.sidecarError() != null) {
+                    logger.info("Queue '{}': its sidecar tables can be written again", mapping.ingestionQueue());
+                }
+                return new ResolvedSidecars(List.copyOf(targets), null, created);
+            } catch (RuntimeException e) {
+                error = "Queue '%s' cannot be ingested until its sidecar tables can be written: %s"
+                        .formatted(mapping.ingestionQueue(), e.getMessage());
+                if (previous == null || !error.equals(previous.sidecarError())) {
+                    logger.error(error);
+                }
+            }
+        }
+        return new ResolvedSidecars(List.of(), error);
+    }
+
+    /**
+     * Resolves one sidecar against its table, for writing. {@link SidecarTables#ensure}, run just
+     * before, has checked the table exists, matches and is not partitioned.
+     */
+    private static SidecarTarget resolveSidecar(QueueIdToTableMapping mapping, Sidecar sidecar, java.util.Set<String> produced) {
+        return SidecarTables.resolve(mapping, sidecar, fetchPath(mapping.catalog(), mapping.schema(), sidecar.table()), produced);
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
@@ -468,12 +589,31 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
 
     private static String fetchPath(String catalogName, String schema, String table) {
         String metadataDatabase = "__ducklake_metadata_" + catalogName;
-        String query = TABLE_PATH_QUERY.formatted(metadataDatabase, metadataDatabase, metadataDatabase, schema, table);
+        String query = TABLE_PATH_QUERY.formatted(metadataDatabase, metadataDatabase, metadataDatabase,
+                schema.replace("'", "''"), table.replace("'", "''"));
         try {
             return ConnectionPool.collectFirst(query, String.class);
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get path for table %s.%s.%s".formatted(catalogName, schema, table), e);
         }
+    }
+
+    /**
+     * Whether the table is partitioned. Unlike {@link #getPartitionColumns}, a metadata read that
+     * fails is thrown, not read as "unpartitioned".
+     */
+    static boolean isPartitioned(String catalogName, String schema, String table) throws SQLException {
+        String metadataDatabase = "__ducklake_metadata_" + catalogName;
+        String query = """
+                SELECT count(*)
+                FROM %1$s.ducklake_table t
+                JOIN %1$s.ducklake_schema s ON t.schema_id = s.schema_id
+                JOIN %1$s.ducklake_partition_info pi ON t.table_id = pi.table_id
+                WHERE s.schema_name = '%3$s' AND t.table_name = '%2$s'
+                  AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL AND pi.end_snapshot IS NULL
+                """.formatted(metadataDatabase, table.replace("'", "''"), schema.replace("'", "''"));
+        Long count = ConnectionPool.collectFirst(query, Long.class);
+        return count != null && count > 0;
     }
 
     public static String[] getPartitionColumns(String catalogName, String schema, String table) {
@@ -531,6 +671,10 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                     c.column_type,
                     pc.partition_key_index
                 FROM %1$s.ducklake_table t
+                JOIN %1$s.ducklake_schema s
+                    ON t.schema_id = s.schema_id
+                    AND s.schema_name = '%3$s'
+                    AND s.end_snapshot IS NULL
                 JOIN %1$s.ducklake_partition_info pi
                     ON t.table_id = pi.table_id
                 JOIN %1$s.ducklake_partition_column pc
@@ -543,7 +687,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                   AND pi.end_snapshot IS NULL
                   AND c.end_snapshot IS NULL
                 ORDER BY pc.partition_key_index ASC
-                """.formatted(metadataDatabase, table);
+                """.formatted(metadataDatabase, table.replace("'", "''"), schema.replace("'", "''"));
         try (var connection = ConnectionPool.getConnection()) {
             // Collect the raw (column, transform, type) rows first — resolving a bucket() column's hive
             // key needs to know how many earlier columns already used the "bucket" key (disambiguation),
