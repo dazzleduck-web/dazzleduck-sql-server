@@ -60,10 +60,10 @@ final class SidecarTables {
      * @return how many sidecar tables this call created, and the columns each sidecar's query
      *         produces (lower case), by table
      */
-    static Ensured ensure(QueueIdToTableMapping mapping, String transformation, String[] partitionProjections,
-                          Map<String, String> variables) {
+    static Ensured ensure(QueueIdToTableMapping mapping, Map<String, String> sidecarSql, String transformation,
+                          String[] partitionProjections, Map<String, String> variables) {
         if (mapping.sidecars().isEmpty()) {
-            return new Ensured(0, Map.of());
+            return new Ensured(0, Map.of(), Map.of());
         }
         // A statement per step: the driver closes a statement whose execution failed.
         try (DuckDBConnection conn = ConnectionPool.getConnection()) {
@@ -76,6 +76,7 @@ final class SidecarTables {
             Path roundTrip = Files.createTempFile("dd_sidecar_check_", ".parquet");
             int created = 0;
             Map<String, java.util.Set<String>> produced = new LinkedHashMap<>();
+            Map<String, List<DuckLakeIngestionHandler.ResolvedPartition>> partitions = new LinkedHashMap<>();
             try {
                 execute(conn, "COPY (SELECT * FROM (%s) LIMIT 0) TO '%s' (FORMAT parquet)"
                         .formatted(relation, roundTrip.toString().replace("'", "''")));
@@ -83,13 +84,15 @@ final class SidecarTables {
                         .formatted(roundTrip.toString().replace("'", "''"));
                 for (Sidecar sidecar : mapping.sidecars()) {
                     List<SidecarTarget.Column> derived = new ArrayList<>();
-                    if (ensure(conn, mapping, sidecar, base, derived)) {
+                    List<DuckLakeIngestionHandler.ResolvedPartition> tablePartitions = new ArrayList<>();
+                    if (ensure(conn, mapping, sidecar, sidecarSql.get(sidecar.table()), base, derived, tablePartitions)) {
                         created++;
                     }
                     produced.put(sidecar.table(), derived.stream()
                             .map(c -> c.name().toLowerCase(Locale.ROOT)).collect(Collectors.toSet()));
+                    partitions.put(sidecar.table(), List.copyOf(tablePartitions));
                 }
-                return new Ensured(created, produced);
+                return new Ensured(created, produced, partitions);
             } finally {
                 execute(conn, "DROP TABLE IF EXISTS " + INPUT_RELATION);
                 Files.deleteIfExists(roundTrip);
@@ -102,27 +105,48 @@ final class SidecarTables {
         }
     }
 
-    /** What {@link #ensure} found: tables it created, and the columns each sidecar's query produces. */
-    record Ensured(int created, Map<String, java.util.Set<String>> produced) {}
+    /**
+     * A sidecar query that does not fit its table: a column it lacks or types differently, a type
+     * DuckLake cannot register, a partitioning it cannot be written with, or a query that does not run
+     * over the queue's rows. Unlike a failure to check at all (a metadata read error), a changed view
+     * that throws it is rejected: its sidecar keeps its previous query.
+     */
+    static final class SidecarMismatchException extends IllegalArgumentException {
+        SidecarMismatchException(String message) {
+            super(message);
+        }
+
+        SidecarMismatchException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * What {@link #ensure} found: tables it created, and for each sidecar table the columns its query
+     * produces and the table's partitioning.
+     */
+    record Ensured(int created, Map<String, java.util.Set<String>> produced,
+                   Map<String, List<DuckLakeIngestionHandler.ResolvedPartition>> partitions) {}
 
     /**
      * Creates or checks one sidecar's table; returns whether this call created it, and adds the
      * query's columns to {@code derivedOut}.
      */
-    private static boolean ensure(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar, String base,
-                                  List<SidecarTarget.Column> derivedOut) throws SQLException {
+    private static boolean ensure(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar, String sql,
+                                  String base, List<SidecarTarget.Column> derivedOut,
+                                  List<DuckLakeIngestionHandler.ResolvedPartition> partitionsOut) throws SQLException {
         boolean created = false;
         List<SidecarTarget.Column> derived;
         try {
-            derived = describe(conn, writeQuery(base, sidecar.transformation()));
+            derived = describe(conn, writeQuery(base, sql));
             derivedOut.addAll(derived);
         } catch (SQLException e) {
-            throw new IllegalArgumentException("Queue '%s': sidecar '%s' transformation does not run over the queue's rows: %s"
+            throw new SidecarMismatchException("Queue '%s': sidecar '%s' transformation does not run over the queue's rows: %s"
                     .formatted(mapping.ingestionQueue(), sidecar.table(), e.getMessage()), e);
         }
         for (SidecarTarget.Column column : derived) {
             if (UNREGISTRABLE.matcher(column.type()).find()) {
-                throw new IllegalArgumentException(("Queue '%s': sidecar '%s' column '%s' is %s, which DuckLake cannot "
+                throw new SidecarMismatchException(("Queue '%s': sidecar '%s' column '%s' is %s, which DuckLake cannot "
                         + "register from a Parquet file; cast it in the transformation, for example a sum to BIGINT "
                         + "or DECIMAL(38,0)").formatted(mapping.ingestionQueue(), sidecar.table(), column.name(), column.type()));
             }
@@ -156,20 +180,60 @@ final class SidecarTables {
             }
             existing = tableColumns(conn, mapping.catalog(), mapping.schema(), sidecar.table());
         }
-        if (DuckLakeIngestionHandler.isPartitioned(mapping.catalog(), mapping.schema(), sidecar.table())) {
-            throw new IllegalArgumentException("Queue '%s': sidecar table %s is partitioned; partitioned sidecar tables are not supported yet"
-                    .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table())));
-        }
         String mismatch = mismatch(derived, existing);
         if (mismatch != null) {
-            throw new IllegalArgumentException("Queue '%s': sidecar table %s does not match its transformation: %s"
+            throw new SidecarMismatchException("Queue '%s': sidecar table %s does not match its transformation: %s"
                     .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table()), mismatch));
         }
+        checkPartitioning(conn, mapping, sidecar, sql, base, derived, partitionsOut);
         return created;
     }
 
-    /** Resolves {@code sidecar} for writing: its table's data path and columns. */
-    static SidecarTarget resolve(QueueIdToTableMapping mapping, Sidecar sidecar, String path, java.util.Set<String> produced) {
+    /**
+     * Reads the sidecar table's partitioning into {@code partitionsOut} and checks that each sidecar
+     * file can be written with it: an identity partition column must be one the query produces (a
+     * NULL for every row would be one partition holding everything), and a transform must bind over
+     * the query's columns. An unsupported transform fails like the main table's.
+     */
+    private static void checkPartitioning(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar,
+                                          String sql, String base, List<SidecarTarget.Column> derived,
+                                          List<DuckLakeIngestionHandler.ResolvedPartition> partitionsOut) throws SQLException {
+        List<DuckLakeIngestionHandler.ResolvedPartition> partitions;
+        try {
+            partitions = DuckLakeIngestionHandler.fetchPartitionsStrict(mapping.catalog(), mapping.schema(), sidecar.table());
+        } catch (UnsupportedPartitionTransformException e) {
+            throw new SidecarMismatchException("Queue '%s': sidecar table %s: %s"
+                    .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table()), e.getMessage()), e);
+        }
+        java.util.Set<String> produced = derived.stream().map(c -> c.name().toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        List<String> projections = new ArrayList<>();
+        for (var partition : partitions) {
+            if (partition.projection() == null) {
+                if (!produced.contains(partition.token().toLowerCase(Locale.ROOT))) {
+                    throw new SidecarMismatchException(("Queue '%s': sidecar table %s is partitioned by '%s', which "
+                            + "its transformation does not produce").formatted(mapping.ingestionQueue(),
+                            qualified(mapping, sidecar.table()), partition.token()));
+                }
+            } else {
+                projections.add(partition.projection());
+            }
+        }
+        if (!projections.isEmpty()) {
+            try {
+                describe(conn, ParquetIngestionQueue.withProjections(writeQuery(base, sql), projections));
+            } catch (SQLException e) {
+                throw new SidecarMismatchException(("Queue '%s': sidecar table %s is partitioned by a column its "
+                        + "transformation does not produce: %s").formatted(mapping.ingestionQueue(),
+                        qualified(mapping, sidecar.table()), e.getMessage()), e);
+            }
+        }
+        partitionsOut.addAll(partitions);
+    }
+
+    /** Resolves {@code sidecar} for writing: its query, its table's data path, columns and partitioning. */
+    static SidecarTarget resolve(QueueIdToTableMapping mapping, Sidecar sidecar, String sql, String path,
+                                 java.util.Set<String> produced, List<DuckLakeIngestionHandler.ResolvedPartition> partitions) {
         try (DuckDBConnection conn = ConnectionPool.getConnection()) {
             List<SidecarTarget.Column> columns = tableColumns(conn, mapping.catalog(), mapping.schema(), sidecar.table());
             if (columns.isEmpty() || path == null) {
@@ -177,7 +241,10 @@ final class SidecarTables {
                         .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table())));
             }
             createLocalDirectory(path);
-            return new SidecarTarget(sidecar.table(), sidecar.transformation(), path, columns, produced);
+            return new SidecarTarget(sidecar.table(), sql, path, columns, produced,
+                    partitions.stream().map(DuckLakeIngestionHandler.ResolvedPartition::token).toList(),
+                    partitions.stream().map(DuckLakeIngestionHandler.ResolvedPartition::projection)
+                            .filter(java.util.Objects::nonNull).toList());
         } catch (SQLException e) {
             throw new IllegalStateException("Queue '%s': could not read sidecar table %s: %s"
                     .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table()), e.getMessage()), e);

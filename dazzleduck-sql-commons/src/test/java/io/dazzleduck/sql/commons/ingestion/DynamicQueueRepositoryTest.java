@@ -184,6 +184,88 @@ class DynamicQueueRepositoryTest {
     }
 
     // -----------------------------------------------------------------------
+    // Sidecars
+    // -----------------------------------------------------------------------
+
+    private static final String QUEUES = DynamicQueueRepository.ATTACHMENT + ".ingestion_queues";
+    private static final String SIDECARS = DynamicQueueRepository.ATTACHMENT + "." + DynamicQueueRepository.SIDECARS_TABLE;
+
+    @Test
+    void loadAllReadsAQueuesSidecarsInPositionOrder() throws Exception {
+        String dbPath = tempDir.resolve("sidecars.db").toString();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('logs', 'lake', 'main', 'logs')");
+            writeToDb(dbPath, "INSERT INTO " + SIDECARS + " (ingestion_queue, sidecar_table, transformation, "
+                    + "transformation_view, input_table, position) VALUES "
+                    + "('logs', 'z_counts', 'SELECT count(*) AS n FROM __base', NULL, NULL, 1), "
+                    + "('logs', 'a_view', NULL, 'lake.main.v', 'lake.main.raw', 2)");
+            try (Connection conn = repo.openReadOnlyConnection()) {
+                var sidecars = DynamicQueueRepository.loadAll(conn).get("logs").sidecars();
+                assertEquals(java.util.List.of(
+                        new Sidecar("z_counts", "SELECT count(*) AS n FROM __base"),
+                        new Sidecar("a_view", null, "lake.main.v", "lake.main.raw")), sidecars);
+            }
+        }
+    }
+
+    @Test
+    void anUnusableSidecarRowLeavesOnlyItsQueueOut() throws Exception {
+        String dbPath = tempDir.resolve("bad-sidecar.db").toString();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('bad', 'lake', 'main', 'bad'), ('good', 'lake', 'main', 'good')");
+            // Both a transformation and a view: not a usable sidecar.
+            writeToDb(dbPath, "INSERT INTO " + SIDECARS + " (ingestion_queue, sidecar_table, transformation, "
+                    + "transformation_view) VALUES ('bad', 'x', 'SELECT 1 AS a FROM __base', 'lake.main.v'), "
+                    + "('good', 'y', 'SELECT 1 AS a FROM __base', NULL)");
+            try (Connection conn = repo.openReadOnlyConnection()) {
+                var all = DynamicQueueRepository.loadAll(conn);
+                assertFalse(all.containsKey("bad"), "not loaded without its sidecars");
+                assertEquals(1, all.get("good").sidecars().size());
+            }
+        }
+    }
+
+    @Test
+    void aRunningQueueWhoseSidecarRowsBecomeUnusableKeepsItsPreviousMapping() throws Exception {
+        String dbPath = tempDir.resolve("keep.db").toString();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('logs', 'lake', 'main', 'logs')");
+            writeToDb(dbPath, "INSERT INTO " + SIDECARS + " (ingestion_queue, sidecar_table, transformation) "
+                    + "VALUES ('logs', 'x', 'SELECT 1 AS a FROM __base')");
+            try (Connection conn = repo.openReadOnlyConnection()) {
+                var before = DynamicQueueRepository.loadAll(conn);
+                writeToDb(dbPath, "UPDATE " + SIDECARS + " SET transformation_view = 'not.qualified'");
+                // ...and, in the same edit, a change to the queue's own row
+                writeToDb(dbPath, "UPDATE " + QUEUES + " SET transformation = 'SELECT * FROM __this' WHERE ingestion_queue = 'logs'");
+                var after = DynamicQueueRepository.loadAll(conn, before);
+                assertNotNull(after.get("logs"), "kept, not evicted over a bad row");
+                assertEquals(before.get("logs").sidecars(), after.get("logs").sidecars(), "with the sidecars it was running with");
+                assertEquals("SELECT * FROM __this", after.get("logs").transformation(), "and its own row as it now reads");
+            }
+        }
+    }
+
+    @Test
+    void aRegistryWithoutTheSidecarsTableLoads() throws Exception {
+        String dbPath = tempDir.resolve("old.db").toString();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "DROP TABLE " + SIDECARS); // as a registry created before it existed
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('logs', 'lake', 'main', 'logs')");
+            try (Connection conn = repo.openReadOnlyConnection()) {
+                assertEquals(java.util.List.of(), DynamicQueueRepository.loadAll(conn).get("logs").sidecars());
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Session variables
     // -----------------------------------------------------------------------
 

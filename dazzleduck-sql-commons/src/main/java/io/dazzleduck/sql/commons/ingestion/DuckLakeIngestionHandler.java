@@ -88,7 +88,25 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                                String[] partitionProjections, Map<String, String> variables,
                                long schemaChangeId, Instant refreshedAt,
                                String partitionError, String transformationError,
-                               List<SidecarTarget> sidecars, String sidecarError) {}
+                               List<SidecarTarget> sidecars, String sidecarError,
+                               Map<String, Rejected> rejectedSidecarSql, List<SidecarTarget> lastGoodSidecars) {
+
+        /**
+         * This state as the starting point of a rebuild after the queue's mapping changed: stale,
+         * so the next access rebuilds it in full, keeping only the sidecars whose definitions are
+         * the same in {@code from} and {@code to}, whose last good queries a rebuild may fall back on.
+         */
+        QueueState staleFor(QueueIdToTableMapping from, QueueIdToTableMapping to) {
+            java.util.Set<String> unchanged = new java.util.HashSet<>();
+            for (Sidecar sidecar : to.sidecars()) {
+                if (from.sidecars().contains(sidecar)) unchanged.add(sidecar.table());
+            }
+            return new QueueState(targetPath, transformation, partitionColumns, partitionProjections, variables,
+                    Long.MIN_VALUE, Instant.EPOCH, partitionError, transformationError,
+                    sidecars.stream().filter(t -> unchanged.contains(t.table())).toList(), sidecarError,
+                    Map.of(), lastGoodSidecars.stream().filter(t -> unchanged.contains(t.table())).toList());
+        }
+    }
 
     /** A transformation resolved for a queue: the SQL, or the reason it could not be resolved. */
     private record ResolvedTransformation(String sql, String error) {}
@@ -99,7 +117,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * added to the COPY relation for the token to resolve, or {@code null} for identity columns
      * (which already exist in the relation).
      */
-    private record ResolvedPartition(String token, String projection) {}
+    record ResolvedPartition(String token, String projection) {}
 
     private final ConcurrentHashMap<String, QueueState> stateCache = new ConcurrentHashMap<>();
 
@@ -149,7 +167,14 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         fresh.forEach((id, mapping) -> {
             QueueIdToTableMapping previous = queueIdsToTableMappings.put(id, mapping);
             if (previous == null || !previous.equals(mapping)) {
-                stateCache.remove(id); // force a lazy rebuild of the DuckLake-derived state
+                // Force a lazy rebuild of the DuckLake-derived state. When the queue's own
+                // transformation is unchanged, the rebuild starts from the old state, so a sidecar
+                // whose view fails or cannot be read keeps its last good query as on any refresh.
+                if (previous != null && sameTransformation(previous, mapping)) {
+                    stateCache.computeIfPresent(id, (k, old) -> old.staleFor(previous, mapping));
+                } else {
+                    stateCache.remove(id);
+                }
                 onMappingReconciled(id, mapping);
             }
         });
@@ -159,6 +184,18 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             queueCache.evict(id);
             return true;
         });
+    }
+
+    private static boolean sameTransformation(QueueIdToTableMapping a, QueueIdToTableMapping b) {
+        return a.extractClaims() == b.extractClaims()
+                && Objects.equals(a.transformation(), b.transformation()) && Objects.equals(a.view(), b.view())
+                && Objects.equals(a.inputTable(), b.inputTable()) && Objects.equals(a.catalog(), b.catalog())
+                && Objects.equals(a.schema(), b.schema()) && Objects.equals(a.table(), b.table());
+    }
+
+    /** The current mapping set, for a reload that keeps a queue's mapping when its new one is unusable. */
+    protected Map<String, QueueIdToTableMapping> currentMappings() {
+        return Map.copyOf(queueIdsToTableMappings);
     }
 
     /**
@@ -203,9 +240,9 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
 
     /**
      * The queue's sidecars, resolved against their tables. Throws
-     * {@link TransformationUnavailableException} while one of them cannot be resolved (its table was
-     * dropped or partitioned), so the queue's writes fail with the reason instead of silently
-     * leaving the sidecar out.
+     * {@link TransformationUnavailableException} while one of them cannot be resolved (its table no
+     * longer fits its query, or its partitioning cannot be written), so the queue's writes fail with
+     * the reason instead of silently leaving the sidecar out.
      */
     @Override
     public List<SidecarTarget> getSidecars(String queueId) {
@@ -402,20 +439,44 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             // the failure), and when the transformation they read changed.
             // Not on every forced refresh: each failed batch forces one, and a mismatch that DDL must fix
             // would re-run the whole check per batch; that DDL triggers a full rebuild anyway.
-            boolean recheckSidecars = (existing.sidecarError() != null && !forced)
-                    || !Objects.equals(transformation.sql(), existing.transformation());
+            // A view-based sidecar's query is re-read on every refresh, like a queue's view: it may live
+            // in another catalog, whose changes do not move this one's schema_version.
+            Map<String, ViewRead> views = readSidecarViews(mapping);
+            java.util.Set<String> changedViews = existing.sidecarError() == null
+                    ? changedSidecarViews(views, existing.sidecars(), existing.rejectedSidecarSql(), forced)
+                    : java.util.Set.of();
+            boolean transformationChanged = !Objects.equals(transformation.sql(), existing.transformation());
+            boolean recheckAll = (existing.sidecarError() != null && !forced) || transformationChanged;
+            boolean recheckSidecars = recheckAll || !changedViews.isEmpty();
+            if (!recheckSidecars) {
+                // A view that cannot be read keeps its sidecar's last query; say so on every tick it
+                // lasts, as a queue's own view does (a recheck says so itself).
+                for (SidecarTarget target : existing.sidecars()) {
+                    ViewRead view = views.get(target.table());
+                    if (view != null && view.error() != null) {
+                        logger.warn("Queue '{}': could not re-read sidecar '{}' view; keeping its last query: {}",
+                                mapping.ingestionQueue(), target.table(), view.error().getMessage());
+                    }
+                }
+            }
+            // Only the sidecars whose views changed are checked again, unless everything must be.
             ResolvedSidecars sidecars = recheckSidecars
-                    ? resolveSidecars(mapping, transformation, existing.partitionProjections(), variables, existing)
-                    : new ResolvedSidecars(existing.sidecars(), existing.sidecarError());
+                    ? resolveSidecars(mapping, transformation, existing.partitionProjections(), variables, existing,
+                            views, existing.rejectedSidecarSql(), recheckAll ? null : changedViews)
+                    : new ResolvedSidecars(existing.sidecars(), existing.sidecarError(), 0,
+                            stillRejected(views, existing.rejectedSidecarSql()));
             // A forced refresh that kept a sidecar failure without checking it again leaves the
             // refresh time alone, so the periodic refresh still comes round to re-check it while
             // failed batches keep forcing refreshes.
-            Instant refreshedAt = forced && !recheckSidecars && existing.sidecarError() != null
+            // So does a forced refresh that skipped a rejected view still due a periodic re-check.
+            boolean recheckPending = forced && !stillRejected(views, existing.rejectedSidecarSql()).isEmpty();
+            Instant refreshedAt = forced && ((!recheckSidecars && existing.sidecarError() != null) || recheckPending)
                     ? existing.refreshedAt() : clock.instant();
             return new QueueState(existing.targetPath(), transformation.sql(),
                     existing.partitionColumns(), existing.partitionProjections(), variables,
                     schemaChangeIdAfter(mapping, existing.schemaChangeId(), sidecars), refreshedAt,
-                    existing.partitionError(), transformation.error(), sidecars.targets(), sidecars.error());
+                    existing.partitionError(), transformation.error(), sidecars.targets(), sidecars.error(),
+                    sidecars.rejected(), lastGood(sidecars, existing));
         }
         return buildState(mapping, currentSchemaChangeId, clock.instant(), existing, forced);
     }
@@ -442,18 +503,22 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             // Isolate to this queue: the handler (and every other queue) must keep working.
             logger.error("Queue '{}' ({}.{}.{}) cannot be ingested until its partitioning is changed: {}",
                     mapping.ingestionQueue(), mapping.catalog(), mapping.schema(), mapping.table(), e.getMessage());
-            ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, new String[0], variables, previous);
+            ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, new String[0], variables, previous,
+                    readSidecarViews(mapping), previous == null ? Map.of() : previous.rejectedSidecarSql(), null);
             return new QueueState(path, transformation, new String[0], new String[0], variables,
                     schemaChangeIdAfter(mapping, schemaChangeId, sidecars), refreshedAt, e.getMessage(), resolved.error(),
-                    sidecars.targets(), sidecars.error());
+                    sidecars.targets(), sidecars.error(), sidecars.rejected(), lastGood(sidecars, previous));
         }
         String[] tokens      = partitions.stream().map(ResolvedPartition::token).toArray(String[]::new);
         String[] projections = partitions.stream().map(ResolvedPartition::projection)
                 .filter(java.util.Objects::nonNull).toArray(String[]::new);
-        ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, projections, variables, previous);
+        // A full rebuild (a schema change: maybe the table a rejected view did not fit) checks every
+        // sidecar again, never skipping a rejected query.
+        ResolvedSidecars sidecars = resolveSidecars(mapping, resolved, projections, variables, previous,
+                readSidecarViews(mapping), previous == null ? Map.of() : previous.rejectedSidecarSql(), null);
         return new QueueState(path, transformation, tokens, projections, variables,
                 schemaChangeIdAfter(mapping, schemaChangeId, sidecars), refreshedAt, null, resolved.error(),
-                sidecars.targets(), sidecars.error());
+                sidecars.targets(), sidecars.error(), sidecars.rejected(), lastGood(sidecars, previous));
     }
 
     /**
@@ -471,23 +536,101 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         return now == schemaChangeId + sidecars.tablesCreated() ? now : schemaChangeId;
     }
 
-    /** A queue's sidecars resolved for writing, or why they cannot be. */
-    private record ResolvedSidecars(List<SidecarTarget> targets, String error, int tablesCreated) {
+    /**
+     * The sidecars a later resolution may fall back on: these, when they resolved, otherwise the last
+     * ones that did. Kept through a failure, so a brief error (the queue's own view unreadable for a
+     * moment, a metadata read) does not take away a view-based sidecar's last good query.
+     */
+    private static List<SidecarTarget> lastGood(ResolvedSidecars sidecars, QueueState previous) {
+        if (sidecars.error() == null) {
+            return sidecars.targets();
+        }
+        return previous == null ? List.of() : previous.lastGoodSidecars();
+    }
+
+    /**
+     * A changed view's query that was rejected: it is checked again on each periodic refresh, and
+     * used once it fits, but not on the forced refresh after every failed batch; and its failure is
+     * logged as an error the first time, as a warning after.
+     */
+    private record Rejected(String sql) {}
+
+    /** The rejected view queries whose views still read that query; a view changed since is checked again. */
+    private static Map<String, Rejected> stillRejected(Map<String, ViewRead> views, Map<String, Rejected> rejected) {
+        Map<String, Rejected> still = new HashMap<>();
+        rejected.forEach((table, entry) -> {
+            ViewRead view = views.get(table);
+            // A view that cannot be read right now has not been shown to change: keep the entry.
+            if (view != null && (view.error() != null || entry.sql().equals(view.sql()))) still.put(table, entry);
+        });
+        return Map.copyOf(still);
+    }
+
+    /** A view-based sidecar's view as read now: its query, or why it could not be read. */
+    private record ViewRead(String sql, RuntimeException error) {}
+
+    /** Reads every view-based sidecar's view once, by sidecar table. */
+    private static Map<String, ViewRead> readSidecarViews(QueueIdToTableMapping mapping) {
+        Map<String, ViewRead> views = new HashMap<>();
+        for (Sidecar sidecar : mapping.sidecars()) {
+            if (!sidecar.hasView()) continue;
+            try {
+                views.put(sidecar.table(), new ViewRead(sidecarSql(mapping, sidecar), null));
+            } catch (RuntimeException e) {
+                views.put(sidecar.table(), new ViewRead(null, e));
+            }
+        }
+        return views;
+    }
+
+    /**
+     * The sidecars whose views now read differently from the query they have, and are due a check:
+     * on a forced refresh, not a rejected query seen again. A view that cannot be read is not a
+     * change: its sidecar keeps its query.
+     */
+    private static java.util.Set<String> changedSidecarViews(Map<String, ViewRead> views, List<SidecarTarget> existing,
+                                                             Map<String, Rejected> rejected, boolean forced) {
+        java.util.Set<String> changed = new java.util.HashSet<>();
+        for (SidecarTarget t : existing) {
+            ViewRead view = views.get(t.table());
+            if (view == null || view.sql() == null || view.sql().equals(t.transformation())) continue;
+            Rejected entry = rejected.get(t.table());
+            if (entry == null || !entry.sql().equals(view.sql()) || !forced) {
+                changed.add(t.table());
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * A queue's sidecars resolved for writing, or why they cannot be; and the changed view queries
+     * that were rejected, by table, so the same ones are not checked again on every refresh.
+     */
+    private record ResolvedSidecars(List<SidecarTarget> targets, String error, int tablesCreated,
+                                    Map<String, Rejected> rejected) {
         ResolvedSidecars(List<SidecarTarget> targets, String error) {
-            this(targets, error, 0);
+            this(targets, error, 0, Map.of());
         }
     }
 
     /**
      * Creates the queue's missing sidecar tables, checks the existing ones, and resolves them all for
-     * writing. A failure is returned, not thrown, so it stays with this queue; so is a queue whose
-     * transformation does not resolve, whose sidecars cannot be checked until it does. A table whose
-     * partitioning is unsupported does not stop them: a batch that names its partitioning in its
-     * header is still written, with its sidecars.
+     * writing, one sidecar at a time. A failure is returned, not thrown, so it stays with this queue;
+     * so is a queue whose transformation does not resolve, whose sidecars cannot be checked until it
+     * does. A table whose partitioning is unsupported does not stop them: a batch that names its
+     * partitioning in its header is still written, with its sidecars.
+     *
+     * <p>A view-based sidecar keeps its previous query, rather than fail the queue, when its view
+     * cannot be read, or when its view changed and the new query does not fit its table (the reload
+     * is rejected; see {@link Rejected}). {@code knownRejected} is the record of such rejected
+     * queries: one of them checked again and still failing is logged as a warning, not an error (a
+     * forced refresh does not check them again; see {@link #changedSidecarViews}). With {@code only}
+     * given, only those sidecars are checked; the others keep the targets {@code previous} has.
      */
     private static ResolvedSidecars resolveSidecars(QueueIdToTableMapping mapping, ResolvedTransformation transformation,
-                                                    String[] partitionProjections,
-                                                    Map<String, String> variables, QueueState previous) {
+                                                    String[] partitionProjections, Map<String, String> variables,
+                                                    QueueState previous, Map<String, ViewRead> views,
+                                                    Map<String, Rejected> knownRejected, java.util.Set<String> only) {
         if (mapping.sidecars().isEmpty()) {
             return new ResolvedSidecars(List.of(), null);
         }
@@ -496,17 +639,93 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             error = "Queue '%s': its sidecars are resolved once the queue's own transformation is"
                     .formatted(mapping.ingestionQueue());
         } else {
+            Map<String, SidecarTarget> previousTargets = new HashMap<>();
+            if (previous != null) {
+                previous.lastGoodSidecars().forEach(t -> previousTargets.put(t.table(), t));
+            }
+            Map<String, SidecarTarget> current = new HashMap<>();
+            if (previous != null && previous.sidecarError() == null) {
+                previous.sidecars().forEach(t -> current.put(t.table(), t));
+            }
+            Map<String, Rejected> rejected = new HashMap<>();
             try {
-                SidecarTables.Ensured ensured = SidecarTables.ensure(mapping, transformation.sql(), partitionProjections, variables);
-                int created = ensured.created();
                 List<SidecarTarget> targets = new ArrayList<>();
+                int created = 0;
                 for (Sidecar sidecar : mapping.sidecars()) {
-                    targets.add(resolveSidecar(mapping, sidecar, ensured.produced().get(sidecar.table())));
+                    if (only != null && !only.contains(sidecar.table()) && current.containsKey(sidecar.table())) {
+                        ViewRead unread = views.get(sidecar.table());
+                        if (unread != null && unread.error() != null) {
+                            logger.warn("Queue '{}': could not re-read sidecar '{}' view; keeping its last query: {}",
+                                    mapping.ingestionQueue(), sidecar.table(), unread.error().getMessage());
+                        }
+                        targets.add(current.get(sidecar.table())); // its view did not change: kept as is
+                        Rejected entry = knownRejected.get(sidecar.table());
+                        if (entry != null && (unread == null || unread.error() != null || entry.sql().equals(unread.sql()))) {
+                            rejected.put(sidecar.table(), entry); // still what its view reads
+                        }
+                        continue;
+                    }
+                    SidecarTarget prior = previousTargets.get(sidecar.table());
+                    String sql = sidecar.transformation();
+                    Rejected seenBefore = null;
+                    if (sidecar.hasView()) {
+                        ViewRead view = views.get(sidecar.table());
+                        Rejected entry = knownRejected.get(sidecar.table());
+                        boolean rejectedBefore = entry != null && view.sql() != null && entry.sql().equals(view.sql());
+                        if (view.error() != null) {
+                            if (prior == null) throw view.error();
+                            logger.warn("Queue '{}': could not re-read sidecar '{}' view '{}'; keeping its last query: {}",
+                                    mapping.ingestionQueue(), sidecar.table(), sidecar.view(), view.error().getMessage());
+                            sql = prior.transformation();
+                        } else {
+                            sql = view.sql();
+                            if (rejectedBefore) seenBefore = entry;
+                        }
+                    }
+                    ResolvedOne one;
+                    try {
+                        one = resolveOne(mapping, sidecar, sql, transformation, partitionProjections, variables);
+                    } catch (SidecarTables.SidecarMismatchException failed) {
+                        if (!sidecar.hasView() || prior == null || sql.equals(prior.transformation())) {
+                            throw failed;
+                        }
+                        // A changed view whose query does not fit its table: the reload is rejected and
+                        // the sidecar keeps its previous query, so such a view change cannot stop
+                        // ingestion. (A query that fits but fails on some rows, a cast say, fails those
+                        // batches, as the queue's own transformation would.)
+                        try {
+                            one = resolveOne(mapping, sidecar, prior.transformation(), transformation, partitionProjections, variables);
+                        } catch (RuntimeException previousFails) {
+                            throw new IllegalStateException(("sidecar '%s': its view's query does not fit (%s), and its "
+                                    + "previous query does not either (%s)").formatted(sidecar.table(), failed.getMessage(),
+                                    previousFails.getMessage()), previousFails);
+                        }
+                        if (seenBefore == null) {
+                            logger.error("Queue '{}': rejected the changed view of sidecar '{}', keeping its previous query: {}",
+                                    mapping.ingestionQueue(), sidecar.table(), failed.getMessage());
+                        } else {
+                            logger.warn("Queue '{}': the changed view of sidecar '{}' still does not fit, keeping its previous query: {}",
+                                    mapping.ingestionQueue(), sidecar.table(), failed.getMessage());
+                        }
+                        rejected.put(sidecar.table(), new Rejected(sql));
+                    } catch (RuntimeException couldNotCheck) {
+                        // A changed view that could not be checked at all (a metadata read error): it
+                        // keeps the query it has, rather than fail the queue, and is checked again next time.
+                        SidecarTarget kept = current.get(sidecar.table());
+                        if (!sidecar.hasView() || kept == null || sql.equals(kept.transformation())) {
+                            throw couldNotCheck;
+                        }
+                        logger.warn("Queue '{}': could not check the changed view of sidecar '{}'; keeping its current query: {}",
+                                mapping.ingestionQueue(), sidecar.table(), couldNotCheck.getMessage());
+                        one = new ResolvedOne(kept, 0);
+                    }
+                    targets.add(one.target());
+                    created += one.created();
                 }
                 if (previous != null && previous.sidecarError() != null) {
                     logger.info("Queue '{}': its sidecar tables can be written again", mapping.ingestionQueue());
                 }
-                return new ResolvedSidecars(List.copyOf(targets), null, created);
+                return new ResolvedSidecars(List.copyOf(targets), null, created, Map.copyOf(rejected));
             } catch (RuntimeException e) {
                 error = "Queue '%s' cannot be ingested until its sidecar tables can be written: %s"
                         .formatted(mapping.ingestionQueue(), e.getMessage());
@@ -514,16 +733,54 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                     logger.error(error);
                 }
             }
+            // The record of rejected views outlives the failure, so they are not checked and logged
+            // again on recovery when they have not changed: those of earlier refreshes and of this one.
+            Map<String, Rejected> kept = new HashMap<>(previous == null ? Map.of() : stillRejected(views, previous.rejectedSidecarSql()));
+            kept.putAll(rejected);
+            return new ResolvedSidecars(List.of(), error, 0, Map.copyOf(kept));
         }
-        return new ResolvedSidecars(List.of(), error);
+        return new ResolvedSidecars(List.of(), error, 0,
+                previous == null ? Map.of() : stillRejected(views, previous.rejectedSidecarSql()));
+    }
+
+    /** One sidecar resolved, and whether its table was created for it. */
+    private record ResolvedOne(SidecarTarget target, int created) {}
+
+    /** Creates or checks one sidecar's table for {@code sql}, and resolves the sidecar for writing. */
+    private static ResolvedOne resolveOne(QueueIdToTableMapping mapping, Sidecar sidecar, String sql,
+                                          ResolvedTransformation transformation, String[] partitionProjections,
+                                          Map<String, String> variables) {
+        SidecarTables.Ensured ensured = SidecarTables.ensure(mapping.withSidecars(List.of(sidecar)),
+                Map.of(sidecar.table(), sql), transformation.sql(), partitionProjections, variables);
+        return new ResolvedOne(resolveSidecar(mapping, sidecar, sql, ensured), ensured.created());
+    }
+
+    /**
+     * A sidecar's query: its {@code transformation}, or its view's body with its one reference to the
+     * input table (the queue's own, unless {@code input_table} names another) rewritten to
+     * {@code __base}. Throws if the view does not resolve.
+     */
+    static String sidecarSql(QueueIdToTableMapping mapping, Sidecar sidecar) {
+        if (!sidecar.hasView()) {
+            return sidecar.transformation();
+        }
+        String input = sidecar.inputTable() != null ? sidecar.inputTable()
+                : mapping.catalog() + "." + mapping.schema() + "." + mapping.table();
+        try {
+            return resolveViewAs(sidecar.view(), input, Sidecar.BASE);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("sidecar '%s': %s".formatted(sidecar.table(), e.getMessage()), e);
+        }
     }
 
     /**
      * Resolves one sidecar against its table, for writing. {@link SidecarTables#ensure}, run just
-     * before, has checked the table exists, matches and is not partitioned.
+     * before, has checked the table exists, matches, and can be written with its partitioning.
      */
-    private static SidecarTarget resolveSidecar(QueueIdToTableMapping mapping, Sidecar sidecar, java.util.Set<String> produced) {
-        return SidecarTables.resolve(mapping, sidecar, fetchPath(mapping.catalog(), mapping.schema(), sidecar.table()), produced);
+    private static SidecarTarget resolveSidecar(QueueIdToTableMapping mapping, Sidecar sidecar, String sql,
+                                                SidecarTables.Ensured ensured) {
+        return SidecarTables.resolve(mapping, sidecar, sql, fetchPath(mapping.catalog(), mapping.schema(), sidecar.table()),
+                ensured.produced().get(sidecar.table()), ensured.partitions().get(sidecar.table()));
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */
@@ -598,24 +855,6 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         }
     }
 
-    /**
-     * Whether the table is partitioned. Unlike {@link #getPartitionColumns}, a metadata read that
-     * fails is thrown, not read as "unpartitioned".
-     */
-    static boolean isPartitioned(String catalogName, String schema, String table) throws SQLException {
-        String metadataDatabase = "__ducklake_metadata_" + catalogName;
-        String query = """
-                SELECT count(*)
-                FROM %1$s.ducklake_table t
-                JOIN %1$s.ducklake_schema s ON t.schema_id = s.schema_id
-                JOIN %1$s.ducklake_partition_info pi ON t.table_id = pi.table_id
-                WHERE s.schema_name = '%3$s' AND t.table_name = '%2$s'
-                  AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL AND pi.end_snapshot IS NULL
-                """.formatted(metadataDatabase, table.replace("'", "''"), schema.replace("'", "''"));
-        Long count = ConnectionPool.collectFirst(query, Long.class);
-        return count != null && count > 0;
-    }
-
     public static String[] getPartitionColumns(String catalogName, String schema, String table) {
         return fetchPartitions(catalogName, schema, table).stream()
                 .map(ResolvedPartition::token).toArray(String[]::new);
@@ -663,6 +902,20 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     private static List<ResolvedPartition> fetchPartitions(String catalogName, String schema, String table) {
+        try {
+            return fetchPartitionsStrict(catalogName, schema, table);
+        } catch (SQLException e) {
+            logger.atDebug().setCause(e).log("Failed to get partition columns for table {}.{}.{}", catalogName, schema, table);
+            return List.of();
+        }
+    }
+
+    /**
+     * The table's partitioning as a COPY reproduces it (see {@link #resolvePartition}); a metadata
+     * read that fails is thrown, not read as "unpartitioned".
+     */
+    static List<ResolvedPartition> fetchPartitionsStrict(String catalogName, String schema, String table)
+            throws SQLException {
         String metadataDatabase = "__ducklake_metadata_" + catalogName;
         String query = """
                 SELECT
@@ -698,9 +951,6 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                             rs.getString("column_type")})
                     .forEach(raw::add);
             return resolvePartitions(raw);
-        } catch (SQLException e) {
-            logger.atDebug().setCause(e).log("Failed to get partition columns for table {}.{}.{}", catalogName, schema, table);
-            return List.of();
         }
     }
 
@@ -913,11 +1163,19 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     // -----------------------------------------------------------------------
 
     static String resolveViewTransformationStatic(String fqView, String fqInputTable) {
+        return resolveViewAs(fqView, fqInputTable, "__this");
+    }
+
+    /**
+     * A view's body with its one reference to {@code fqInputTable} rewritten to the table name
+     * {@code replacement}: {@code __this} for a queue's view, {@code __base} for a sidecar's.
+     */
+    static String resolveViewAs(String fqView, String fqInputTable, String replacement) {
         String[] viewParts  = splitFqName(fqView,       "view");
         String[] tableParts = splitFqName(fqInputTable, "input_table");
         String viewSql = fetchViewDefinition(viewParts[0], viewParts[1], viewParts[2]);
         try {
-            return Transformations.rewriteTableAsThis(viewSql, tableParts[0], tableParts[1], tableParts[2]);
+            return Transformations.rewriteTableAs(viewSql, tableParts[0], tableParts[1], tableParts[2], replacement);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to derive transformation from view '%s' replacing '%s': %s"
@@ -941,7 +1199,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                 SELECT (SELECT sql
                         FROM duckdb_views()
                         WHERE database_name = '%s' AND schema_name = '%s' AND view_name = '%s')
-                """.formatted(catalog, schema, viewName);
+                """.formatted(catalog.replace("'", "''"), schema.replace("'", "''"), viewName.replace("'", "''"));
         try {
             String fullSql = ConnectionPool.collectFirst(query, String.class);
             if (fullSql == null) {

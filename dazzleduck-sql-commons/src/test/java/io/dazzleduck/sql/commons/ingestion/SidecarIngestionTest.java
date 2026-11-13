@@ -166,14 +166,60 @@ class SidecarIngestionTest {
     }
 
     @Test
-    void aPartitionedSidecarTableFailsStartup() {
+    void aPartitionedSidecarTableIsWrittenWithItsPartitioning() throws Exception {
         execute("CREATE TABLE %s.%s.category_counts (category VARCHAR, n BIGINT)".formatted(CATALOG, SCHEMA));
         execute("ALTER TABLE %s.%s.category_counts SET PARTITIONED BY (category)".formatted(CATALOG, SCHEMA));
-        var e = assertThrows(IllegalArgumentException.class, () -> handler("""
+        var handler = handler("""
                 sidecars = [{ table = "category_counts"
                               transformation = "SELECT category, count(*) AS n FROM __base GROUP BY ALL" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        IngestionResult result;
+        try (var queue = queue(handler, scheduler)) {
+            result = write(queue, scheduler, 0);
+        }
+        List<String> files = result.sidecarFiles().get("category_counts");
+        assertEquals(3, files.size(), "one file per partition: " + files);
+        assertTrue(files.stream().allMatch(f -> f.contains("/category_counts/category=cat")), files.toString());
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+
+        // A second batch writes new files: it must not overwrite the first batch's at the same partition paths.
+        IngestionResult second;
+        try (var queue = queue(handler, scheduler)) {
+            second = write(queue, scheduler, 1);
+        }
+        assertTrue(java.util.Collections.disjoint(files, second.sidecarFiles().get("category_counts")),
+                files + " vs " + second.sidecarFiles());
+        assertEquals(68L, scalar("SELECT sum(n)::BIGINT FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "both batches' rows are in the table");
+        assertEquals(6L, scalar("SELECT count(*) FROM %s.%s.category_counts".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aSidecarTablePartitionedByATransformIsWrittenWithIt() throws Exception {
+        execute("CREATE TABLE %s.%s.per_value (value BIGINT, n BIGINT)".formatted(CATALOG, SCHEMA));
+        execute("ALTER TABLE %s.%s.per_value SET PARTITIONED BY (bucket(2, value))".formatted(CATALOG, SCHEMA));
+        var handler = handler("""
+                sidecars = [{ table = "per_value", transformation = "SELECT value, count(*) AS n FROM __base GROUP BY ALL" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        IngestionResult result;
+        try (var queue = queue(handler, scheduler)) {
+            result = write(queue, scheduler, 0);
+        }
+        assertTrue(result.sidecarFiles().get("per_value").stream().allMatch(f -> f.contains("/bucket=")),
+                result.sidecarFiles().toString());
+        assertEquals(100L, scalar("SELECT sum(n)::BIGINT FROM %s.%s.per_value".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aSidecarTablePartitionedByAColumnItsQueryDoesNotProduceFailsStartup() {
+        execute("CREATE TABLE %s.%s.ids (id BIGINT, note VARCHAR)".formatted(CATALOG, SCHEMA));
+        execute("ALTER TABLE %s.%s.ids SET PARTITIONED BY (note)".formatted(CATALOG, SCHEMA));
+        var e = assertThrows(IllegalArgumentException.class, () -> handler("""
+                sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
                 """));
-        assertTrue(e.getMessage().contains("partitioned"), e.getMessage());
+        assertTrue(e.getMessage().contains("partitioned by 'note'"), e.getMessage());
     }
 
     @Test
@@ -328,19 +374,22 @@ class SidecarIngestionTest {
     }
 
     @Test
-    void aSidecarTablePartitionedUnderARunningQueueRejectsItsBatches() throws Exception {
+    void aSidecarTablePartitionedUnderARunningQueueIsWrittenWithItsNewPartitioning() throws Exception {
         var handler = handler("""
-                sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
+                sidecars = [{ table = "cats", transformation = "SELECT id, category FROM __base" }]
                 """);
-        execute("ALTER TABLE %s.%s.ids SET PARTITIONED BY (id)".formatted(CATALOG, SCHEMA));
-        handler.refreshNow(TABLE);
         var scheduler = new DeterministicScheduler();
         try (var queue = queue(handler, scheduler)) {
-            var failure = assertThrows(ExecutionException.class, () -> write(queue, scheduler, 0));
-            assertTrue(hasCause(failure, TransformationUnavailableException.class), failure.toString());
-            assertTrue(failure.getCause().getMessage().contains("partitioned"), failure.getCause().getMessage());
+            write(queue, scheduler, 0);
+            execute("ALTER TABLE %s.%s.cats SET PARTITIONED BY (category)".formatted(CATALOG, SCHEMA));
+            // The cached state still writes the sidecar unpartitioned: registration rejects it, the
+            // catalog-change retry re-reads the partitioning and writes the batch again.
+            IngestionResult result = write(queue, scheduler, 1);
+            assertTrue(result.sidecarFiles().get("cats").stream().allMatch(f -> f.contains("category=")),
+                    result.sidecarFiles().toString());
         }
-        assertEquals(0L, scalar("SELECT count(*) FROM %s.%s.%s".formatted(CATALOG, SCHEMA, TABLE)));
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.cats".formatted(CATALOG, SCHEMA)));
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.%s".formatted(CATALOG, SCHEMA, TABLE)));
     }
 
     @Test
@@ -416,10 +465,420 @@ class SidecarIngestionTest {
         assertEquals(0L, scalar("SELECT count(*) FROM %s.ducklake_data_file".formatted(METADATA)));
     }
 
+    @Test
+    void aSidecarReadsItsQueryFromAViewOverTheQueuesTable() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%s.%s.v_counts" }]
+                """.formatted(CATALOG, SCHEMA));
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "the view's reference to the queue's table became the batch's rows");
+    }
+
+    @Test
+    void aChangedSidecarViewTakesEffectWithoutARestart() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        execute("CREATE TABLE %s.%s.category_counts (category VARCHAR, n BIGINT, max_value BIGINT)".formatted(CATALOG, SCHEMA));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%s.%s.v_counts" }]
+                """.formatted(CATALOG, SCHEMA));
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+            execute(("CREATE OR REPLACE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n, max(value) AS max_value "
+                    + "FROM %1$s.%2$s.%3$s GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));
+            handler.refreshNow(TABLE);
+            write(queue, scheduler, 1);
+        }
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.category_counts WHERE max_value IS NULL".formatted(CATALOG, SCHEMA)),
+                "the first batch was written with the old view");
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.category_counts WHERE max_value IS NOT NULL".formatted(CATALOG, SCHEMA)),
+                "the second with the new one");
+    }
+
+    @Test
+    void aChangedSidecarViewThatNoLongerFitsItsTableIsRejectedAndTheOldQueryKept() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%s.%s.v_counts" }]
+                """.formatted(CATALOG, SCHEMA));
+        // n becomes VARCHAR: the table has it as BIGINT.
+        execute("CREATE OR REPLACE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*)::VARCHAR AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        handler.refreshNow(TABLE);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            assertEquals(100, write(queue, scheduler, 0).rowCount(), "ingestion goes on with the previous query");
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void onlyTheChangedViewThatDoesNotFitIsRejected() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_a AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        execute("CREATE VIEW %1$s.%2$s.v_b AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        execute("CREATE TABLE %s.%s.a (category VARCHAR, n BIGINT, max_value BIGINT)".formatted(CATALOG, SCHEMA));
+        var handler = handler("""
+                sidecars = [{ table = "a", transformation_view = "%1$s.%2$s.v_a" }
+                            { table = "b", transformation_view = "%1$s.%2$s.v_b" }]
+                """.formatted(CATALOG, SCHEMA));
+        // a: a valid change (a column its table has); b: one that does not fit (n as VARCHAR).
+        execute(("CREATE OR REPLACE VIEW %1$s.%2$s.v_a AS SELECT category, count(*) AS n, max(value) AS max_value "
+                + "FROM %1$s.%2$s.%3$s GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));
+        execute("CREATE OR REPLACE VIEW %1$s.%2$s.v_b AS SELECT category, count(*)::VARCHAR AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        handler.refreshNow(TABLE);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+        }
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.a WHERE max_value IS NOT NULL".formatted(CATALOG, SCHEMA)),
+                "a's valid change is applied");
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.b WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "b keeps its previous query");
+    }
+
+    @Test
+    void aRegistryChangeKeepsTheQueryOfARejectedView() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var viewSidecar = new Sidecar("category_counts", null, CATALOG + "." + SCHEMA + ".v_counts", null);
+        var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null).withSidecars(List.of(viewSidecar));
+        var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
+        execute("CREATE OR REPLACE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*)::VARCHAR AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        handler.refreshNow(TABLE); // rejected: the previous query is kept
+        // An unrelated change to the queue's mapping, as a registry reload brings: another sidecar.
+        handler.updateMappings(Map.of(TABLE, mapping.withSidecars(List.of(viewSidecar,
+                new Sidecar("ids", "SELECT id FROM __base")))));
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            assertEquals(100, write(queue, scheduler, 0).rowCount(), "the rejected view still does not stop ingestion");
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+        assertEquals(100L, scalar("SELECT count(*) FROM %s.%s.ids".formatted(CATALOG, SCHEMA)), "the new sidecar is written");
+    }
+
+    @Test
+    void aRejectedViewQueryIsCheckedAgainOnceTheViewWasChangedInBetween() throws Exception {
+        // The views live in the in-memory catalog, so changing them does not move the lake's
+        // schema_version: every refresh here takes the fast path.
+        String good = "CREATE OR REPLACE VIEW memory.main.v_sc AS SELECT category, count(*) AS n FROM %s.%s.%s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE);
+        String needsDim = ("CREATE OR REPLACE VIEW memory.main.v_sc AS SELECT category, count(*) AS n FROM %s.%s.%s "
+                + "WHERE category IN (SELECT category FROM memory.main.dim_sc) GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE);
+        try {
+            execute(good);
+            var handler = handler("""
+                    sidecars = [{ table = "category_counts", transformation_view = "memory.main.v_sc", input_table = "%s.%s.%s" }]
+                    """.formatted(CATALOG, SCHEMA, TABLE));
+            execute("CREATE OR REPLACE TABLE memory.main.dim_sc AS SELECT 'cat0' AS category");
+            execute(needsDim);
+            execute("DROP TABLE memory.main.dim_sc");
+            handler.refreshNow(TABLE);  // rejected: dim_sc is missing, so the query does not run
+            execute(good);
+            handler.refreshNow(TABLE);  // reverted
+            execute("CREATE OR REPLACE TABLE memory.main.dim_sc AS SELECT 'cat0' AS category");
+            execute(needsDim);
+            handler.refreshNow(TABLE);  // the same query as the rejected one, but it now runs
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                write(queue, scheduler, 0);
+            }
+            assertEquals(1L, scalar("SELECT count(*) FROM %s.%s.category_counts".formatted(CATALOG, SCHEMA)),
+                    "the view's query was applied: only cat0");
+        } finally {
+            execute("DROP VIEW IF EXISTS memory.main.v_sc");
+            execute("DROP TABLE IF EXISTS memory.main.dim_sc");
+        }
+    }
+
+    @Test
+    void aViewThatDoesNotRunYetIsAppliedOnceItDoes() throws Exception {
+        String needsDim = ("CREATE OR REPLACE VIEW memory.main.v_dim AS SELECT category, count(*) AS n FROM %s.%s.%s "
+                + "WHERE category IN (SELECT category FROM memory.main.dim_later) GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE);
+        try {
+            execute("CREATE OR REPLACE VIEW memory.main.v_dim AS SELECT category, count(*) AS n FROM %s.%s.%s GROUP BY ALL"
+                    .formatted(CATALOG, SCHEMA, TABLE));
+            // A refresh interval of zero: every read of the queue's state is a periodic refresh.
+            var handler = handler("""
+                    sidecars = [{ table = "category_counts", transformation_view = "memory.main.v_dim", input_table = "%s.%s.%s" }]
+                    """.formatted(CATALOG, SCHEMA, TABLE), Duration.ZERO);
+            execute("CREATE OR REPLACE TABLE memory.main.dim_later AS SELECT 'cat0' AS category");
+            execute(needsDim);
+            execute("DROP TABLE memory.main.dim_later");
+            handler.refreshNow(TABLE);   // does not run: the old query is kept, rejected but not permanently
+            handler.refreshNow(TABLE);   // a forced refresh (after a failed batch, say) does not check it again
+            execute("CREATE OR REPLACE TABLE memory.main.dim_later AS SELECT 'cat0' AS category");
+            // The view is unchanged, but it runs now: the next periodic refresh, on the write, applies it.
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                write(queue, scheduler, 0);
+            }
+            assertEquals(1L, scalar("SELECT count(*) FROM %s.%s.category_counts".formatted(CATALOG, SCHEMA)),
+                    "the view's query is applied once its table exists: only cat0");
+        } finally {
+            execute("DROP VIEW IF EXISTS memory.main.v_dim");
+            execute("DROP TABLE IF EXISTS memory.main.dim_later");
+        }
+    }
+
+    @Test
+    void aMismatchCausedByATableInAnotherCatalogIsCheckedAgainOnceThatTableIsFixed() throws Exception {
+        try {
+            execute("CREATE OR REPLACE TABLE memory.main.dim_type AS SELECT 'x'::VARCHAR AS n");
+            execute("CREATE OR REPLACE VIEW memory.main.v_t AS SELECT category, count(*) AS n FROM %s.%s.%s GROUP BY ALL"
+                    .formatted(CATALOG, SCHEMA, TABLE));
+            var handler = handler("""
+                    sidecars = [{ table = "category_counts", transformation_view = "memory.main.v_t", input_table = "%s.%s.%s" }]
+                    """.formatted(CATALOG, SCHEMA, TABLE), Duration.ZERO);
+            // n now comes from a table in another catalog, as VARCHAR: it does not fit the BIGINT column.
+            execute(("CREATE OR REPLACE VIEW memory.main.v_t AS SELECT category, (SELECT max(n) FROM memory.main.dim_type) AS n "
+                    + "FROM %s.%s.%s GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));
+            handler.refreshNow(TABLE);   // rejected, but not permanently: the cause is outside the lake
+            execute("CREATE OR REPLACE TABLE memory.main.dim_type AS SELECT 7::BIGINT AS n");   // fixed there
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                write(queue, scheduler, 0);   // a periodic refresh checks the view again and applies it
+            }
+            assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.category_counts WHERE n = 7".formatted(CATALOG, SCHEMA)));
+        } finally {
+            execute("DROP VIEW IF EXISTS memory.main.v_t");
+            execute("DROP TABLE IF EXISTS memory.main.dim_type");
+        }
+    }
+
+    @Test
+    void forcedRefreshesDoNotPostponeTheRecheckOfARejectedView() throws Exception {
+        String needsDim = ("CREATE OR REPLACE VIEW memory.main.v_pend AS SELECT category, count(*) AS n FROM %s.%s.%s "
+                + "WHERE category IN (SELECT category FROM memory.main.dim_pend) GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE);
+        try {
+            execute("CREATE OR REPLACE VIEW memory.main.v_pend AS SELECT category, count(*) AS n FROM %s.%s.%s GROUP BY ALL"
+                    .formatted(CATALOG, SCHEMA, TABLE));
+            var clock = new MutableClock(Instant.now(), ZoneId.systemDefault());
+            var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null)
+                    .withSidecars(List.of(new Sidecar("category_counts", null, "memory.main.v_pend", CATALOG + "." + SCHEMA + "." + TABLE)));
+            var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofMinutes(1), clock);
+            execute("CREATE OR REPLACE TABLE memory.main.dim_pend AS SELECT 'cat0' AS category");
+            execute(needsDim);
+            execute("DROP TABLE memory.main.dim_pend"); // the view's query does not run: rejected
+            handler.refreshNow(TABLE);
+            execute("CREATE OR REPLACE TABLE memory.main.dim_pend AS SELECT 'cat0' AS category");
+            clock.advanceBy(Duration.ofSeconds(40));
+            handler.refreshNow(TABLE);   // a forced refresh (a failed batch): skips the re-check, must not reset the timer
+            clock.advanceBy(Duration.ofSeconds(30));   // 70 s since the last periodic refresh: one is due
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                write(queue, scheduler, 0);
+            }
+            assertEquals(1L, scalar("SELECT count(*) FROM %s.%s.category_counts".formatted(CATALOG, SCHEMA)),
+                    "the periodic refresh came round and applied the view: only cat0");
+        } finally {
+            execute("DROP VIEW IF EXISTS memory.main.v_pend");
+            execute("DROP TABLE IF EXISTS memory.main.dim_pend");
+        }
+    }
+
+    @Test
+    void aBriefQueueErrorDoesNotTakeAwayARejectedViewsLastGoodQuery() throws Exception {
+        String queueView = "CREATE OR REPLACE VIEW memory.main.v_q AS SELECT id, value, category FROM %s.%s.events_in"
+                .formatted(CATALOG, SCHEMA);
+        try {
+            execute("CREATE TABLE %s.%s.events_in (id BIGINT, value BIGINT, category VARCHAR)".formatted(CATALOG, SCHEMA));
+            execute(queueView);
+            execute("CREATE OR REPLACE VIEW memory.main.v_sc AS SELECT category, count(*) AS n FROM %s.%s.%s GROUP BY ALL"
+                    .formatted(CATALOG, SCHEMA, TABLE));
+            var mapping = new QueueIdToTableMapping(TABLE, CATALOG, SCHEMA, TABLE, Map.of(), null,
+                    "memory.main.v_q", CATALOG + "." + SCHEMA + ".events_in")
+                    .withSidecars(List.of(new Sidecar("category_counts", null, "memory.main.v_sc", CATALOG + "." + SCHEMA + "." + TABLE)));
+            var handler = new DuckLakeIngestionHandler(Map.of(TABLE, mapping), Duration.ofHours(1));
+            execute("CREATE OR REPLACE VIEW memory.main.v_sc AS SELECT category, count(*)::VARCHAR AS n FROM %s.%s.%s GROUP BY ALL"
+                    .formatted(CATALOG, SCHEMA, TABLE));
+            handler.refreshNow(TABLE);                // the sidecar view is rejected; its old query kept
+            execute("DROP VIEW memory.main.v_q");
+            handler.refreshNow(TABLE);                // the queue's own view is gone: the queue fails
+            execute(queueView);
+            handler.refreshNow(TABLE);                // back: the sidecar falls back on its last good query
+            var scheduler = new DeterministicScheduler();
+            try (var queue = queue(handler, scheduler)) {
+                assertEquals(100, write(queue, scheduler, 0).rowCount());
+            }
+            assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+        } finally {
+            execute("DROP VIEW IF EXISTS memory.main.v_sc");
+            execute("DROP VIEW IF EXISTS memory.main.v_q");
+        }
+    }
+
+    @Test
+    void mainTableAndSidecarChangesTogetherAreAllLoaded() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_b AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                sidecars = [
+                  { table = "a", transformation = "SELECT id, category FROM __base" }
+                  { table = "b", transformation_view = "%1$s.%2$s.v_b" }
+                  { table = "c", transformation = "SELECT category, sum(value)::BIGINT AS total FROM __base GROUP BY ALL" }
+                ]
+                """.formatted(CATALOG, SCHEMA));
+        var scheduler = new DeterministicScheduler();
+        IngestionResult second;
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+
+            // All at once, under the running queue:
+            execute("ALTER TABLE %s.%s.%s SET PARTITIONED BY (category)".formatted(CATALOG, SCHEMA, TABLE)); // main table
+            execute("ALTER TABLE %s.%s.a ADD COLUMN note VARCHAR".formatted(CATALOG, SCHEMA));               // a: a new column
+            execute("ALTER TABLE %s.%s.b ADD COLUMN max_value BIGINT".formatted(CATALOG, SCHEMA));           // b: table first,
+            execute(("CREATE OR REPLACE VIEW %1$s.%2$s.v_b AS SELECT category, count(*) AS n, max(value) AS max_value "
+                    + "FROM %1$s.%2$s.%3$s GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));                   //    then its view
+            execute("ALTER TABLE %s.%s.c SET PARTITIONED BY (category)".formatted(CATALOG, SCHEMA));         // c: partitioned
+
+            // The cached state is stale: the batch is written the old way, rejected at registration,
+            // and retried once with everything re-read.
+            second = write(queue, scheduler, 1);
+        }
+        assertTrue(second.filesCreated().stream().allMatch(f -> f.contains("category=")),
+                "base: written with the new partitioning " + second.filesCreated());
+        assertTrue(second.sidecarFiles().get("c").stream().allMatch(f -> f.contains("/c/category=")),
+                "c: written with its new partitioning " + second.sidecarFiles());
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.%s".formatted(CATALOG, SCHEMA, TABLE)));
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.a WHERE note IS NULL".formatted(CATALOG, SCHEMA)),
+                "a: both batches, the new column NULL");
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.b WHERE max_value IS NULL".formatted(CATALOG, SCHEMA)),
+                "b: the first batch with the old view");
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.b WHERE max_value IS NOT NULL".formatted(CATALOG, SCHEMA)),
+                "b: the second with the new one");
+        assertEquals(6732L, scalar("SELECT sum(total)::BIGINT FROM %s.%s.c WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "c: both batches' totals");
+    }
+
+    @Test
+    void aDynamicQueuesMainTableAndRegistryChangesTogetherAreAllLoaded() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_b AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        String dbPath = tempDir.resolve("registry-combined.db").toString();
+        try (var repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            registry(dbPath, "INSERT INTO reg.ingestion_queues (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('%s', '%s', '%s', '%s')".formatted(TABLE, CATALOG, SCHEMA, TABLE));
+            registry(dbPath, "INSERT INTO reg.%s (ingestion_queue, sidecar_table, transformation_view) VALUES ('%s', 'b', '%s.%s.v_b')"
+                    .formatted(DynamicQueueRepository.SIDECARS_TABLE, TABLE, CATALOG, SCHEMA));
+            Connection readConn = repo.openReadOnlyConnection();
+            var handler = new DynamicIngestionHandler(dbPath, readConn, DynamicQueueRepository.loadAll(readConn),
+                    Duration.ofHours(1));
+            try {
+                var scheduler = new DeterministicScheduler();
+                IngestionResult second;
+                try (var queue = queue(handler, scheduler)) {
+                    write(queue, scheduler, 0);
+
+                    // The main table re-partitioned, b's view changed, and a new sidecar in the registry:
+                    execute("ALTER TABLE %s.%s.%s SET PARTITIONED BY (category)".formatted(CATALOG, SCHEMA, TABLE));
+                    execute("ALTER TABLE %s.%s.b ADD COLUMN max_value BIGINT".formatted(CATALOG, SCHEMA));
+                    execute(("CREATE OR REPLACE VIEW %1$s.%2$s.v_b AS SELECT category, count(*) AS n, max(value) AS max_value "
+                            + "FROM %1$s.%2$s.%3$s GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));
+                    registry(dbPath, "INSERT INTO reg.%s (ingestion_queue, sidecar_table, transformation) VALUES ('%s', 'ids', "
+                            .formatted(DynamicQueueRepository.SIDECARS_TABLE, TABLE) + "'SELECT id FROM __base')");
+                    handler.updateMappings(DynamicQueueRepository.loadAll(readConn, handler.currentMappings()));
+
+                    second = write(queue, scheduler, 1);
+                }
+                assertTrue(second.filesCreated().stream().allMatch(f -> f.contains("category=")), second.filesCreated().toString());
+                assertEquals(java.util.Set.of("b", "ids"), second.sidecarFiles().keySet());
+            } finally {
+                handler.closeQueues();
+            }
+        }
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.%s".formatted(CATALOG, SCHEMA, TABLE)));
+        assertEquals(3L, scalar("SELECT count(*) FROM %s.%s.b WHERE max_value IS NOT NULL".formatted(CATALOG, SCHEMA)),
+                "b: the second batch with its new view");
+        assertEquals(100L, scalar("SELECT count(*) FROM %s.%s.ids".formatted(CATALOG, SCHEMA)), "the new sidecar: the second batch");
+    }
+
+    private static void registry(String dbPath, String sql) throws Exception {
+        try (Connection conn = java.sql.DriverManager.getConnection("jdbc:duckdb:");
+             var st = conn.createStatement()) {
+            st.execute("LOAD sqlite");
+            st.execute("ATTACH '%s' AS reg (TYPE sqlite)".formatted(dbPath));
+            st.execute(sql);
+        }
+    }
+
+    @Test
+    void aSidecarViewThatCannotBeReReadKeepsItsLastQuery() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%s.%s.v_counts" }]
+                """.formatted(CATALOG, SCHEMA));
+        execute("DROP VIEW %s.%s.v_counts".formatted(CATALOG, SCHEMA));
+        handler.refreshNow(TABLE);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            assertEquals(100, write(queue, scheduler, 0).rowCount());
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aSidecarViewThatDoesNotReadItsInputTableFailsStartup() {
+        execute("CREATE TABLE %s.%s.other (id BIGINT)".formatted(CATALOG, SCHEMA));
+        execute("CREATE VIEW %1$s.%2$s.v_other AS SELECT id FROM %1$s.%2$s.other".formatted(CATALOG, SCHEMA));
+        var e = assertThrows(IllegalArgumentException.class, () -> handler("""
+                sidecars = [{ table = "ids", transformation_view = "%s.%s.v_other" }]
+                """.formatted(CATALOG, SCHEMA)));
+        assertTrue(e.getMessage().contains("v_other") && e.getMessage().contains("not found in view body"), e.getMessage());
+    }
+
+    @Test
+    void aDynamicQueuesSidecarsAreCreatedAndWritten() throws Exception {
+        String dbPath = tempDir.resolve("registry.db").toString();
+        try (var repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            try (Connection conn = java.sql.DriverManager.getConnection("jdbc:duckdb:");
+                 var st = conn.createStatement()) {
+                st.execute("LOAD sqlite");
+                st.execute("ATTACH '%s' AS reg (TYPE sqlite)".formatted(dbPath));
+                st.execute("INSERT INTO reg.ingestion_queues (ingestion_queue, catalog, schema_name, table_name) "
+                        + "VALUES ('%s', '%s', '%s', '%s')".formatted(TABLE, CATALOG, SCHEMA, TABLE));
+                st.execute("INSERT INTO reg.%s (ingestion_queue, sidecar_table, transformation) VALUES ('%s', "
+                        .formatted(DynamicQueueRepository.SIDECARS_TABLE, TABLE)
+                        + "'category_counts', 'SELECT category, count(*) AS n FROM __base GROUP BY ALL')");
+            }
+            Connection readConn = repo.openReadOnlyConnection();
+            var handler = new DynamicIngestionHandler(dbPath, readConn, DynamicQueueRepository.loadAll(readConn),
+                    Duration.ofHours(1));
+            try {
+                var scheduler = new DeterministicScheduler();
+                try (var queue = queue(handler, scheduler)) {
+                    write(queue, scheduler, 0);
+                }
+            } finally {
+                handler.closeQueues();
+            }
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "the dynamic queue's sidecar table was created and written");
+    }
+
     // -----------------------------------------------------------------------
 
     /** The handler for one queue on {@link #TABLE}, built from a mapping entry with {@code extra} keys. */
     private DuckLakeIngestionHandler handler(String extra) {
+        return handler(extra, Duration.ofHours(1));
+    }
+
+    private DuckLakeIngestionHandler handler(String extra, Duration refreshInterval) {
         var provider = new DuckLakeIngestionTaskFactoryProvider();
         provider.setConfig(ConfigFactory.parseString("""
                 ingestion_queue_table_mapping = [{
@@ -428,7 +887,7 @@ class SidecarIngestionTest {
                 }]
                 """.formatted(TABLE, CATALOG, SCHEMA, TABLE, extra)));
         provider.validate();
-        return new DuckLakeIngestionHandler(provider.loadMappings(), Duration.ofHours(1));
+        return new DuckLakeIngestionHandler(provider.loadMappings(), refreshInterval);
     }
 
     private ParquetIngestionQueue queue(IngestionHandler handler, DeterministicScheduler scheduler) {

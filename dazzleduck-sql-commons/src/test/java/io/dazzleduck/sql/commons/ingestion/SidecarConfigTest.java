@@ -48,8 +48,14 @@ class SidecarConfigTest {
 
     @Test
     void anUnusableEntryIsRejectedNamingTheQueue() {
-        String message = rejected("[ { table = \"a\", transformation_view = \"lake.main.v\" } ]");
-        assertTrue(message.contains("q1") && message.contains("transformation_view"), message);
+        String message = rejected("[ { table = \"a\", transformation = \"SELECT 1 FROM __base\", transformation_view = \"lake.main.v\" } ]");
+        assertTrue(message.contains("q1") && message.contains("exactly one of"), message);
+
+        message = rejected("[ { table = \"a\", transformation_view = \"main.v\" } ]");
+        assertTrue(message.contains("fully qualified"), message);
+
+        message = rejected("[ { table = \"a\", transformation = \"SELECT 1 FROM __base\", input_table = \"lake.main.t\" } ]");
+        assertTrue(message.contains("'input_table' goes with 'transformation_view'"), message);
 
         message = rejected("[ { table = \"a\", transformation = \"SELECT 1 FROM __base\", mode = \"x\" } ]");
         assertTrue(message.contains("unknown sidecar key 'mode'"), message);
@@ -58,7 +64,17 @@ class SidecarConfigTest {
         assertTrue(message.contains("q1") && message.contains("'table'"), message);
 
         message = rejected("[ { table = \"a\" } ]");
-        assertTrue(message.contains("sidecar 'a' needs a 'transformation'"), message);
+        assertTrue(message.contains("sidecar 'a' needs exactly one of"), message);
+    }
+
+    @Test
+    void aSidecarMayReadItsQueryFromAView() {
+        var sidecars = load("""
+                [ { table = "a", transformation_view = "lake.main.v_a" }
+                  { table = "b", transformation_view = "lake.main.v_b", input_table = "lake.main.raw" } ]
+                """).get("q1").sidecars();
+        assertEquals(new Sidecar("a", null, "lake.main.v_a", null), sidecars.get(0));
+        assertEquals(new Sidecar("b", null, "lake.main.v_b", "lake.main.raw"), sidecars.get(1));
     }
 
     @Test
