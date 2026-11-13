@@ -26,6 +26,18 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      */
     private static final ExecutorService CLEANUP_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
+    /**
+     * Runs sidecar COPYs beside the base COPY, which runs on the queue's writer thread. Platform
+     * threads, not virtual: a COPY is one long native call into DuckDB, which would pin a virtual
+     * thread's carrier for its whole length and starve the server's other virtual threads.
+     */
+    private static final ExecutorService SIDECAR_COPY_EXECUTOR = Executors.newFixedThreadPool(
+            Math.max(4, Runtime.getRuntime().availableProcessors()), runnable -> {
+                Thread thread = new Thread(runnable, "sidecar-copy");
+                thread.setDaemon(true);
+                return thread;
+            });
+
     private final String outputPath;
     private final String queueId;
     private final IngestionHandler postIngestionHandler;
@@ -62,7 +74,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * Captured once per attempt, so the attempt is built from one consistent view and a retry can
      * tell whether the catalog changed since.
      */
-    private record WriteInputs(String transformation, List<String> partitionBy, List<String> partitionProjections) {}
+    private record WriteInputs(String transformation, List<String> partitionBy, List<String> partitionProjections,
+                               List<SidecarTarget> sidecars, List<String> sidecarProjections) {}
+
+    /** What one COPY returned: its row count and the files it wrote. */
+    private record CopyOutput(long rows, List<String> files) {}
 
     /** A write whose files were written but whose post-ingestion step (registration) failed. */
     private static final class RegistrationFailedException extends RuntimeException {
@@ -256,7 +272,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         try {
             postIngestionHandler.createPostIngestionTask(ingestionResult).execute();
         } catch (RuntimeException e) {
-            throw new RegistrationFailedException(ingestionResult.filesCreated(), e);
+            throw new RegistrationFailedException(ingestionResult.allFiles(), e);
         }
         // The batch is registered. Nothing below may throw: a failure here would not be a
         // RegistrationFailedException, so nothingRegistered() would read it as "failed before
@@ -291,19 +307,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     + "registration outcome is unknown: {}", queueId, files.size(), files);
             return;
         }
-        List<String> left = new ArrayList<>();
-        for (String file : files) {
-            if (deleteLocalFile(file)) {
-                orphanFilesDeleted.increment();
-            } else {
-                left.add(file);
-            }
-        }
-        if (!left.isEmpty()) {
-            orphanFilesLeft.add(left.size());
-            logger.warn("Queue '{}': could not delete {} rejected output file(s); reclaim them with "
-                    + "ducklake_delete_orphaned_files: {}", queueId, left.size(), left);
-        }
+        discardWritten(files, "registration rejected the batch's files");
     }
 
     /**
@@ -312,12 +316,8 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * has no client for, and for local files that could not be deleted.
      */
     static boolean deleteLocalFile(String file) {
-        String path = file;
-        if (path.startsWith("file://")) {
-            path = path.substring("file://".length());
-        } else if (path.startsWith("file:")) {
-            path = path.substring("file:".length());
-        } else if (path.contains("://")) {
+        String path = localPath(file);
+        if (path == null) {
             return false;
         }
         try {
@@ -327,6 +327,20 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
             logger.warn("Failed to delete output file of a failed write: {}", file, e);
             return false;
         }
+    }
+
+    /**
+     * {@code file} as a local filesystem path (from a plain path or a {@code file:} URI), or
+     * {@code null} for an object-store path ({@code s3://} and the like).
+     */
+    static String localPath(String file) {
+        if (file.startsWith("file://")) {
+            return file.substring("file://".length());
+        }
+        if (file.startsWith("file:")) {
+            return file.substring("file:".length());
+        }
+        return file.contains("://") ? null : file;
     }
 
     /**
@@ -498,11 +512,16 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         // PARTITION_BY tokens resolve. Not needed for header-supplied partitionBy, which names
         // columns that already exist in the relation.
         // (Empty when the batch header supplies partitionBy — see currentWriteInputs.)
-        if (!inputs.partitionProjections().isEmpty()) {
-            querySql = "SELECT *, %s FROM (%s)".formatted(
-                    String.join(", ", inputs.partitionProjections()), querySql);
-        }
-        return querySql;
+        return withProjections(querySql, inputs.partitionProjections());
+    }
+
+    /**
+     * {@code relation} with the table's partition projections added as columns; the write path and the
+     * startup check of sidecar tables both build {@code __base} with it.
+     */
+    static String withProjections(String relation, List<String> projections) {
+        return projections.isEmpty() ? relation
+                : "SELECT *, %s FROM (%s)".formatted(String.join(", ", projections), relation);
     }
 
     /** Reads the current {@link WriteInputs} for this batch from the batch header and the handler. */
@@ -511,34 +530,50 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         boolean hasBatchPartitionBy = batchPartitionBy != null && batchPartitionBy.length > 0;
         String transformation = postIngestionHandler.getTransformation(queueId);
         if (hasBatchPartitionBy) {
-            return new WriteInputs(transformation, List.of(batchPartitionBy), List.of());
+            List<SidecarTarget> sidecars = postIngestionHandler.getSidecars(queueId);
+            // The header's columns already exist, so the base gets no projections; a sidecar's __base
+            // still gets the table's, which its table was checked against. A table whose partitioning
+            // is unsupported has none, and does not stop a batch that names its own.
+            List<String> sidecarProjections = List.of();
+            if (!sidecars.isEmpty()) {
+                try {
+                    sidecarProjections = nonNullList(postIngestionHandler.getPartitionProjections(queueId));
+                } catch (UnsupportedPartitionTransformException unsupported) {
+                    // no projections to add
+                }
+            }
+            return new WriteInputs(transformation, List.of(batchPartitionBy), List.of(), sidecars, sidecarProjections);
         }
-        return new WriteInputs(transformation,
-                nonNullList(postIngestionHandler.getPartitionBy(queueId)),
-                nonNullList(postIngestionHandler.getPartitionProjections(queueId)));
+        // The table's partitioning first, so an unsupported one is the reason a batch is rejected.
+        List<String> partitionBy = nonNullList(postIngestionHandler.getPartitionBy(queueId));
+        List<String> partitionProjections = nonNullList(postIngestionHandler.getPartitionProjections(queueId));
+        return new WriteInputs(transformation, partitionBy, partitionProjections,
+                postIngestionHandler.getSidecars(queueId), List.of());
     }
 
     private static List<String> nonNullList(String[] values) {
         return values == null ? List.of() : Arrays.asList(values);
     }
 
-    private String constructWriteQuery(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) {
+    /** The base COPY, and the one file it writes when the batch is not partitioned ({@code null} otherwise). */
+    private record BaseCopy(String sql, String file) {}
+
+    private BaseCopy constructWriteQuery(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs, String querySql) {
         var batches = writeTask.bucket().batches();
         String partitionByClause = getClause(inputs.partitionBy().toArray(String[]::new), ", PARTITION_BY(%s)");
         // Last format
         var outputFormat = batches.isEmpty() ? "" : batches.get(batches.size() - 1).format();
         String fullFilePath;
+        String file = null;
         if (partitionByClause.isEmpty()) {
             String uniqueFileName = "dd_" + UUID.randomUUID() + "." + outputFormat;
             fullFilePath = this.outputPath + "/" + uniqueFileName;
+            file = fullFilePath;
         } else {
             fullFilePath = this.outputPath;
         }
 
-        var querySql = constructSourceRelation(writeTask, inputs);
-
-        String compressionClause = parquetCompression != null && "parquet".equalsIgnoreCase(outputFormat)
-                ? ", COMPRESSION %s".formatted(parquetCompression) : "";
+        String compressionClause = compressionClause(outputFormat);
 
         // Build SQL
         // https://duckdb.org/docs/stable/sql/statements/copy
@@ -548,7 +583,28 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     TO '%s'
                     (FORMAT %s%s %s, RETURN_FILES, APPEND);
                 """.formatted(querySql, fullFilePath, outputFormat, compressionClause, partitionByClause);
-        return sql;
+        return new BaseCopy(sql, file);
+    }
+
+    private String compressionClause(String outputFormat) {
+        return parquetCompression != null && "parquet".equalsIgnoreCase(outputFormat)
+                ? ", COMPRESSION %s".formatted(parquetCompression) : "";
+    }
+
+    /**
+     * The COPY that writes {@code sidecar}'s rows for this batch: its query over {@code baseRelation}
+     * (the batch's rows as the base files are written from them) as {@code __base}, its columns cast
+     * by name to its table's types, to one new Parquet file directly under the table's data path; no
+     * file when the query returns no rows.
+     */
+    private String constructSidecarWriteQuery(WriteInputs inputs, SidecarTarget sidecar, String baseRelation, String file) {
+        String query = SidecarTables.writeQuery(withProjections(baseRelation, inputs.sidecarProjections()), sidecar.transformation(), sidecar.columns());
+        return """
+                COPY
+                    (%s)
+                    TO '%s'
+                    (FORMAT parquet%s, RETURN_FILES, WRITE_EMPTY_FILE false);
+                """.formatted(query, file.replace("'", "''"), compressionClause("parquet"));
     }
 
     /**
@@ -558,7 +614,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * itself, so a reloaded value takes effect on the next batch.
      */
     protected void applyVariables(java.sql.Statement stmt) throws java.sql.SQLException {
-        var variables = postIngestionHandler.getVariables(queueId);
+        applyVariables(stmt, postIngestionHandler.getVariables(queueId));
+    }
+
+    /** Sets {@code variables}, read once for the whole write so all its statements see the same values. */
+    private void applyVariables(java.sql.Statement stmt, Map<String, String> variables) throws java.sql.SQLException {
         if (variables.isEmpty()) {
             return;
         }
@@ -569,34 +629,262 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 queueId, variables.size(), variables.keySet());
     }
 
+    /**
+     * Writes the batch: the base files, and each sidecar's file, each by its own COPY on its own
+     * connection, all in parallel.
+     *
+     * <p>With sidecars, the batch's rows (the input files with the transformation and partition
+     * projections applied) are first stored once in an in-memory table, which every COPY then reads:
+     * so the base and each sidecar see the same rows even when the transformation is not
+     * deterministic ({@code now()}, {@code random()}), and the input is read and transformed once.
+     * The table is dropped when the write ends. Without sidecars the base is written straight from the
+     * input files, as before.
+     *
+     * <p>If any COPY fails, the others are cancelled, the files they wrote are deleted where they are
+     * local (otherwise counted as orphans), and the first failure is thrown; nothing has been
+     * registered, so the batch may be written again.
+     */
     private IngestionResult tryWrite(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs,
                                      java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql) throws Exception {
-        var sql = constructWriteQuery(writeTask, inputs);
-        lastAttemptSql.set(sql);
-        logger.debug("Executing COPY SQL: {}", sql);
+        Map<String, String> variables = postIngestionHandler.getVariables(queueId);
+        String source = constructSourceRelation(writeTask, inputs);
+        String staged = inputs.sidecars().isEmpty() ? null
+                : "memory.main.\"__dd_batch_" + UUID.randomUUID().toString().replace('-', '_') + "\"";
+        String stage = staged == null ? null : "CREATE TABLE %s AS %s".formatted(staged, source);
+        String baseRelation = staged == null ? source : "SELECT * FROM " + staged;
+        BaseCopy baseCopy = constructWriteQuery(writeTask, inputs, baseRelation);
+        var sql = baseCopy.sql();
+        lastAttemptSql.set(stage == null ? sql : stage + ";\n" + sql);
+        logger.debug("Executing COPY SQL: {}", lastAttemptSql.get());
+        Map<String, SidecarCopy> sidecarCopies = new LinkedHashMap<>();
+        for (SidecarTarget sidecar : inputs.sidecars()) {
+            String file = sidecar.path() + "/dd_" + UUID.randomUUID() + ".parquet";
+            sidecarCopies.put(sidecar.table(),
+                    new SidecarCopy(constructSidecarWriteQuery(inputs, sidecar, baseRelation, file), file));
+        }
+
+        // Every COPY's statement, so cancelling the write, or one COPY failing, cancels them all.
+        var statements = new java.util.concurrent.CopyOnWriteArrayList<java.sql.Statement>();
+        var aborted = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable cancelAll = () -> statements.forEach(stmt -> {
+            try {
+                stmt.cancel();
+            } catch (Exception e) {
+                // Ignore cancellation errors
+            }
+        });
+        // Sidecar COPYs still queued for a pool thread have no statement to cancel: cancelling the
+        // write, or a COPY failing, marks them skipped so the writer does not wait for a thread.
+        Map<String, java.util.concurrent.atomic.AtomicInteger> taskStates = new LinkedHashMap<>();
+        sidecarCopies.keySet().forEach(table -> taskStates.put(table, new java.util.concurrent.atomic.AtomicInteger(QUEUED)));
+        Runnable skipQueued = () -> taskStates.values().forEach(state -> state.compareAndSet(QUEUED, SKIPPED));
+        boolean cancelHookSet = writeTask.setCancelHook(() -> {
+            aborted.set(true);
+            skipQueued.run();
+            cancelAll.run();
+        });
+        // If cancel was already called, don't execute the query
+        if (!cancelHookSet) {
+            throw new IllegalStateException("Write task was cancelled");
+        }
+
+        try {
+            if (stage != null) {
+                stage(writeTask, stage, statements, variables);
+            }
+            return copyAll(writeTask, baseCopy, sidecarCopies, taskStates, statements, aborted,
+                    () -> { skipQueued.run(); cancelAll.run(); }, lastAttemptSql, variables);
+        } finally {
+            if (staged != null) {
+                try (var conn = ConnectionPool.getConnection(); var stmt = conn.createStatement()) {
+                    stmt.execute("DROP TABLE IF EXISTS " + staged);
+                } catch (Exception e) {
+                    logger.warn("Queue '{}': could not drop the batch's staging table {}", queueId, staged, e);
+                }
+            }
+        }
+    }
+
+    private static final int QUEUED = 0, STARTED = 1, SKIPPED = 2;
+
+    /** A sidecar's COPY and the one file it writes, if its query returns rows. */
+    private record SidecarCopy(String sql, String file) {}
+
+    /**
+     * Runs the base COPY on this thread, the queue's writer, and every sidecar COPY in parallel with
+     * it; see {@link #tryWrite}.
+     */
+    private IngestionResult copyAll(WriteTask<String, IngestionResult> writeTask, BaseCopy baseCopy,
+                                    Map<String, SidecarCopy> sidecarCopies,
+                                    Map<String, java.util.concurrent.atomic.AtomicInteger> taskStates,
+                                    List<java.sql.Statement> statements, java.util.concurrent.atomic.AtomicBoolean aborted,
+                                    Runnable cancelAll, java.util.concurrent.atomic.AtomicReference<String> lastAttemptSql,
+                                    Map<String, String> variables)
+            throws Exception {
+        String sql = baseCopy.sql();
+        // The failure that came first, not the cancellations it caused in the other COPYs; its
+        // statement is the one the failure log shows.
+        var firstFailure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Map<String, java.util.concurrent.CompletableFuture<CopyOutput>> sidecars = new LinkedHashMap<>();
+        java.util.function.BiConsumer<Throwable, String> onFailure = (t, failedSql) -> {
+            if (firstFailure.compareAndSet(null, t instanceof java.util.concurrent.CompletionException
+                    && t.getCause() != null ? t.getCause() : t)) {
+                aborted.set(true);
+                cancelAll.run(); // also marks queued sidecar COPYs skipped
+                if (!failedSql.equals(sql)) {
+                    lastAttemptSql.set(failedSql);
+                }
+            }
+        };
+        sidecarCopies.forEach((table, copy) -> sidecars.put(table, java.util.concurrent.CompletableFuture
+                .supplyAsync(() -> {
+                    if (!taskStates.get(table).compareAndSet(QUEUED, STARTED)) {
+                        return new CopyOutput(0, List.of()); // skipped: the write already failed
+                    }
+                    return copy(writeTask, copy.sql(), statements, aborted, variables);
+                }, SIDECAR_COPY_EXECUTOR)
+                .whenComplete((output, t) -> {
+                    if (t != null) onFailure.accept(t, copy.sql());
+                })));
+
+        List<Throwable> others = new ArrayList<>();
+        List<String> written = new ArrayList<>();
+        CopyOutput baseOutput = null;
+        try {
+            baseOutput = copy(writeTask, sql, statements, aborted, variables);
+            written.addAll(baseOutput.files());
+        } catch (CopyNotStarted e) {
+            onFailure.accept(e, sql); // the first failure only if the write itself was cancelled
+        } catch (RuntimeException | Error e) {
+            onFailure.accept(e, sql);
+            others.add(e);
+            // Partitioned output goes to files DuckDB names; only the unpartitioned file is known.
+            if (baseCopy.file() != null) {
+                partialFile(baseCopy.file(), written);
+            } else {
+                logger.warn("Queue '{}': a failed partitioned COPY may have left partial files under {}; "
+                        + "reclaim them with ducklake_delete_orphaned_files", queueId, outputPath);
+            }
+        }
+        for (var entry : sidecars.entrySet()) {
+            if (taskStates.get(entry.getKey()).get() == SKIPPED) {
+                continue; // never started, and never will: nothing written
+            }
+            try {
+                written.addAll(entry.getValue().join().files());
+            } catch (java.util.concurrent.CompletionException e) {
+                Throwable cause = e.getCause() == null ? e : e.getCause();
+                if (!(cause instanceof CopyNotStarted)) {
+                    others.add(cause);
+                    partialFile(sidecarCopies.get(entry.getKey()).file(), written);
+                }
+            }
+        }
+        Throwable failure = firstFailure.get();
+        if (failure != null) {
+            discardWritten(written, "the batch's write failed");
+            Throwable primary = failure instanceof UncheckedSql sqlFailure ? sqlFailure.getCause() : failure;
+            for (Throwable other : others) {
+                if (other != failure) {
+                    primary.addSuppressed(other instanceof UncheckedSql sqlOther ? sqlOther.getCause() : other);
+                }
+            }
+            if (primary instanceof Exception exception) {
+                throw exception;
+            }
+            throw (Error) primary;
+        }
+
+        Map<String, List<String>> sidecarFiles = new LinkedHashMap<>();
+        sidecars.forEach((table, future) -> {
+            CopyOutput output = future.join();
+            if (output.rows() > 0) {
+                sidecarFiles.put(table, output.files());
+            } else {
+                discardWritten(output.files(), "sidecar '" + table + "' returned no rows");
+            }
+        });
+        logger.debug("COPY completed for queue '{}': {} rows written, {} files: {}; sidecar files: {}",
+                queueId, baseOutput.rows(), baseOutput.files().size(), baseOutput.files(), sidecarFiles);
+        return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
+                writeTask.bucket().getProducerMaxBatchId(),
+                baseOutput.rows(),
+                baseOutput.files(), sql, sidecarFiles);
+    }
+
+    /**
+     * A COPY that failed or was cancelled midway may have left {@code file} behind: a local one is
+     * added to {@code written} to be deleted; on object storage its existence is not checked, so it
+     * is logged for {@code ducklake_delete_orphaned_files}.
+     */
+    private void partialFile(String file, List<String> written) {
+        String local = localPath(file);
+        if (local == null) {
+            logger.warn("Queue '{}': a failed COPY may have left a partial file at {}; reclaim it with "
+                    + "ducklake_delete_orphaned_files", queueId, file);
+        } else if (Files.exists(Path.of(local))) {
+            written.add(file);
+        }
+    }
+
+    /** A COPY that did not run because the write was cancelled or another of its COPYs failed first. */
+    private static final class CopyNotStarted extends IllegalStateException {
+        CopyNotStarted() {
+            super("Write task was cancelled");
+        }
+    }
+
+    /** A COPY's {@link java.sql.SQLException}, carried out of the task that ran it. */
+    private static final class UncheckedSql extends RuntimeException {
+        UncheckedSql(java.sql.SQLException cause) {
+            super(cause);
+        }
+
+        @Override
+        public synchronized java.sql.SQLException getCause() {
+            return (java.sql.SQLException) super.getCause();
+        }
+    }
+
+    /** Stores the batch's rows in the staging table, with the queue's variables set. */
+    private void stage(WriteTask<String, IngestionResult> writeTask, String sql, List<java.sql.Statement> statements,
+                       Map<String, String> variables) throws java.sql.SQLException {
+        try (var conn = ConnectionPool.getConnection();
+             var stmt = conn.createStatement()) {
+            statements.add(stmt);
+            if (writeTask.isCancel()) {
+                throw new IllegalStateException("Write task was cancelled");
+            }
+            applyVariables(stmt, variables);
+            stmt.execute(sql);
+        }
+    }
+
+    /**
+     * Runs one COPY of the write on a connection of its own, with the queue's variables set, and
+     * reads a COPY's RETURN_FILES result. {@code aborted} is set once the write is cancelled or
+     * another of its statements failed.
+     */
+    private CopyOutput copy(WriteTask<String, IngestionResult> writeTask, String sql,
+                            List<java.sql.Statement> statements, java.util.concurrent.atomic.AtomicBoolean aborted,
+                            Map<String, String> variables) {
         List<String> files = new ArrayList<>();
         long count = 0;
         try (var conn = ConnectionPool.getConnection();
              var stmt = conn.createStatement()) {
+            statements.add(stmt);
+            if (writeTask.isCancel() || aborted.get()) {
+                throw new CopyNotStarted();
+            }
 
             // The queue's session variables, before anything reads the relation: the transformation
             // inside it, and so the COPY, may reference them with getvariable(). ConnectionPool hands
             // out a duplicate per use, so these are scoped to this write and cannot leak into another
             // queue's connection.
-            applyVariables(stmt);
-
-            // Set up cancellation hook
-            var cancelHookSet = writeTask.setCancelHook(() -> {
-                try {
-                    stmt.cancel();
-                } catch (Exception e) {
-                    // Ignore cancellation errors
-                }
-            });
-
-            // If cancel was already called, don't execute the query
-            if (!cancelHookSet) {
-                throw new IllegalStateException("Write task was cancelled");
+            applyVariables(stmt, variables);
+            // Again: a cancel that came after the check above, before execute, would be lost.
+            if (writeTask.isCancel() || aborted.get()) {
+                throw new CopyNotStarted();
             }
 
             // Execute the query using our statement so the cancel hook works
@@ -612,12 +900,29 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                     }
                 }
             }
+        } catch (java.sql.SQLException e) {
+            throw new UncheckedSql(e);
         }
-        logger.debug("COPY completed for queue '{}': {} rows written, {} files: {}",
-                queueId, count, files.size(), files);
-        return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
-                writeTask.bucket().getProducerMaxBatchId(),
-                count,
-                files, sql);
+        return new CopyOutput(count, files);
+    }
+
+    /**
+     * Deletes files written but not to be registered, where they are local; counts the rest as
+     * orphans for {@code ducklake_delete_orphaned_files} to reclaim.
+     */
+    private void discardWritten(List<String> files, String reason) {
+        List<String> left = new ArrayList<>();
+        for (String file : files) {
+            if (deleteLocalFile(file)) {
+                orphanFilesDeleted.increment();
+            } else {
+                left.add(file);
+            }
+        }
+        if (!left.isEmpty()) {
+            orphanFilesLeft.add(left.size());
+            logger.warn("Queue '{}': {}; left {} unregistered output file(s), reclaim them with "
+                    + "ducklake_delete_orphaned_files: {}", queueId, reason, left.size(), left);
+        }
     }
 }

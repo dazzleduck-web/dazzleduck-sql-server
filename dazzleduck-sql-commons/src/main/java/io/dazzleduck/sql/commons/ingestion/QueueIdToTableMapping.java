@@ -39,6 +39,8 @@ import java.util.Map;
  *                      column {@code "user_id"}, a map/struct field access
  *                      {@code "resource['user_id']"}, or {@code "claims['user_id']"} when the batch
  *                      carries a claims column; required when {@code numPartitions > 1}, ignored otherwise
+ * @param sidecars      tables written beside the target table from every batch and registered in the
+ *                      same transaction (see {@link Sidecar}); empty when none are configured
  */
 public record QueueIdToTableMapping(
         String ingestionQueue,
@@ -54,13 +56,15 @@ public record QueueIdToTableMapping(
         boolean extractClaims,
         int numPartitions,
         String partitionExpression,
-        IngestionVariables variables) {
+        IngestionVariables variables,
+        List<Sidecar> sidecars) {
 
     /** Validates invariants on every construction path. */
     public QueueIdToTableMapping {
         if (variables == null) {
             variables = IngestionVariables.NONE;
         }
+        sidecars = sidecars == null ? List.of() : List.copyOf(sidecars);
         if ((view == null) != (inputTable == null)) {
             throw new IllegalArgumentException(
                     "Queue '%s': 'view' and 'input_table' must both be provided or both omitted"
@@ -82,6 +86,16 @@ public record QueueIdToTableMapping(
                             .formatted(ingestionQueue));
         }
         rejectWatermarkKeys(ingestionQueue, additionalParameters);
+        Sidecar.validate(ingestionQueue, table, sidecars);
+    }
+
+    /** A mapping without sidecars. */
+    public QueueIdToTableMapping(String ingestionQueue, String outputPath, String catalog, String schema,
+                                 String table, Map<String, String> additionalParameters, String transformation,
+                                 String view, String inputTable, String inputSchema, boolean extractClaims,
+                                 int numPartitions, String partitionExpression, IngestionVariables variables) {
+        this(ingestionQueue, outputPath, catalog, schema, table, additionalParameters, transformation, view,
+                inputTable, inputSchema, extractClaims, numPartitions, partitionExpression, variables, List.of());
     }
 
     /**
@@ -136,27 +150,34 @@ public record QueueIdToTableMapping(
     public QueueIdToTableMapping withInputSchema(String inputSchema) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables);
+                numPartitions, partitionExpression, variables, sidecars);
     }
 
     /** Returns a copy of this mapping with {@code extractClaims} set. */
     public QueueIdToTableMapping withExtractClaims(boolean extractClaims) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables);
+                numPartitions, partitionExpression, variables, sidecars);
     }
 
     /** Returns a copy of this mapping with the partitioning fields set. */
     public QueueIdToTableMapping withPartitioning(int numPartitions, String partitionExpression) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables);
+                numPartitions, partitionExpression, variables, sidecars);
     }
 
     /** Returns a copy of this mapping with its session variables set. */
     public QueueIdToTableMapping withVariables(IngestionVariables variables) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables);
+                numPartitions, partitionExpression, variables, sidecars);
+    }
+
+    /** Returns a copy of this mapping with its sidecars set. */
+    public QueueIdToTableMapping withSidecars(List<Sidecar> sidecars) {
+        return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
+                additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
+                numPartitions, partitionExpression, variables, sidecars);
     }
 }

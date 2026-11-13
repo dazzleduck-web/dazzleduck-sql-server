@@ -1,6 +1,17 @@
 # Sidecar Views — Design Specification
 
-Status: **proposed.** Replaces the producer-side `SidecarRows` mechanism specified in
+Status: **phase 1 implemented: the direct path** (*Without an uploader*) for queues of the static
+provider, with sidecar queries given as `transformation`. Not built yet: local staging and the
+uploader, `transformation_view` and its reload check, partitioned sidecar tables, and dynamic
+queues. Two findings from building it: startup also rejects sidecar columns of a type DuckLake cannot
+register from Parquet (`HUGEINT`, `UHUGEINT`, `TIMETZ`, at any depth), and a sidecar whose query
+returns no rows for a batch writes no file. The batch's transformed rows are stored once in an in-memory
+DuckDB table that the base and every sidecar `COPY` read, so they agree even for a non-deterministic
+transformation (the spec's direct path re-derived them per sidecar); a local destination is written
+the same way. Without an `input_schema`, the startup check runs over the target table's columns, not
+the transformation's output. User documentation is in the README under *Sidecars*.
+
+Replaces the producer-side `SidecarRows` mechanism specified in
 `doc/ATTRIBUTE_TYPE_REGISTRY_SPEC.md` with sidecars defined as SQL views over the rows being
 ingested. Measured with the harness in `tools/sidecar-bench`; the numbers below come from it.
 

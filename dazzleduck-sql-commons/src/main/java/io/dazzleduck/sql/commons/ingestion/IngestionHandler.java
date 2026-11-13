@@ -21,6 +21,13 @@ public interface IngestionHandler {
      */
     default java.util.Map<String, String> getVariables(String queueId) { return java.util.Map.of(); }
 
+    /**
+     * Tables written beside the queue's table from every batch (see {@link Sidecar}), resolved for
+     * writing. Each is written from the batch's rows as {@code __base}, in parallel with the base
+     * files, and registered with them. Read on every write; empty when none are configured.
+     */
+    default java.util.List<SidecarTarget> getSidecars(String queueId) { return java.util.List.of(); }
+
     String[] getPartitionBy(String queueId);
 
     /**

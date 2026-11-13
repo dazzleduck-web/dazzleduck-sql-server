@@ -543,6 +543,7 @@ configure `ingestion_queue_table_mapping` entries:
 | `transformation` | No | SQL `SELECT` referencing placeholder table `__this`; omit to write all columns as-is |
 | `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
 | `additional_parameters` | No | Reserved for per-queue extensions; no key is read today. Ingestion watermarks were removed, so a mapping with a `watermark_` key fails to load |
+| `sidecars` | No | Tables written beside the target table from every batch, in the same transaction (see [Sidecars](#sidecars)) |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
@@ -660,6 +661,60 @@ bump. The relation may be a table in the registry file itself, which the startup
 `ATTACH` on the ingestion connection, since the registry loader's own attachment is private.
 A SQLite column arrives as `VARCHAR`, so an expiration is cast for the comparison; text that will
 not cast is an error, not a row that never expires.
+
+### Sidecars
+
+A queue may declare **sidecars**: tables beside its target table, each filled from every batch by a
+query over the batch's rows, exposed as `__base`. A sidecar's files are registered in the same
+DuckLake transaction as the batch's own, so a batch and its sidecars commit or roll back together.
+
+```hocon
+ingestion_queue_table_mapping = [{
+    ingestion_queue = "log"
+    catalog = "loglake", schema = "main", table = "log"
+    transformation = "SELECT *, date_trunc('minute', ts) AS minute FROM __this"
+
+    sidecars = [
+        { table = "log_minute_counts"
+          transformation = "SELECT minute, service, severity, count(*) AS n FROM __base GROUP BY ALL" }
+        { table = "log_errors"
+          transformation = "SELECT ts, service, body FROM __base WHERE severity = 'ERROR'" }
+    ]
+}]
+```
+
+- **`__base`** is the batch's rows as the target table gets them: after the queue's `transformation`
+  and the table's partition projections (for example the `bucket` column of a `bucket(N, col)`
+  partitioning). The queue's [ingestion variables](#ingestion-variables) apply, so a sidecar can read
+  `getvariable('name')`.
+- **Tables are created and checked at startup.** A sidecar table lives in the queue's catalog and
+  schema. Startup runs each sidecar's query over an empty `__base`: a missing table is created with
+  its columns, and an existing table whose columns differ in name or type fails startup, naming the
+  table and the column. To change a sidecar's columns, change the table first (for example
+  `ALTER TABLE ... ADD COLUMN`), then the query. The empty `__base` has the target table's columns,
+  since a queue of this provider declares no input schema: a sidecar must read only columns the
+  table has, and the transformation must produce every column a sidecar reads.
+- **Every file is written with the table's column types,** selected by name and cast. A value that
+  cannot be cast fails the batch.
+- **Some types cannot be used.** Parquet stores `HUGEINT` and `UHUGEINT` as `DOUBLE`, and `TIMETZ` is
+  not mapped back, so DuckLake would reject every file. A sidecar column of one of those types, at
+  any depth, fails startup. `sum()` over `BIGINT` returns `HUGEINT`, so cast it:
+  `sum(bytes)::BIGINT AS bytes`.
+- **How a batch is written.** The batch's rows, after the transformation, are stored once in an
+  in-memory DuckDB table, so the base and every sidecar read the same rows even when the
+  transformation is not deterministic (`now()`, `random()`). The base files and each sidecar's file
+  are then written by parallel `COPY`s from it, each sidecar straight to its table's data path. The
+  table holds one batch and is dropped when the write ends; DuckDB spills it to its temp directory
+  when it does not fit in memory. A queue without sidecars writes as before, with no extra step.
+- **Failures.** If any `COPY` fails, the others are cancelled and the batch fails: the files they
+  wrote are deleted where they are local, and left for `ducklake_delete_orphaned_files` on object
+  storage. A sidecar whose query returns no rows for a batch writes and registers no file.
+- **A sidecar table dropped under a running queue** is created again after the next failed batch. One
+  partitioned under a running queue fails that queue's batches with the reason until it is unpartitioned.
+
+Not supported yet: partitioned sidecar tables, a sidecar query taken from a view
+(`transformation_view`), and sidecars on queues of the dynamic SQLite provider. The design, including
+local staging with an uploader for object storage, is in `doc/SIDECAR_VIEWS_SPEC.md`.
 
 ### Registration conflicts
 

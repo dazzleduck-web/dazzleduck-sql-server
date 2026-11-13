@@ -10,9 +10,9 @@ import java.sql.Statement;
 import java.util.List;
 
 /**
- * Post-ingestion task that adds newly ingested files to a DuckLake table.
- * This task executes the ducklake_add_data_files procedure for each ingested file
- * within a transaction to ensure atomicity.
+ * Post-ingestion task that adds newly ingested files to a DuckLake table, and each sidecar's files
+ * to its table. This task executes the ducklake_add_data_files procedure for each file within one
+ * transaction, so a batch and its sidecars commit or roll back together.
  */
 public class DuckLakePostIngestionTask implements PostIngestionTask {
 
@@ -59,15 +59,16 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
 
     @Override
     public void execute() {
-        List<String> files = ingestionResult.filesCreated();
-        if (files == null || files.isEmpty()) {
+        List<String> files = ingestionResult.allFiles();
+        if (files.isEmpty()) {
             logger.debug("No files to add to DuckLake for catalog={}, table={}", catalogName, tableName);
             return;
         }
 
         try {
             addFilesInTransaction(files);
-            logger.info("Successfully added {} files to DuckLake table {}.{}.{}", files.size(), catalogName, schemaName, tableName);
+            logger.info("Successfully added {} files to DuckLake table {}.{}.{}{}", files.size(), catalogName, schemaName, tableName,
+                    ingestionResult.sidecarFiles().isEmpty() ? "" : " and its sidecars " + ingestionResult.sidecarFiles().keySet());
         } catch (FilesNotRegisteredException e) {
             logger.error("DuckLake table {}.{}.{} rejected {} files", catalogName, schemaName, tableName, files.size(), e);
             throw e;
@@ -136,14 +137,15 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     }
 
     /**
-     * Adds files to DuckLake table within a transaction.
-     * All files are added atomically - if any file fails, all changes are rolled back.
+     * Adds the batch's files to the DuckLake table, and each sidecar's files to its table, within one
+     * transaction: if any file fails, all changes are rolled back.
      */
     private void addFilesOnce(List<String> files) throws SQLException {
-        List<String> queries = files.stream()
-                .map(file -> ADD_FILE_QUERY.formatted(
-                        escapeLiteral(catalogName), escapeLiteral(tableName), escapeLiteral(file), escapeLiteral(schemaName)))
-                .toList();
+        List<String> queries = new java.util.ArrayList<>();
+        List<String> baseFiles = ingestionResult.filesCreated() == null ? List.of() : ingestionResult.filesCreated();
+        baseFiles.forEach(file -> queries.add(addFileQuery(tableName, file)));
+        ingestionResult.sidecarFiles().forEach((sidecarTable, sidecarFiles) ->
+                sidecarFiles.forEach(file -> queries.add(addFileQuery(sidecarTable, file))));
         try (Connection conn = ConnectionPool.getConnection()) {
             executeInTxn(conn, queries, files, beforeCommit);
         }
@@ -211,6 +213,11 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
         } catch (SQLException e) {
             failure.addSuppressed(e);
         }
+    }
+
+    private String addFileQuery(String table, String file) {
+        return ADD_FILE_QUERY.formatted(escapeLiteral(catalogName), escapeLiteral(table), escapeLiteral(file),
+                escapeLiteral(schemaName));
     }
 
     private static String escapeLiteral(String value) {
