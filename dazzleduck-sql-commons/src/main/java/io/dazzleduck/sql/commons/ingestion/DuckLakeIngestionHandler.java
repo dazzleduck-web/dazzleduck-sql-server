@@ -497,10 +497,11 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                     .formatted(mapping.ingestionQueue());
         } else {
             try {
-                int created = SidecarTables.ensure(mapping, transformation.sql(), partitionProjections, variables);
+                SidecarTables.Ensured ensured = SidecarTables.ensure(mapping, transformation.sql(), partitionProjections, variables);
+                int created = ensured.created();
                 List<SidecarTarget> targets = new ArrayList<>();
                 for (Sidecar sidecar : mapping.sidecars()) {
-                    targets.add(resolveSidecar(mapping, sidecar));
+                    targets.add(resolveSidecar(mapping, sidecar, ensured.produced().get(sidecar.table())));
                 }
                 if (previous != null && previous.sidecarError() != null) {
                     logger.info("Queue '{}': its sidecar tables can be written again", mapping.ingestionQueue());
@@ -521,8 +522,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * Resolves one sidecar against its table, for writing. {@link SidecarTables#ensure}, run just
      * before, has checked the table exists, matches and is not partitioned.
      */
-    private static SidecarTarget resolveSidecar(QueueIdToTableMapping mapping, Sidecar sidecar) {
-        return SidecarTables.resolve(mapping, sidecar, fetchPath(mapping.catalog(), mapping.schema(), sidecar.table()));
+    private static SidecarTarget resolveSidecar(QueueIdToTableMapping mapping, Sidecar sidecar, java.util.Set<String> produced) {
+        return SidecarTables.resolve(mapping, sidecar, fetchPath(mapping.catalog(), mapping.schema(), sidecar.table()), produced);
     }
 
     /** Convenience overload that fetches schema change ID itself (used at construction time). */

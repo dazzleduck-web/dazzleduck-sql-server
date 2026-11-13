@@ -1,6 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * A sidecar resolved against its DuckLake table, as a write needs it: where its files go and the
@@ -10,13 +11,17 @@ import java.util.List;
  * @param transformation the sidecar's query over {@code __base}
  * @param path           the table's data path; files are written directly under it
  * @param columns        the table's columns, in table order
+ * @param produced       the names, in lower case, of the columns the query produces; a table column
+ *                       not among them is written as NULL
  */
-public record SidecarTarget(String table, String transformation, String path, List<Column> columns) {
+public record SidecarTarget(String table, String transformation, String path, List<Column> columns,
+                            Set<String> produced) {
 
     /** A table column: its name and DuckDB type, e.g. {@code BIGINT} or {@code STRUCT(a INTEGER)}. */
     public record Column(String name, String type) {}
 
     public SidecarTarget {
         columns = List.copyOf(columns);
+        produced = Set.copyOf(produced);
     }
 }

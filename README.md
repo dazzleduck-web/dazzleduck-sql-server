@@ -689,9 +689,11 @@ ingestion_queue_table_mapping = [{
   `getvariable('name')`.
 - **Tables are created and checked at startup.** A sidecar table lives in the queue's catalog and
   schema. Startup runs each sidecar's query over an empty `__base`: a missing table is created with
-  its columns, and an existing table whose columns differ in name or type fails startup, naming the
-  table and the column. To change a sidecar's columns, change the table first (for example
-  `ALTER TABLE ... ADD COLUMN`), then the query. The empty `__base` has the target table's columns,
+  its columns. An existing table fails startup, naming the table and the column, when the query
+  produces a column the table lacks or a column of another type. A table column the query does not
+  produce is written as NULL, so to add a column, add it to the table first
+  (`ALTER TABLE ... ADD COLUMN`; the queue keeps ingesting, writing it as NULL), then to the query
+  (a restart, for a `transformation` in the config). The empty `__base` has the target table's columns,
   since a queue of this provider declares no input schema: a sidecar must read only columns the
   table has, and the transformation must produce every column a sidecar reads.
 - **Every file is written with the table's column types,** selected by name and cast. A value that

@@ -57,12 +57,13 @@ final class SidecarTables {
      *
      * @param transformation       the queue's resolved transformation, or {@code null}
      * @param partitionProjections the base table's partition projections, as a batch adds them
-     * @return how many sidecar tables this call created
+     * @return how many sidecar tables this call created, and the columns each sidecar's query
+     *         produces (lower case), by table
      */
-    static int ensure(QueueIdToTableMapping mapping, String transformation, String[] partitionProjections,
-                      Map<String, String> variables) {
+    static Ensured ensure(QueueIdToTableMapping mapping, String transformation, String[] partitionProjections,
+                          Map<String, String> variables) {
         if (mapping.sidecars().isEmpty()) {
-            return 0;
+            return new Ensured(0, Map.of());
         }
         // A statement per step: the driver closes a statement whose execution failed.
         try (DuckDBConnection conn = ConnectionPool.getConnection()) {
@@ -74,17 +75,21 @@ final class SidecarTables {
             // (ENUM to VARCHAR, TIMESTAMP_S to TIMESTAMP, ...): check them over the same round trip.
             Path roundTrip = Files.createTempFile("dd_sidecar_check_", ".parquet");
             int created = 0;
+            Map<String, java.util.Set<String>> produced = new LinkedHashMap<>();
             try {
                 execute(conn, "COPY (SELECT * FROM (%s) LIMIT 0) TO '%s' (FORMAT parquet)"
                         .formatted(relation, roundTrip.toString().replace("'", "''")));
                 String base = "SELECT * FROM read_parquet('%s', hive_partitioning = false)"
                         .formatted(roundTrip.toString().replace("'", "''"));
                 for (Sidecar sidecar : mapping.sidecars()) {
-                    if (ensure(conn, mapping, sidecar, base)) {
+                    List<SidecarTarget.Column> derived = new ArrayList<>();
+                    if (ensure(conn, mapping, sidecar, base, derived)) {
                         created++;
                     }
+                    produced.put(sidecar.table(), derived.stream()
+                            .map(c -> c.name().toLowerCase(Locale.ROOT)).collect(Collectors.toSet()));
                 }
-                return created;
+                return new Ensured(created, produced);
             } finally {
                 execute(conn, "DROP TABLE IF EXISTS " + INPUT_RELATION);
                 Files.deleteIfExists(roundTrip);
@@ -97,13 +102,20 @@ final class SidecarTables {
         }
     }
 
-    /** Creates or checks one sidecar's table; returns whether this call created it. */
-    private static boolean ensure(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar, String base)
-            throws SQLException {
+    /** What {@link #ensure} found: tables it created, and the columns each sidecar's query produces. */
+    record Ensured(int created, Map<String, java.util.Set<String>> produced) {}
+
+    /**
+     * Creates or checks one sidecar's table; returns whether this call created it, and adds the
+     * query's columns to {@code derivedOut}.
+     */
+    private static boolean ensure(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar, String base,
+                                  List<SidecarTarget.Column> derivedOut) throws SQLException {
         boolean created = false;
         List<SidecarTarget.Column> derived;
         try {
             derived = describe(conn, writeQuery(base, sidecar.transformation()));
+            derivedOut.addAll(derived);
         } catch (SQLException e) {
             throw new IllegalArgumentException("Queue '%s': sidecar '%s' transformation does not run over the queue's rows: %s"
                     .formatted(mapping.ingestionQueue(), sidecar.table(), e.getMessage()), e);
@@ -157,7 +169,7 @@ final class SidecarTables {
     }
 
     /** Resolves {@code sidecar} for writing: its table's data path and columns. */
-    static SidecarTarget resolve(QueueIdToTableMapping mapping, Sidecar sidecar, String path) {
+    static SidecarTarget resolve(QueueIdToTableMapping mapping, Sidecar sidecar, String path, java.util.Set<String> produced) {
         try (DuckDBConnection conn = ConnectionPool.getConnection()) {
             List<SidecarTarget.Column> columns = tableColumns(conn, mapping.catalog(), mapping.schema(), sidecar.table());
             if (columns.isEmpty() || path == null) {
@@ -165,7 +177,7 @@ final class SidecarTables {
                         .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table())));
             }
             createLocalDirectory(path);
-            return new SidecarTarget(sidecar.table(), sidecar.transformation(), path, columns);
+            return new SidecarTarget(sidecar.table(), sidecar.transformation(), path, columns, produced);
         } catch (SQLException e) {
             throw new IllegalStateException("Queue '%s': could not read sidecar table %s: %s"
                     .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table()), e.getMessage()), e);
@@ -192,7 +204,8 @@ final class SidecarTables {
     /**
      * The first difference between a sidecar query's columns and its table's, by name (in any case)
      * and type; {@code null} when they match. Column order does not matter: files are written with
-     * the table's columns, by name.
+     * the table's columns, by name. A table column the query does not produce is not a difference:
+     * it is written as NULL, so a column can be added to the table before the query produces it.
      */
     static String mismatch(List<SidecarTarget.Column> derived, List<SidecarTarget.Column> table) {
         Map<String, SidecarTarget.Column> byName = new LinkedHashMap<>();
@@ -207,10 +220,6 @@ final class SidecarTables {
                         .formatted(existing.name(), existing.type(), column.type());
             }
         }
-        if (!byName.isEmpty()) {
-            SidecarTarget.Column extra = byName.values().iterator().next();
-            return "column '%s' is in the table but not in the transformation".formatted(extra.name());
-        }
         return null;
     }
 
@@ -219,16 +228,19 @@ final class SidecarTables {
      * columns selected by name in table order and cast to the table's types. With {@code columns}
      * null, the query's own columns.
      */
-    static String writeQuery(String base, String transformation, List<SidecarTarget.Column> columns) {
+    static String writeQuery(String base, String transformation, List<SidecarTarget.Column> columns,
+                             java.util.Set<String> produced) {
         String select = columns == null ? "*" : columns.stream()
-                .map(c -> "CAST(%1$s AS %2$s) AS %1$s".formatted(HeaderUtils.quoteIdentifier(c.name()), c.type()))
+                .map(c -> produced.contains(c.name().toLowerCase(Locale.ROOT))
+                        ? "CAST(%1$s AS %2$s) AS %1$s".formatted(HeaderUtils.quoteIdentifier(c.name()), c.type())
+                        : "CAST(NULL AS %2$s) AS %1$s".formatted(HeaderUtils.quoteIdentifier(c.name()), c.type()))
                 .collect(Collectors.joining(", "));
         return "WITH %s AS (%s) SELECT %s FROM (%s\n)".formatted(Sidecar.BASE, base, select,
                 ParquetIngestionQueue.embeddable(transformation));
     }
 
     private static String writeQuery(String base, String transformation) {
-        return writeQuery(base, transformation, null);
+        return writeQuery(base, transformation, null, null);
     }
 
     private static String emptyBase(DuckDBConnection conn, QueueIdToTableMapping mapping, String transformation,

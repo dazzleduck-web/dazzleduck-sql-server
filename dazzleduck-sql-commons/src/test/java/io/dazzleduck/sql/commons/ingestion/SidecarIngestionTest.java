@@ -110,11 +110,41 @@ class SidecarIngestionTest {
         assertTrue(e.getMessage().contains("category_counts") && e.getMessage().contains("'n' is INTEGER in the table but BIGINT"),
                 e.getMessage());
 
-        execute("CREATE TABLE %s.%s.ids (id BIGINT, extra VARCHAR)".formatted(CATALOG, SCHEMA));
+        execute("CREATE TABLE %s.%s.wide (n INTEGER)".formatted(CATALOG, SCHEMA));
         e = assertThrows(IllegalArgumentException.class, () -> handler("""
-                sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
+                sidecars = [{ table = "wide", transformation = "SELECT 1::INTEGER AS n, 'x' AS missing FROM __base" }]
                 """));
-        assertTrue(e.getMessage().contains("'extra' is in the table but not in the transformation"), e.getMessage());
+        assertTrue(e.getMessage().contains("'missing' VARCHAR is not in the table"), e.getMessage());
+    }
+
+    @Test
+    void aTableColumnTheQueryDoesNotProduceIsWrittenAsNull() throws Exception {
+        execute("CREATE TABLE %s.%s.ids (id BIGINT, note VARCHAR)".formatted(CATALOG, SCHEMA));
+        var handler = handler("""
+                sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+        }
+        assertEquals(100L, scalar("SELECT count(*) FROM %s.%s.ids WHERE note IS NULL".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aColumnAddedToTheSidecarTableUnderARunningQueueDoesNotStopIt() throws Exception {
+        // The README's way to change a sidecar's columns: change the table first, then the query.
+        var handler = handler("""
+                sidecars = [{ table = "ids", transformation = "SELECT id FROM __base" }]
+                """);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+            execute("ALTER TABLE %s.%s.ids ADD COLUMN note VARCHAR".formatted(CATALOG, SCHEMA));
+            handler.refreshNow(TABLE);
+            assertEquals(100, write(queue, scheduler, 1).rowCount(), "batches keep being written");
+        }
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.ids".formatted(CATALOG, SCHEMA)));
+        assertEquals(200L, scalar("SELECT count(*) FROM %s.%s.ids WHERE note IS NULL".formatted(CATALOG, SCHEMA)));
     }
 
     @Test

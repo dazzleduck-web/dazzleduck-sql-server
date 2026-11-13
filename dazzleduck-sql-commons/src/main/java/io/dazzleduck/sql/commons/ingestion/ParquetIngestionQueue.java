@@ -610,7 +610,8 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
      * types, to {@code file} in the staging directory; no file when the query returns no rows.
      */
     private String constructSidecarWriteQuery(WriteInputs inputs, SidecarTarget sidecar, String baseRelation, String file) {
-        String query = SidecarTables.writeQuery(withProjections(baseRelation, inputs.sidecarProjections()), sidecar.transformation(), sidecar.columns());
+        String query = SidecarTables.writeQuery(withProjections(baseRelation, inputs.sidecarProjections()), sidecar.transformation(),
+                sidecar.columns(), sidecar.produced());
         return """
                 COPY
                     (%s)
