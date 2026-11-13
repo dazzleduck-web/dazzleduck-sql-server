@@ -215,12 +215,6 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
     }
 
     @Override
-    public WatermarkSpec getWatermarkSpec(String queueId) {
-        QueueIdToTableMapping mapping = mappingFor(queueId);
-        return mapping == null ? null : WatermarkSpec.fromParameters(queueId, mapping.additionalParameters());
-    }
-
-    @Override
     public boolean extractClaims(String queueId) {
         QueueIdToTableMapping mapping = mappingFor(queueId);
         return mapping != null && mapping.extractClaims();
@@ -252,8 +246,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             logger.atDebug().log("No DuckLake mapping for queue '{}', skipping catalog registration", result.queueName());
             return PostIngestionTask.NOOP;
         }
-        return new DuckLakePostIngestionTask(result, mapping.catalog(), mapping.table(), mapping.schema(),
-                mapping.additionalParameters());
+        return new DuckLakePostIngestionTask(result, mapping.catalog(), mapping.table(), mapping.schema());
     }
 
     // -----------------------------------------------------------------------

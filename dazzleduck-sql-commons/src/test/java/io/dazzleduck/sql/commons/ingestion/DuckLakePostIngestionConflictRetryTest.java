@@ -113,7 +113,7 @@ class DuckLakePostIngestionConflictRetryTest {
 
     private void register(String file, Runnable beforeCommit) {
         var result = new IngestionResult("q", 1L, "app", Map.of(), 1L, List.of(file));
-        new DuckLakePostIngestionTask(result, CATALOG, "logs", "main", Map.of(), beforeCommit).execute();
+        new DuckLakePostIngestionTask(result, CATALOG, "logs", "main", beforeCommit).execute();
     }
 
     private static void execute(String sql) {

@@ -321,3 +321,8 @@ receiving rows.
 
 **Done when** no `watermark_*` key is accepted, the code, tests and docs listed above are gone, and
 the full test suite passes.
+
+**State.** Done. `DuckLakeInlining` and `DuckLakeInliningTest` were removed entirely, since the watermark
+tables were all they checked, and `doc/DUCKLAKE_NO_INLINING_SPEC.md` is marked superseded. The
+`DuckLakePostIngestionTask` constructor lost its `additionalParameters` argument, which only the
+watermark read.

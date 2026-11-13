@@ -1,9 +1,23 @@
 # DuckLake Data Inlining Must Be Off — Design Specification
 
-Status: **accepted; partly implemented.** The open questions are settled (see the last section):
+Status: **superseded for ingestion; the rule still matters for retention.** Ingestion watermarks
+were removed (Task 7 of `doc/DUCKDB_2_UPGRADE_PLAN.md`). Their tables were the only ones the
+collector writes with SQL, so the startup check over them was removed with them, and nothing on the
+ingestion path is inlinable: registering a file never is.
+
+What this spec measured still applies to the compactor's data retention job, which runs `DELETE` on
+ingested tables. Inlining covers deletes: at the default limit, deleting a few rows of a Parquet file
+puts them in the catalog's `ducklake_inlined_delete_<n>` tables instead of a delete file. Retention
+drops whole files where it can, which writes neither, but the rows it deletes from a file holding
+NULL times, or without statistics, go to the catalog. Keep the effective limit at 0 for the tables
+retention deletes from: attach with `DATA_INLINING_ROW_LIMIT 0`, and set no option above 0 with
+`set_option` on the catalog, schema or table, which takes precedence over the attach parameter (see
+the resolution order below). No check enforces it today.
+
+Earlier status: accepted; partly implemented. The open questions were settled (see the last section):
 the collector refuses to start, the watermark's `INSERT` becomes a write-then-register, and its
-conflict-path `UPDATE` becomes an append. The append landed in #514, which this spec now assumes;
-the inlining rule itself and the sidecar conversion have not.
+conflict-path `UPDATE` becomes an append. The append landed in #514; the inlining rule itself and the
+sidecar conversion did not.
 
 The rule guards a live fault, not a hypothetical one: with #514 merged the watermark path still
 writes with SQL — one `INSERT` per batch for its rows, plus an `INSERT` for a correction on the rare

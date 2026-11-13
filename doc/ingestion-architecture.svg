@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 540" width="1020" height="540" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" role="img"
-           aria-label="Clients POST batches into one of several ingestion queues on a server. Each queue accumulates a bucket until a size or delay threshold, then a single writer thread applies the transformation and runs a DuckDB COPY that writes partitioned Parquet files. The written files are registered in the DuckLake catalog together with the watermark row in one transaction.">
+           aria-label="Clients POST batches into one of several ingestion queues on a server. Each queue accumulates a bucket until a size or delay threshold, then a single writer thread applies the transformation and runs a DuckDB COPY that writes partitioned Parquet files. The written files are registered in the DuckLake catalog in one transaction.">
         <rect x="0" y="0" width="1020" height="540" fill="#FFFFFF"></rect>
         <defs>
           <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -100,12 +100,11 @@
         <!-- the commit: the one thing that carries the accent -->
         <line x1="838" y1="260" x2="838" y2="330" stroke="#0D7C86" stroke-width="1.8" marker-end="url(#ar-acc)"></line>
         <text x="854" y="284" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.8">add_data_files</text>
-        <text x="854" y="299" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.8">+ watermark row</text>
-        <text x="854" y="316" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="#0D7C86">ONE TRANSACTION</text>
+        <text x="854" y="301" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="#0D7C86">ONE TRANSACTION</text>
 
         <rect x="814" y="334" width="176" height="66" rx="3" fill="#FFFFFF" stroke="#0D7C86" stroke-width="1.4"></rect>
         <text x="902" y="360" text-anchor="middle" font-size="12.5" fill="#14202B">catalog</text>
-        <text x="902" y="377" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.6">metadata + watermark</text>
+        <text x="902" y="377" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.6">metadata</text>
 
         <text x="902" y="428" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14202B" fill-opacity="0.6">one table per queue</text>
       </svg>

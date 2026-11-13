@@ -479,9 +479,7 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
     /**
      * The relation the output files are written from: the temp input files with the
-     * transformation and any partition projections applied. This is also the relation the
-     * watermark rows are computed over — same schema, same rows as the written output, read
-     * while the input files are still local.
+     * transformation and any partition projections applied.
      */
     private String constructSourceRelation(WriteTask<String, IngestionResult> writeTask, WriteInputs inputs) {
         var batches = writeTask.bucket().batches();
@@ -578,24 +576,14 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         logger.debug("Executing COPY SQL: {}", sql);
         List<String> files = new ArrayList<>();
         long count = 0;
-        // Watermark rows are computed BEFORE the COPY, over the same source relation the output
-        // is written from: the data is still local, the transformation is already applied (so
-        // partition columns are real typed columns, not hive path fragments), and a misconfigured
-        // spec fails fast without leaving an unregistered output file behind.
-        WatermarkSpec watermarkSpec = postIngestionHandler.getWatermarkSpec(queueId);
-        List<List<String>> watermarkRows = null;
         try (var conn = ConnectionPool.getConnection();
              var stmt = conn.createStatement()) {
 
             // The queue's session variables, before anything reads the relation: the transformation
-            // inside it (and so the watermark rows computed over it, and the COPY) may reference
-            // them with getvariable(). ConnectionPool hands out a duplicate per use, so these are
-            // scoped to this write and cannot leak into another queue's connection.
+            // inside it, and so the COPY, may reference them with getvariable(). ConnectionPool hands
+            // out a duplicate per use, so these are scoped to this write and cannot leak into another
+            // queue's connection.
             applyVariables(stmt);
-
-            if (watermarkSpec != null) {
-                watermarkRows = watermarkSpec.computeRows(conn, constructSourceRelation(writeTask, inputs));
-            }
 
             // Set up cancellation hook
             var cancelHookSet = writeTask.setCancelHook(() -> {
@@ -630,6 +618,6 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
         return new IngestionResult(this.queueId, writeTask.taskId(), this.applicationId,
                 writeTask.bucket().getProducerMaxBatchId(),
                 count,
-                files, sql, watermarkRows);
+                files, sql);
     }
 }

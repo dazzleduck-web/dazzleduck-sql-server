@@ -162,11 +162,17 @@ runs no DELETE when none does.
 - A file whose time column holds a value before year 1, from a corrupt value, is treated like one
   without statistics.
 - Rows whose time column is NULL are kept. A file holding NULLs cannot be dropped whole, so it does
-  not move the boundary; its expired rows are deleted with a delete file.
+  not move the boundary; its expired rows are deleted from it, with a delete file when inlining is
+  off (below).
 - A data file without statistics for the time column, such as one written before the column was
-  added, does not move the boundary either, and is logged. Its expired rows are deleted with a
-  delete file.
-- Rows still inlined in the catalog (`data_inlining_row_limit` above 0) are deleted too.
+  added, does not move the boundary either, and is logged. Its expired rows are deleted the same way.
+- Keep DuckLake data inlining off for the tables retention deletes from: attach the catalog with
+  `DATA_INLINING_ROW_LIMIT 0`, and leave no `data_inlining_row_limit` option above 0 set with
+  `set_option` on the catalog, the table's schema or the table, which takes precedence over the
+  `ATTACH` parameter. Otherwise the rows retention deletes from a file it cannot drop whole are
+  recorded as inlined deletes in the catalog database instead of a delete file. Nothing checks this
+  at startup.
+- Rows that are still inlined in the catalog, from a time inlining was on, are deleted too.
 - Files holding NULLs or without statistics keep their statistics after their expired rows are
   deleted, so each cycle's check for a row older than the boundary scans them until housekeeping's
   delete-file rewrite replaces them.

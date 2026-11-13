@@ -1,5 +1,7 @@
 package io.dazzleduck.sql.commons.ingestion;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -79,9 +81,31 @@ public record QueueIdToTableMapping(
                     "Queue '%s': 'num_partitions' > 1 requires a non-blank 'partition_expression'"
                             .formatted(ingestionQueue));
         }
-        // Fail at config load, not per batch: a malformed watermark spec (partial/blank/typo'd
-        // keys) would otherwise write each batch's output and then orphan it at post-ingestion.
-        WatermarkSpec.fromParameters(ingestionQueue, additionalParameters);
+        rejectWatermarkKeys(ingestionQueue, additionalParameters);
+    }
+
+    /**
+     * Ingestion watermarks were removed. A mapping that still configures one fails when it is built
+     * (for a configured mapping, at startup) rather than have its watermark table silently stop
+     * receiving rows. A key is one when it starts with {@code watermark_}, or {@code watermark.} as a
+     * nested {@code watermark { table = ... }} flattens to, in any case and with HOCON's quotes
+     * around a dotted key removed.
+     */
+    static void rejectWatermarkKeys(String ingestionQueue, Map<String, String> additionalParameters) {
+        if (additionalParameters == null) {
+            return;
+        }
+        List<String> keys = additionalParameters.keySet().stream()
+                .filter(key -> {
+                    String plain = key.replace("\"", "").toLowerCase(Locale.ROOT);
+                    return plain.startsWith("watermark_") || plain.startsWith("watermark.");
+                })
+                .sorted()
+                .toList();
+        if (!keys.isEmpty()) {
+            throw new IllegalArgumentException(("Queue '%s': ingestion watermarks are no longer supported; "
+                    + "remove %s from additional_parameters").formatted(ingestionQueue, keys));
+        }
     }
 
     /** Backward-compatible constructor without outputPath/inputSchema (DuckLake-managed entries). */

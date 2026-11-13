@@ -41,7 +41,7 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 
 All modules are prefixed `dazzleduck-sql-`.
 
-**commons key classes:** `ConnectionPool` (singleton DB, `duplicate()` per use, `executeOnSingleton`); `Transformations` (SQL ↔ JSON AST via `json_serialize_sql`, RLS filter-CTE injection, LEFT-JOIN pruning, limit injection); `ExpressionFactory`/`ExpressionConstants`; `Fingerprint` (normalized-query SHA-256, not CTE-safe); `ingestion/` (`BulkIngestQueue`, `ParquetIngestionQueue` with `__this` transformations, `IngestionVariables`, `WatermarkSpec`, `DuckLakeIngestionHandler`, `DynamicDuckLakeIngestionTaskFactoryProvider` = SQLite queue registry); `authorization/` (`SqlAuthorizer` impls incl. `RedirectAuthorizer` → external `/resolve`); pruning in `ducklake/`, `hive/`, `delta/`, `planner/` (`SplitPlanner`, `PartitionPrunerV2`); `TableConfigProvider`; `namedquery/`.
+**commons key classes:** `ConnectionPool` (singleton DB, `duplicate()` per use, `executeOnSingleton`); `Transformations` (SQL ↔ JSON AST via `json_serialize_sql`, RLS filter-CTE injection, LEFT-JOIN pruning, limit injection); `ExpressionFactory`/`ExpressionConstants`; `Fingerprint` (normalized-query SHA-256, not CTE-safe); `ingestion/` (`BulkIngestQueue`, `ParquetIngestionQueue` with `__this` transformations, `IngestionVariables`, `DuckLakeIngestionHandler`, `DynamicDuckLakeIngestionTaskFactoryProvider` = SQLite queue registry); `authorization/` (`SqlAuthorizer` impls incl. `RedirectAuthorizer` → external `/resolve`); pruning in `ducklake/`, `hive/`, `delta/`, `planner/` (`SplitPlanner`, `PartitionPrunerV2`); `TableConfigProvider`; `namedquery/`.
 
 ## HTTP API
 

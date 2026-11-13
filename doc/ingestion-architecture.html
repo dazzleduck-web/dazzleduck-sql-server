@@ -164,7 +164,7 @@
   <figure>
     <div class="scroller">
       <svg class="diagram" viewBox="0 0 1020 540" role="img"
-           aria-label="Clients POST batches into one of several ingestion queues on a server. Each queue accumulates a bucket until a size or delay threshold, then a single writer thread applies the transformation and runs a DuckDB COPY that writes partitioned Parquet files. The written files are registered in the DuckLake catalog together with the watermark row in one transaction.">
+           aria-label="Clients POST batches into one of several ingestion queues on a server. Each queue accumulates a bucket until a size or delay threshold, then a single writer thread applies the transformation and runs a DuckDB COPY that writes partitioned Parquet files. The written files are registered in the DuckLake catalog in one transaction.">
         <defs>
           <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
@@ -263,12 +263,11 @@
         <!-- the commit: the one thing that carries the accent -->
         <line x1="838" y1="260" x2="838" y2="330" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#ar-acc)"></line>
         <text x="854" y="284" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" fill-opacity="0.8">add_data_files</text>
-        <text x="854" y="299" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" fill-opacity="0.8">+ watermark row</text>
-        <text x="854" y="316" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="var(--accent)">ONE TRANSACTION</text>
+        <text x="854" y="301" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="0.9" fill="var(--accent)">ONE TRANSACTION</text>
 
         <rect x="814" y="334" width="176" height="66" rx="3" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.4"></rect>
         <text x="902" y="360" text-anchor="middle" font-size="12.5" fill="currentColor">catalog</text>
-        <text x="902" y="377" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" fill-opacity="0.6">metadata + watermark</text>
+        <text x="902" y="377" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" fill-opacity="0.6">metadata</text>
 
         <text x="902" y="428" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" fill-opacity="0.6">one table per queue</text>
       </svg>
@@ -276,14 +275,13 @@
 
     <div class="legend">
       <span><i class="swatch"></i> data path</span>
-      <span><i class="swatch acc"></i> atomic commit — files and watermark, or neither</span>
+      <span><i class="swatch acc"></i> atomic commit — all of a batch's files, or none</span>
     </div>
 
     <figcaption>
       Each queue batches independently and is drained by its own writer thread, so a slow or failing
       queue does not stall the others. The transformation runs inside the DuckDB <code>COPY</code> that
-      produces the Parquet files, and the watermark is computed from that same pre-COPY relation — so it
-      never re-reads what was written. File registration and the watermark row commit together.
+      produces the Parquet files, so the data is read once, and nothing re-reads what was written.
     </figcaption>
   </figure>
 
@@ -307,9 +305,9 @@
     <div class="note">
       <h2>The commit is the boundary</h2>
       <p>
-        Registering the files and appending the watermark happen in one transaction. Either the data
-        is visible with its watermark, or nothing landed and the files are left unregistered for
-        cleanup — never a file without its accounting.
+        A batch's files are registered in one transaction. Either all of them are visible, or none are:
+        the queue deletes local files it knows were not registered, and the rest stay as orphans until
+        <code>ducklake_delete_orphaned_files</code> runs.
       </p>
     </div>
     <div class="note">

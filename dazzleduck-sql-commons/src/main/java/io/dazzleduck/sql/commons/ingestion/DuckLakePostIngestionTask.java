@@ -5,49 +5,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 
 /**
  * Post-ingestion task that adds newly ingested files to a DuckLake table.
  * This task executes the ducklake_add_data_files procedure for each ingested file
  * within a transaction to ensure atomicity.
- *
- * <p>When the queue mapping configures a watermark (see {@link WatermarkSpec}), the rows
- * precomputed at write time and carried on {@link IngestionResult#watermarkRows()} are appended
- * to the watermark table via a plain {@code INSERT ... VALUES} in the SAME transaction, so file
- * registration and watermark commit or roll back together. This task never re-reads the written
- * files.
- *
- * <p>The snapshot id ({@code watermark_snapshot_id_column}) is written by that same INSERT, so it
- * commits with the rows rather than being patched in afterwards. DuckLake assigns a snapshot id at
- * COMMIT and does not expose the pending one, so what is written is
- * {@code max(snapshot_id) + 1} — the same formula DuckLake uses, read just before the transaction
- * opens.
- *
- * <p><strong>The column is therefore a lower bound, and is specified as one.</strong> The committed
- * id is always {@code >=} what was written: DuckLake takes {@code max + 1} at commit, {@code max}
- * only ever grows (even aggressive snapshot expiry retains the newest snapshot and ids are never
- * reused), and a competing writer that takes the id first only pushes our commit higher. So the
- * recorded value can be stale but never ahead of the truth, whatever happens — including a crash
- * between the commit and the verification below.
- *
- * <p>{@link #verifySnapshotId} then records the exact snapshot when it differs, by APPENDING a
- * correction row for the batch rather than updating the rows in place — so the watermark table is
- * append-only and the ingestion path issues no row-level write. A reader takes
- * {@code max(snapshot_id)} over a batch id; see {@link WatermarkSpec#snapshotCorrectionSql}. Every
- * batch carries an id ({@code watermark_batch_id_column} is required) for the correction to attach
- * to. The step is an accuracy improvement, not a correctness requirement — if it is skipped or
- * fails, the column still satisfies its contract as a lower bound.
- *
- * <p>Limitation: queues registered through the dynamic SQLite registry
- * ({@link DynamicQueueRepository}) do not carry {@code additional_parameters}, so watermarks are
- * only available for statically configured queue mappings.
  */
 public class DuckLakePostIngestionTask implements PostIngestionTask {
 
@@ -59,7 +24,6 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     private final String catalogName;
     private final String tableName;
     private final String schemaName;
-    private final WatermarkSpec watermarkSpec;
     /** Runs in each attempt's transaction, after its statements and before its commit; tests only. */
     private final Runnable beforeCommit;
 
@@ -77,23 +41,20 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     public DuckLakePostIngestionTask(IngestionResult ingestionResult,
                                      String catalogName,
                                      String tableName,
-                                     String schemaName,
-                                     Map<String, String> additionalParameters) {
-        this(ingestionResult, catalogName, tableName, schemaName, additionalParameters, () -> { });
+                                     String schemaName) {
+        this(ingestionResult, catalogName, tableName, schemaName, () -> { });
     }
 
     DuckLakePostIngestionTask(IngestionResult ingestionResult,
                               String catalogName,
                               String tableName,
                               String schemaName,
-                              Map<String, String> additionalParameters,
                               Runnable beforeCommit) {
         this.beforeCommit = beforeCommit;
         this.ingestionResult = ingestionResult;
         this.catalogName = catalogName;
         this.tableName = tableName;
         this.schemaName = schemaName;
-        this.watermarkSpec = WatermarkSpec.fromParameters(ingestionResult.queueName(), additionalParameters);
     }
 
     @Override
@@ -177,26 +138,14 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
     /**
      * Adds files to DuckLake table within a transaction.
      * All files are added atomically - if any file fails, all changes are rolled back.
-     * Precomputed watermark rows join the same transaction, so the registered files and their
-     * watermark commit or roll back together.
      */
     private void addFilesOnce(List<String> files) throws SQLException {
-        List<String> queries = new ArrayList<>(files.stream()
+        List<String> queries = files.stream()
                 .map(file -> ADD_FILE_QUERY.formatted(
                         escapeLiteral(catalogName), escapeLiteral(tableName), escapeLiteral(file), escapeLiteral(schemaName)))
-                .toList());
-        List<List<String>> watermarkRows = ingestionResult.watermarkRows();
-        boolean hasWatermark = watermarkSpec != null && watermarkRows != null && !watermarkRows.isEmpty();
+                .toList();
         try (Connection conn = ConnectionPool.getConnection()) {
-            if (!hasWatermark) {
-                executeInTxn(conn, queries, files, beforeCommit);
-                return;
-            }
-            long predictedSnapshotId = predictNextSnapshotId(conn);
-            UUID batchId = UUID.randomUUID();
-            queries.add(watermarkSpec.insertSql(catalogName, schemaName, watermarkRows, predictedSnapshotId, batchId));
             executeInTxn(conn, queries, files, beforeCommit);
-            verifySnapshotId(conn, files, predictedSnapshotId, batchId);
         }
     }
 
@@ -261,74 +210,6 @@ public class DuckLakePostIngestionTask implements PostIngestionTask {
             conn.rollback();
         } catch (SQLException e) {
             failure.addSuppressed(e);
-        }
-    }
-
-    /**
-     * The id this transaction will commit as, barring a competing writer: DuckLake derives the next
-     * snapshot id the same way and enforces it with a primary key on {@code ducklake_snapshot}.
-     */
-    private long predictNextSnapshotId(Connection conn) throws SQLException {
-        String query = "SELECT coalesce(max(snapshot_id), -1) + 1 AS next_id FROM __ducklake_metadata_%s.ducklake_snapshot"
-                .formatted(escapeLiteral(catalogName));
-        try (Statement statement = conn.createStatement();
-             ResultSet resultSet = statement.executeQuery(query)) {
-            resultSet.next();
-            return resultSet.getLong("next_id");
-        }
-    }
-
-    /**
-     * Records the exact snapshot the batch committed in, when it differs from the predicted one, by
-     * appending a correction row for {@code batchId}.
-     *
-     * <p>One query settles what the committed id was: the file we just registered carries it in its
-     * {@code begin_snapshot}. A cheaper pre-check was tried and removed — both a global
-     * {@code current_snapshot()} and a per-table high-water mark cost about as much as this lookup
-     * (0.15-0.21ms vs 0.16ms at 1M files), and when either says "something moved" this query still
-     * has to run. One unconditional exact lookup is simpler and no slower.
-     *
-     * <p>Failures here are logged rather than thrown. The batch is already durable, and the column
-     * is specified as a lower bound, so a skipped correction leaves a value that is merely loose
-     * rather than wrong — whereas failing an ingest that succeeded would be a real loss.
-     */
-    private void verifySnapshotId(Connection conn, List<String> files, long predicted, UUID batchId) {
-        try {
-            Long actual = resolveCommittedSnapshotId(conn, files.get(0), predicted);
-            if (actual == null || actual == predicted) {
-                return;
-            }
-            logger.info("Queue '{}' committed as snapshot {} rather than the predicted {} (a concurrent "
-                            + "writer took the id); appending a correction for batch {}",
-                    ingestionResult.queueName(), actual, predicted, batchId);
-            ConnectionPool.execute(conn, watermarkSpec.snapshotCorrectionSql(catalogName, schemaName, batchId, actual));
-        } catch (Exception e) {
-            logger.warn("Could not record the exact snapshot in {}.{}.{}; batch {} keeps the lower bound {}",
-                    catalogName, schemaName, watermarkSpec.table(), batchId, predicted, e);
-        }
-    }
-
-    /**
-     * The snapshot a registered file became visible in. One file is enough: the whole batch is
-     * registered by a single transaction, so every file of it carries the same
-     * {@code begin_snapshot}.
-     *
-     * <p>{@code begin_snapshot >= lowerBound} is free pruning rather than a filter on correctness —
-     * the committed id is always {@code >=} the predicted one, and {@code begin_snapshot} rises with
-     * time, so zone maps skip almost the whole table instead of scanning every path in the catalog.
-     */
-    private Long resolveCommittedSnapshotId(Connection conn, String file, long lowerBound) throws SQLException {
-        String query = ("SELECT begin_snapshot FROM __ducklake_metadata_%s.ducklake_data_file "
-                + "WHERE begin_snapshot >= %d AND path = '%s'")
-                .formatted(escapeLiteral(catalogName), lowerBound, escapeLiteral(file));
-        try (Statement statement = conn.createStatement();
-             ResultSet resultSet = statement.executeQuery(query)) {
-            if (!resultSet.next()) {
-                logger.warn("Could not locate registered file {} for queue '{}'; leaving '{}' as written",
-                        file, ingestionResult.queueName(), watermarkSpec.snapshotIdColumn());
-                return null;
-            }
-            return resultSet.getLong("begin_snapshot");
         }
     }
 

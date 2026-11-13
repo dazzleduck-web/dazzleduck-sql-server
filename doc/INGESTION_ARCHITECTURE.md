@@ -31,7 +31,7 @@ is not installed.
                                                          │             │  ONE TRANSACTION
  producer ─┐                                             │             ▼
  producer ─┼──▶  queue "metrics"   ──▶  writer thread  ──┘     catalog: add_data_files
- producer ─┘     bucket fills           transform, COPY                 + watermark row
+ producer ─┘     bucket fills           transform, COPY
 ```
 
 Queues are independent all the way through: separate buckets, separate writer threads, one target
@@ -73,20 +73,13 @@ re-read what was just written.
 
 ## The commit
 
-Registering the written files and appending the watermark row happen in the **same transaction**:
-
-```
-ducklake_add_data_files(...)   +   INSERT INTO watermark_table VALUES (...)
-```
-
-Either the data becomes visible together with its watermark, or nothing lands and the Parquet files
-are left unregistered for `ducklake_cleanup_old_files` to remove. There is never a registered file
-without its accounting, and never a watermark for data that is not there.
-
-Watermark rows are computed **before** the `COPY`, from the same pre-COPY relation the output is
-written from. That means the transformation is already applied, partition columns are real typed
-columns rather than path fragments, and a misconfigured watermark fails fast instead of leaving an
-unregistered file behind. See `WatermarkSpec` for the configuration keys.
+A batch's files are registered in **one transaction**, one `ducklake_add_data_files` call per file:
+either all of them become visible, or none do. When a statement is rejected, so nothing was
+registered, the queue deletes the files if they are local (object-store files are left); when the
+commit's outcome is unknown it keeps them. An unregistered file stays in the data path as an orphan
+until `ducklake_delete_orphaned_files` runs. The
+OTel collector's compactor runs it; the standalone compactor does not. A commit that conflicts with a concurrent DELETE on the table
+registered nothing and is retried; see "Registration conflicts" in the README.
 
 ## What this diagram leaves out
 
@@ -101,4 +94,3 @@ These are real parts of the path that do not change the shape above:
 ## Related
 
 - `doc/DYNAMIC_QUEUES.md` — registering queues at runtime instead of from static config
-- `PRODUCER_WATERMARK_SPEC.md` — proposed durable producer watermarks

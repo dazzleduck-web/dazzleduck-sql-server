@@ -57,7 +57,7 @@ class DuckLakePostIngestionTaskTest {
     @Test
     void shouldAddFilesToDuckLakeTableTest() throws Exception {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 3L, List.of(parquetFile.toString()));
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         // execute (from DuckLakePostIngestionTask)
         task.execute();
 
@@ -72,19 +72,59 @@ class DuckLakePostIngestionTaskTest {
     @Test
     void shouldFailWhenParquetFileDoesNotExistTest() {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 3L, List.of(tempDir.resolve("missing.parquet").toString()));
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         assertThrows(RuntimeException.class, task::execute);
     }
 
     @Test
     void shouldNoOpWhenFileListIsEmptyTest() throws Exception {
         IngestionResult ingestionResult = new IngestionResult("test-queue", 1L, "test-app", Map.of(), 0L, List.of());
-        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main", Map.of());
+        DuckLakePostIngestionTask task = new DuckLakePostIngestionTask(ingestionResult, catalog, tableName, "main");
         task.execute(); // should not throw
         try (Connection conn = ConnectionPool.getConnection()) {
             ConnectionPool.execute(conn, "USE " + catalog);
             Long count = ConnectionPool.collectFirst(conn, "SELECT COUNT(*) FROM " + tableName, Long.class);
             assertEquals(0L, count);
+        }
+    }
+
+    /** A batch of several files becomes visible in one snapshot, not one per file. */
+    @Test
+    void aMultiFileBatchCommitsAsOneSnapshot() throws Exception {
+        String second = tempDir.resolve("data").resolve("second.parquet").toString();
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "COPY (SELECT 'date' AS b, 'fruit' AS a) TO '%s' (FORMAT parquet)".formatted(second));
+        }
+        long before = snapshots();
+        new DuckLakePostIngestionTask(new IngestionResult("test-queue", 1L, "test-app", Map.of(), 4L,
+                List.of(parquetFile.toString(), second)), catalog, tableName, "main").execute();
+
+        assertEquals(before + 1, snapshots(), "both files in one commit");
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(4L, ConnectionPool.collectFirst(conn, "SELECT count(*) FROM %s.main.%s".formatted(catalog, tableName), Long.class));
+            assertEquals(1L, ConnectionPool.collectFirst(conn, ("SELECT count(DISTINCT begin_snapshot) FROM %s.ducklake_data_file "
+                    + "WHERE end_snapshot IS NULL").formatted(metadataDb), Long.class));
+        }
+    }
+
+    /** One file of a batch that cannot be registered leaves none of the batch registered. */
+    @Test
+    void aFailedFileRollsBackTheWholeBatch() throws Exception {
+        long before = snapshots();
+        var task = new DuckLakePostIngestionTask(new IngestionResult("test-queue", 1L, "test-app", Map.of(), 3L,
+                List.of(parquetFile.toString(), tempDir.resolve("missing.parquet").toString())), catalog, tableName, "main");
+
+        var e = assertThrows(FilesNotRegisteredException.class, task::execute);
+        assertEquals(2, e.files().size(), "every file of the batch may be deleted");
+        assertEquals(before, snapshots(), "nothing committed");
+        try (Connection conn = ConnectionPool.getConnection()) {
+            assertEquals(0L, ConnectionPool.collectFirst(conn, "SELECT count(*) FROM %s.main.%s".formatted(catalog, tableName), Long.class));
+        }
+    }
+
+    private long snapshots() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            return ConnectionPool.collectFirst(conn, "SELECT count(*) FROM %s.ducklake_snapshot".formatted(metadataDb), Long.class);
         }
     }
 }
