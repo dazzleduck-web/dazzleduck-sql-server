@@ -163,11 +163,11 @@ public class SidecarBench {
         }
         System.out.println(same ? "content and column types identical across strategies" : "CONTENT MISMATCH");
 
-        System.out.printf("%n%-58s %10s %10s %10s %11s %10s%n", "strategy (median of " + runs + ")", "total ms",
+        System.out.printf("%n%-66s %10s %10s %10s %11s %10s%n", "strategy (median of " + runs + ")", "total ms",
                 "min ms", "base ms", "sidecars ms", "upload ms");
         for (var e : results.entrySet()) {
             List<Timing> ts = e.getValue();
-            System.out.printf("%-58s %10d %10d %10s %11s %10s%n", e.getKey(),
+            System.out.printf("%-66s %10d %10d %10s %11s %10s%n", e.getKey(),
                     median(ts.stream().mapToLong(Timing::totalMs)),
                     ts.stream().mapToLong(Timing::totalMs).min().orElse(0),
                     medianOrDash(ts, Timing::baseMs), medianOrDash(ts, Timing::sidecarsMs),

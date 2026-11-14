@@ -5,10 +5,12 @@ Status: **phase 1 implemented**, for queues of the static provider with sidecar 
 A batch of a queue with sidecars is written as base Parquet to a staging directory next to the
 queue's input files; each sidecar is derived from those staged base files (strategy F); every staged
 file is then uploaded unchanged with `COPY (SELECT content FROM read_blob(file)) TO 'dest'
-(FORMAT blob)`, through DuckDB's own file systems and secrets (strategy I in `tools/sidecar-bench`).
-Queues without sidecars write directly, as before. Measured against B and H on DuckDB 1.5.6 and
-2.0.0, small and large files, I had no clear loss or win (see the bench README), and it needs no
-`FileUploader`, no AWS SDK, no credentials outside DuckDB and no per-cloud code, so *The uploader*,
+(FORMAT blob)`, through DuckDB's own file systems and secrets (close to strategy I in
+`tools/sidecar-bench`; see *Upload by DuckDB* under *Benchmark*). Queues without sidecars write
+directly, as before. It is not the fastest: in the second run the AWS SDK uploader (H) beat it in
+every case, by 5 percent on DuckDB 1.5.6 for small batches and 61 percent on 2.0.0. It was chosen for
+what it leaves out: no `FileUploader`, no AWS SDK, no credentials outside DuckDB and no per-cloud
+code, so *The uploader*,
 *Library*, *Authentication* and *Uploader configuration* below are not pursued. Not built yet:
 `transformation_view` and its reload check, partitioned sidecar tables, and dynamic queues. Startup
 also rejects sidecar columns DuckLake cannot register from Parquet (`HUGEINT`, `UHUGEINT`, `TIMETZ`).
@@ -125,8 +127,8 @@ twice the alternatives once latency is realistic.
 **Decided: stage locally and upload.** This section first chose the AWS SDK uploader (strategy H
 below): it was the fastest strategy for 100k-row batches on both DuckDB versions, level with the
 direct path for 1M-row batches on DuckDB 2.0.0 and about 15 percent faster on 1.5.6. **Implemented
-instead: the upload by DuckDB itself** (strategy I, *Upload by DuckDB* under *Benchmark*), which a
-second run found no faster or slower overall and which needs no SDK or credentials of its own. The
+instead: the upload by DuckDB itself** (close to strategy I, *Upload by DuckDB* under *Benchmark*),
+which is slower than H on DuckDB 2.0.0 but needs no SDK or credentials of its own. The
 sidecars are derived from the staged base Parquet, after it is written, not overlapped with its upload.
 
 Two properties come with it besides speed: nothing reaches object storage unless every output was
@@ -294,15 +296,19 @@ about 250 to about 150 ms. At 1M rows the two were within noise.
 asynchronous Parquet writes, **and nearly doubled its small-batch time** (B: 285 to 449 ms). Its HTTP log
 shows two `HEAD` requests per file before writing that 1.5.6 does not make, and with real latency
 each one is a round trip. Strategies E to H do not go through DuckDB's S3 writer and did not change.
+Queues without sidecars still write directly (B's path): measure it again on each DuckDB upgrade.
 
 **Caveats.** One machine, synthetic rows, three sidecars, no bandwidth limit, and MinIO rather than
 S3. Treat the numbers as directional until they are repeated against a real bucket.
 
-### Upload by DuckDB (strategy I), the implemented design
+### Upload by DuckDB (strategy I)
 
 DuckDB can upload an existing file unchanged: `COPY (SELECT content FROM read_blob(file)) TO 'dest'
 (FORMAT blob)` writes the file's bytes through its own S3 writer and secret. Strategy I is G with that
-upload. A second run (2026-11-12, all strategies again, median total in ms) and an upload benchmark
+upload: it starts each file's upload as soon as the file is written, while the sidecars are still
+being derived, one after another. The implemented design differs: it derives the sidecars in parallel
+from the staged base, and uploads every file only once all are written, so I approximates it rather
+than measures it. A second run (2026-11-12, all strategies again, median total in ms) and an upload benchmark
 (`UploadBench`, one upload of a file of a fixed size) gave:
 
 | | 100k rows, 1.5.6 | 100k rows, 2.0.0 | 1M rows, 1.5.6 | 1M rows, 2.0.0 |
@@ -323,14 +329,15 @@ upload. A second run (2026-11-12, all strategies again, median total in ms) and 
   one after another) from 8 MB.** Small files are level with the SDK; 8 MB takes 319 against 173 ms.
   No DuckDB setting changes it (`s3_uploader_max_filesize`, the metadata cache, the curl client);
   forcing 2.0's 8 MB part size on 1.5.6 reproduces the slowdown.
-- **Across the pipelines no strategy wins every case**: I, H and B are within about 20 percent of each
-  other, in different orders by version and size, and H's own times moved by more than that between
-  the two runs (1M rows on 1.5.6: 1,149 then 893).
+- **Across the pipelines H beat I in every case** of this run: by 5 percent (100k rows, 1.5.6), 19
+  percent (1M, 1.5.6), 61 percent (100k, 2.0.0) and 15 percent (1M, 2.0.0). Run-to-run noise is large
+  (H's 1M-row time on 1.5.6 was 1,149 in the first run and 893 in this one), but on 2.0.0 the gap is
+  consistent with the upload benchmark above.
 
-With no clear winner, I was chosen for what it leaves out: no `FileUploader`, no AWS SDK, no
-credentials outside DuckDB, and one path for every store DuckDB writes to. If DuckDB's 2.0 writer
-drops the extra `HEAD` and the small multipart upload, I should match 1.5.6 again; re-run this on each
-upgrade. Full tables, including every strategy and the settings tried, are in
+I was chosen anyway, for what it leaves out: no `FileUploader`, no AWS SDK, no credentials outside
+DuckDB, and one path for every store DuckDB writes to; the price is slower uploads on DuckDB 2.0.0,
+most of all for small batches. If DuckDB's 2.0 writer drops the extra `HEAD` and the small multipart
+upload, I should match 1.5.6 again; re-run this on each upgrade. Full tables, including every strategy and the settings tried, are in
 `tools/sidecar-bench/README.md`.
 
 ## Effect on other work

@@ -31,7 +31,7 @@ SELECT DISTINCT service, unnest(attr_keys) AS attr_key FROM __base
 | F | the base Parquet, written locally | parallel upload afterwards |
 | G | the base Parquet, written locally | upload of each file as soon as it is written, by the async S3 client and transfer manager (Netty) |
 | H | the base Parquet, written locally | as G, by the client the spec recommends: the synchronous S3 client on `url-connection-client`, on its own executor |
-| I | the base Parquet, written locally | as G, by DuckDB itself: `COPY (SELECT content FROM read_blob(file)) TO 's3://...' (FORMAT blob)` writes each staged file unchanged through DuckDB's S3 writer and secret, on its own executor; no AWS SDK |
+| I | the base Parquet, written locally | as G, by DuckDB itself: `COPY (SELECT content FROM read_blob(file)) TO 's3://...' (FORMAT blob)` writes each staged file unchanged through DuckDB's S3 writer and secret, on its own executor; no AWS SDK. Close to the implemented design, which derives the sidecars in parallel and uploads only once all are written |
 
 Every run checks that all strategies wrote the same number of rows per output. The first measured
 iteration also reads each output back from S3 and compares its column types and a hash of its rows,
@@ -76,12 +76,12 @@ Pass `-Dduckdb.version=2.0.0.0` to both Maven goals to run it on another DuckDB 
 
 `UploadBench` compares the uploaders alone, without any Parquet writing: it uploads local files of
 fixed sizes (4 KB, 32 KB, 8 MB, 16 MB of random bytes) to MinIO with each uploader, and checks every
-object's size on S3.
+object's size on S3, and deletes what it uploaded.
 
 | Uploader | How |
 |---|---|
 | `duckdb-blob` | DuckDB's own S3 writer and secret: `COPY (SELECT content FROM read_blob(file)) TO 's3://...' (FORMAT blob)` |
-| `sdk-sync` | strategy H's client: the synchronous AWS SDK client on `url-connection-client`, one `PUT` below 16 MiB, concurrent 8 MiB parts above |
+| `sdk-sync` | strategy H's client, called inline: the synchronous AWS SDK client on `url-connection-client`, one `PUT` below 16 MiB, concurrent 8 MiB parts from 16 MiB (the 16 MB file is a two-part upload) |
 | `sdk-tm` | strategy G's client: the async AWS SDK client and transfer manager |
 
 For each size it reports one upload on its own (median, p95 and min over the runs), its throughput,

@@ -30,8 +30,9 @@ import java.util.stream.IntStream;
  * <ul>
  *   <li>{@code duckdb-blob}: DuckDB's own S3 writer and secret,
  *       {@code COPY (SELECT content FROM read_blob(file)) TO 's3://...' (FORMAT blob)}</li>
- *   <li>{@code sdk-sync}: the AWS SDK's synchronous client on url-connection-client (strategy H):
- *       one PUT below 16 MiB, concurrent 8 MiB parts above</li>
+ *   <li>{@code sdk-sync}: the AWS SDK's synchronous client on url-connection-client, as strategy H
+ *       uses it but called inline: one PUT below 16 MiB, concurrent 8 MiB parts from 16 MiB (so the
+ *       16 MB file is a two-part upload)</li>
  *   <li>{@code sdk-tm}: the AWS SDK's async client and transfer manager (strategy G)</li>
  * </ul>
  * For each size: the time of one upload on its own (median, p95, min of {@code runs}), and of a batch
@@ -46,9 +47,9 @@ import java.util.stream.IntStream;
  */
 public class UploadBench {
 
-    static final String BUCKET = "bench";
-    static final long MULTIPART_THRESHOLD = 16L << 20;
-    static final long PART_SIZE = 8L << 20;
+    static final String BUCKET = SidecarBench.BUCKET;
+    static final long MULTIPART_THRESHOLD = SidecarBench.MULTIPART_THRESHOLD;
+    static final long PART_SIZE = SidecarBench.PART_SIZE;
     static final LinkedHashMap<String, Long> SIZES = new LinkedHashMap<>();
     static {
         SIZES.put("4 KB", 4L << 10);
@@ -88,8 +89,9 @@ public class UploadBench {
         tm = S3TransferManager.builder().s3Client(async).build();
         try {
             sync.createBucket(b -> b.bucket(BUCKET));
-        } catch (Exception ignored) {
-            // exists
+        } catch (software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException
+                 | software.amazon.awssdk.services.s3.model.BucketAlreadyExistsException exists) {
+            // already there; anything else (a wrong endpoint, bad credentials) fails here, clearly
         }
 
         Map<String, Path> files = new LinkedHashMap<>();
@@ -108,6 +110,11 @@ public class UploadBench {
 
         if (args.length > 3) {
             Set<String> wanted = new HashSet<>(Arrays.asList(args[3].split(",")));
+            Set<String> unknown = new TreeSet<>(wanted);
+            unknown.removeAll(uploaders.keySet());
+            if (!unknown.isEmpty()) {
+                throw new IllegalArgumentException("unknown uploader(s) " + unknown + "; expected some of " + uploaders.keySet());
+            }
             uploaders.keySet().retainAll(wanted);
         }
         System.out.printf("DuckDB %s; settings: %s; %d runs per cell after a warm-up; times in ms%n",
@@ -142,6 +149,7 @@ public class UploadBench {
                         single.add(one);
                         batch.add(four);
                     }
+                    deletePrefix(prefix + "/");
                 }
                 Collections.sort(single);
                 Collections.sort(batch);
@@ -157,11 +165,23 @@ public class UploadBench {
             System.out.printf("duckdb-blob HTTP requests for one %s upload: %s%n", size.getKey(),
                     duckdbRequests(files.get(size.getKey())));
         }
+        deletePrefix("up/count-");
         tm.close();
         async.close();
         sync.close();
         pool.shutdownNow();
         db.close();
+        for (Path file : files.values()) Files.deleteIfExists(file);
+        Files.deleteIfExists(work);
+    }
+
+    /** Deletes what a run uploaded under {@code prefix}, as SidecarBench does after each run. */
+    static void deletePrefix(String prefix) {
+        var keys = sync.listObjectsV2(b -> b.bucket(BUCKET).prefix(prefix)).contents().stream()
+                .map(o -> software.amazon.awssdk.services.s3.model.ObjectIdentifier.builder().key(o.key()).build()).toList();
+        if (!keys.isEmpty()) {
+            sync.deleteObjects(b -> b.bucket(BUCKET).delete(software.amazon.awssdk.services.s3.model.Delete.builder().objects(keys).build()));
+        }
     }
 
     static void duckdb(Path file, String key) throws Exception {
@@ -183,7 +203,7 @@ public class UploadBench {
         List<CompletableFuture<CompletedPart>> fs = IntStream.rangeClosed(1, parts)
                 .mapToObj(n -> CompletableFuture.supplyAsync(() -> {
                     long offset = (n - 1) * PART_SIZE;
-                    byte[] bytes = readSlice(file, offset, (int) Math.min(PART_SIZE, size - offset));
+                    byte[] bytes = SidecarBench.readSlice(file, offset, (int) Math.min(PART_SIZE, size - offset));
                     String etag = sync.uploadPart(b -> b.bucket(BUCKET).key(key).uploadId(uploadId).partNumber(n),
                             RequestBody.fromBytes(bytes)).eTag();
                     return CompletedPart.builder().partNumber(n).eTag(etag).build();
@@ -215,18 +235,6 @@ public class UploadBench {
             }
             exec(conn, "CALL truncate_duckdb_logs()");
             return sb.toString().trim();
-        }
-    }
-
-    static byte[] readSlice(Path file, long offset, int length) {
-        try (FileChannel ch = FileChannel.open(file)) {
-            ByteBuffer buf = ByteBuffer.allocate(length);
-            while (buf.hasRemaining() && ch.read(buf, offset + buf.position()) >= 0) {
-                // read until the slice is full
-            }
-            return buf.array();
-        } catch (Exception e) {
-            throw new CompletionException(e);
         }
     }
 
