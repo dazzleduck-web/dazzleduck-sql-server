@@ -16,7 +16,6 @@
     <description>Docker-compose integration tests for DazzleDuck example demos</description>
 
     <properties>
-        <testcontainers.version>1.21.2</testcontainers.version>
         <!-- docker-compose tests excluded by default; run with -Pdocker-compose -->
         <excluded.test.groups>docker-compose</excluded.test.groups>
     </properties>
@@ -46,13 +45,13 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers</artifactId>
-            <version>${testcontainers.version}</version>
+            <version>${testcontainer.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>${testcontainers.version}</version>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <version>${testcontainer.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

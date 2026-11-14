@@ -69,6 +69,9 @@
              in the image entrypoints and in CLAUDE.md's MAVEN_OPTS. -->
         <arrow.jvm.flags>--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow</arrow.jvm.flags>
         <junit.version>5.13.4</junit.version>
+        <!-- 2.x: docker-java 3.7, which negotiates the Docker API; 1.x asks for API 1.32, which Docker
+             engines that require 1.40 or later (the GitHub runners since 2026-11) reject -->
+        <testcontainer.version>2.0.2</testcontainer.version>
         <!-- Stuck-test guards (see CLAUDE.md "Stuck tests"): every test and lifecycle method times out
              after this unless it sets its own @Timeout, and a whole test JVM is killed after
              surefire.fork.timeout seconds. Both can be overridden with -D. -->
