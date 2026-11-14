@@ -160,7 +160,7 @@ final class SidecarTables {
                     .collect(Collectors.joining(", "));
             String sameNameInOtherCase = tableNamedInAnyCase(conn, mapping, sidecar.table());
             if (sameNameInOtherCase != null) {
-                throw new IllegalArgumentException("Queue '%s': sidecar table '%s' exists as '%s'; configure the name as it is in the catalog"
+                throw new SidecarMismatchException("Queue '%s': sidecar table '%s' exists as '%s'; configure the name as it is in the catalog"
                         .formatted(mapping.ingestionQueue(), sidecar.table(), sameNameInOtherCase));
             }
             try {
@@ -216,6 +216,15 @@ final class SidecarTables {
                             qualified(mapping, sidecar.table()), partition.token()));
                 }
             } else {
+                // A transform's key that is also one of the query's columns (a day column beside
+                // day(ts)) cannot be written by a COPY: it renames the key (day_1=...), and DuckLake
+                // rejects the file. DuckLake's own writer keeps them apart; the COPY path cannot.
+                if (produced.contains(partition.token().toLowerCase(Locale.ROOT))) {
+                    throw new SidecarMismatchException(("Queue '%s': sidecar table %s has a column named '%s', which is "
+                            + "also the key of one of its partition transforms; a COPY cannot write both. Rename the "
+                            + "column, or partition by another transform").formatted(mapping.ingestionQueue(),
+                            qualified(mapping, sidecar.table()), partition.token()));
+                }
                 projections.add(partition.projection());
             }
         }

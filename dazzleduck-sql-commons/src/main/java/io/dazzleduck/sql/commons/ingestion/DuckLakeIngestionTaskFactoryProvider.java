@@ -98,7 +98,7 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             return List.of();
         }
         java.util.Set<String> keys = java.util.Set.of("table", ConfigConstants.TRANSFORMATION_KEY,
-                SIDECAR_VIEW_KEY, ConfigConstants.INPUT_TABLE_KEY);
+                ConfigConstants.SIDECAR_TRANSFORMATION_VIEW_KEY, ConfigConstants.INPUT_TABLE_KEY);
         List<Sidecar> sidecars = new java.util.ArrayList<>();
         for (Config entry : c.getConfigList(ConfigConstants.SIDECARS_KEY)) {
             for (String key : entry.root().keySet()) {
@@ -109,7 +109,7 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
             }
             try {
                 sidecars.add(new Sidecar(string(entry, "table"), string(entry, ConfigConstants.TRANSFORMATION_KEY),
-                        string(entry, SIDECAR_VIEW_KEY), string(entry, ConfigConstants.INPUT_TABLE_KEY)));
+                        string(entry, ConfigConstants.SIDECAR_TRANSFORMATION_VIEW_KEY), string(entry, ConfigConstants.INPUT_TABLE_KEY)));
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("Queue '%s': %s".formatted(ingestionQueue, e.getMessage()), e);
             }
@@ -117,8 +117,6 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
         return sidecars;
     }
 
-    /** A sidecar entry's key for a query read from a view. */
-    static final String SIDECAR_VIEW_KEY = "transformation_view";
 
     private static String string(Config entry, String key) {
         return entry.hasPath(key) ? entry.getString(key) : null;

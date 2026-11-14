@@ -304,19 +304,33 @@ public class DynamicQueueRepository implements AutoCloseable {
                 }
             }
             QueueIdToTableMapping kept = null;
-            if (usable == null && current.containsKey(entry.getKey())) {
+            QueueIdToTableMapping before = current.get(entry.getKey());
+            boolean moved = before != null && !(before.catalog().equals(mapping.catalog())
+                    && before.schema().equals(mapping.schema()) && before.table().equals(mapping.table()));
+            if (usable == null && moved) {
+                // Its previous sidecars belong to its previous table: applied to the new one, they would
+                // create tables in the wrong schema, or read the wrong table. Nothing changes until fixed.
+                kept = before;
+                logger.error("Queue '{}' keeps its whole previous mapping, ignoring the move of its table too, until "
+                        + "its sidecar rows are fixed", entry.getKey());
+            } else if (usable == null && before != null) {
                 // The queue's own row as it now reads, with the sidecars it was running with: a typo in
                 // a sidecar row neither evicts the queue nor holds back a change to its own row.
                 try {
                     kept = mapping.withSidecars(current.get(entry.getKey()).sidecars());
+                    logger.error("Queue '{}' keeps its previous sidecars until its sidecar rows are fixed", entry.getKey());
                 } catch (IllegalArgumentException e) {
-                    kept = current.get(entry.getKey()); // its old sidecars do not fit its new row either
+                    // Its previous sidecars do not fit its new row either (one is its new table, say):
+                    // the whole previous mapping is kept, its row change too, until both are fixed.
+                    kept = current.get(entry.getKey());
+                    logger.error("Queue '{}' keeps its whole previous mapping, ignoring the change to its own row too, "
+                            + "until its sidecar rows are fixed: its previous sidecars do not fit its new row: {}",
+                            entry.getKey(), e.getMessage());
                 }
             }
             if (usable != null) {
                 result.put(entry.getKey(), usable);
             } else if (kept != null) {
-                logger.error("Queue '{}' keeps its previous sidecars until its sidecar rows are fixed", entry.getKey());
                 result.put(entry.getKey(), kept);
             } else {
                 // Left out rather than loaded without its sidecars, which would write its batches

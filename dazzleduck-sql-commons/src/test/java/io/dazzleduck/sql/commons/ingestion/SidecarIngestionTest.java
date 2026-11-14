@@ -837,6 +837,35 @@ class SidecarIngestionTest {
     }
 
     @Test
+    void aViewChangedToABodyThatIsNotASidecarQueryIsRejectedAndTheOldQueryKept() throws Exception {
+        execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA, TABLE));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%s.%s.v_counts" }]
+                """.formatted(CATALOG, SCHEMA));
+        // A self-join: the queue's table is read twice, so the body cannot become a query over __base.
+        execute(("CREATE OR REPLACE VIEW %1$s.%2$s.v_counts AS SELECT a.category, count(*) AS n FROM %1$s.%2$s.%3$s a "
+                + "JOIN %1$s.%2$s.%3$s b ON a.id = b.id GROUP BY ALL").formatted(CATALOG, SCHEMA, TABLE));
+        handler.refreshNow(TABLE);
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            assertEquals(100, write(queue, scheduler, 0).rowCount(), "ingestion goes on with the previous query");
+        }
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)));
+    }
+
+    @Test
+    void aSidecarTableWithAColumnNamedLikeItsPartitionKeyFailsStartup() {
+        // day(ts) partitions under the key "day"; a COPY cannot also write a column of that name.
+        execute("CREATE TABLE %s.%s.per_day (ts TIMESTAMP, day BIGINT, n BIGINT)".formatted(CATALOG, SCHEMA));
+        execute("ALTER TABLE %s.%s.per_day SET PARTITIONED BY (day(ts))".formatted(CATALOG, SCHEMA));
+        var e = assertThrows(IllegalArgumentException.class, () -> handler("""
+                sidecars = [{ table = "per_day", transformation = "SELECT TIMESTAMP '2026-01-01' AS ts, id AS day, value AS n FROM __base" }]
+                """));
+        assertTrue(e.getMessage().contains("column named 'day'"), e.getMessage());
+    }
+
+    @Test
     void aSidecarViewThatCannotBeReReadKeepsItsLastQuery() throws Exception {
         execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
                 .formatted(CATALOG, SCHEMA, TABLE));

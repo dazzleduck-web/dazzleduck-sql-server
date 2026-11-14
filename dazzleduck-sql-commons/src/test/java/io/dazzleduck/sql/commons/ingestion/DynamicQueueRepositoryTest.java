@@ -252,6 +252,27 @@ class DynamicQueueRepositoryTest {
     }
 
     @Test
+    void aQueueWhoseTableMovesWhileItsSidecarRowsAreUnusableKeepsItsWholePreviousMapping() throws Exception {
+        String dbPath = tempDir.resolve("moved.db").toString();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name) "
+                    + "VALUES ('logs', 'lake', 'main', 'logs')");
+            writeToDb(dbPath, "INSERT INTO " + SIDECARS + " (ingestion_queue, sidecar_table, transformation) "
+                    + "VALUES ('logs', 'x', 'SELECT 1 AS a FROM __base')");
+            try (Connection conn = repo.openReadOnlyConnection()) {
+                var before = DynamicQueueRepository.loadAll(conn);
+                // The table moves to another schema, and a sidecar row breaks, in the same edit.
+                writeToDb(dbPath, "UPDATE " + QUEUES + " SET schema_name = 'v2' WHERE ingestion_queue = 'logs'");
+                writeToDb(dbPath, "UPDATE " + SIDECARS + " SET transformation_view = 'not.qualified'");
+                var after = DynamicQueueRepository.loadAll(conn, before);
+                assertEquals(before.get("logs"), after.get("logs"),
+                        "its old sidecars are not applied to the moved table: the whole previous mapping is kept");
+            }
+        }
+    }
+
+    @Test
     void aRegistryWithoutTheSidecarsTableLoads() throws Exception {
         String dbPath = tempDir.resolve("old.db").toString();
         try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {

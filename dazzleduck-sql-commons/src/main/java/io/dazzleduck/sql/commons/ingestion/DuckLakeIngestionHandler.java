@@ -104,7 +104,9 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             return new QueueState(targetPath, transformation, partitionColumns, partitionProjections, variables,
                     Long.MIN_VALUE, Instant.EPOCH, partitionError, transformationError,
                     sidecars.stream().filter(t -> unchanged.contains(t.table())).toList(), sidecarError,
-                    Map.of(), lastGoodSidecars.stream().filter(t -> unchanged.contains(t.table())).toList());
+                    rejectedSidecarSql.entrySet().stream().filter(e -> unchanged.contains(e.getKey()))
+                            .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue)),
+                    lastGoodSidecars.stream().filter(t -> unchanged.contains(t.table())).toList());
         }
     }
 
@@ -442,6 +444,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             // A view-based sidecar's query is re-read on every refresh, like a queue's view: it may live
             // in another catalog, whose changes do not move this one's schema_version.
             Map<String, ViewRead> views = readSidecarViews(mapping);
+            Map<String, Rejected> rejectedStill = stillRejected(views, existing.rejectedSidecarSql());
             java.util.Set<String> changedViews = existing.sidecarError() == null
                     ? changedSidecarViews(views, existing.sidecars(), existing.rejectedSidecarSql(), forced)
                     : java.util.Set.of();
@@ -463,13 +466,12 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             ResolvedSidecars sidecars = recheckSidecars
                     ? resolveSidecars(mapping, transformation, existing.partitionProjections(), variables, existing,
                             views, existing.rejectedSidecarSql(), recheckAll ? null : changedViews)
-                    : new ResolvedSidecars(existing.sidecars(), existing.sidecarError(), 0,
-                            stillRejected(views, existing.rejectedSidecarSql()));
+                    : new ResolvedSidecars(existing.sidecars(), existing.sidecarError(), 0, rejectedStill);
             // A forced refresh that kept a sidecar failure without checking it again leaves the
             // refresh time alone, so the periodic refresh still comes round to re-check it while
             // failed batches keep forcing refreshes.
             // So does a forced refresh that skipped a rejected view still due a periodic re-check.
-            boolean recheckPending = forced && !stillRejected(views, existing.rejectedSidecarSql()).isEmpty();
+            boolean recheckPending = forced && !rejectedStill.isEmpty();
             Instant refreshedAt = forced && ((!recheckSidecars && existing.sidecarError() != null) || recheckPending)
                     ? existing.refreshedAt() : clock.instant();
             return new QueueState(existing.targetPath(), transformation.sql(),
@@ -566,18 +568,44 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         return Map.copyOf(still);
     }
 
-    /** A view-based sidecar's view as read now: its query, or why it could not be read. */
-    private record ViewRead(String sql, RuntimeException error) {}
+    /**
+     * A view-based sidecar's view as read now: its query; or why it could not be read
+     * ({@code error}); or, for a view that was read but whose body cannot be a sidecar query (its
+     * input table referenced not exactly once, or not by its full name), why not ({@code misfit}),
+     * with {@code sql} a stand-in naming the body, so that a change to it is seen and rejected like
+     * any query that does not fit.
+     */
+    private record ViewRead(String sql, RuntimeException error, SidecarTables.SidecarMismatchException misfit) {}
 
     /** Reads every view-based sidecar's view once, by sidecar table. */
     private static Map<String, ViewRead> readSidecarViews(QueueIdToTableMapping mapping) {
         Map<String, ViewRead> views = new HashMap<>();
         for (Sidecar sidecar : mapping.sidecars()) {
             if (!sidecar.hasView()) continue;
+            String body;
             try {
-                views.put(sidecar.table(), new ViewRead(sidecarSql(mapping, sidecar), null));
+                body = fetchViewBody(sidecar.view());
             } catch (RuntimeException e) {
-                views.put(sidecar.table(), new ViewRead(null, e));
+                views.put(sidecar.table(), new ViewRead(null,
+                        new IllegalStateException("sidecar '%s': %s".formatted(sidecar.table(), e.getMessage()), e), null));
+                continue;
+            }
+            try {
+                views.put(sidecar.table(), new ViewRead(rewriteViewBody(body, sidecar.view(), sidecarInput(mapping, sidecar),
+                        Sidecar.BASE), null, null));
+            } catch (RuntimeException e) {
+                // Rewriting throws IllegalArgumentException for a body that reads its input table not
+                // exactly once, or not by its full name: that is the body, a misfit. Anything else (the
+                // parse failing on a connection, say) is a read problem, tried again next time.
+                boolean misfit = false;
+                for (Throwable t = e; t != null && !misfit; t = t.getCause()) {
+                    misfit = t instanceof IllegalArgumentException;
+                }
+                String message = "sidecar '%s': %s".formatted(sidecar.table(), e.getMessage());
+                views.put(sidecar.table(), misfit
+                        ? new ViewRead("-- view body that is not a sidecar query: " + body, null,
+                                new SidecarTables.SidecarMismatchException(message, e))
+                        : new ViewRead(null, new IllegalStateException(message, e), null));
             }
         }
         return views;
@@ -674,6 +702,7 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                         boolean rejectedBefore = entry != null && view.sql() != null && entry.sql().equals(view.sql());
                         if (view.error() != null) {
                             if (prior == null) throw view.error();
+                            if (entry != null) rejected.put(sidecar.table(), entry); // not shown to change
                             logger.warn("Queue '{}': could not re-read sidecar '{}' view '{}'; keeping its last query: {}",
                                     mapping.ingestionQueue(), sidecar.table(), sidecar.view(), view.error().getMessage());
                             sql = prior.transformation();
@@ -682,8 +711,12 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                             if (rejectedBefore) seenBefore = entry;
                         }
                     }
+                    ViewRead read = sidecar.hasView() ? views.get(sidecar.table()) : null;
                     ResolvedOne one;
                     try {
+                        if (read != null && read.misfit() != null && sql.equals(read.sql())) {
+                            throw read.misfit(); // its body is not a sidecar query: rejected like a misfit
+                        }
                         one = resolveOne(mapping, sidecar, sql, transformation, partitionProjections, variables);
                     } catch (SidecarTables.SidecarMismatchException failed) {
                         if (!sidecar.hasView() || prior == null || sql.equals(prior.transformation())) {
@@ -717,7 +750,9 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
                         }
                         logger.warn("Queue '{}': could not check the changed view of sidecar '{}'; keeping its current query: {}",
                                 mapping.ingestionQueue(), sidecar.table(), couldNotCheck.getMessage());
-                        one = new ResolvedOne(kept, 0);
+                        // Resolved again, not reused: its table may have changed since (this may be
+                        // the rebuild after an ALTER). If that fails too, so does the queue's resolution.
+                        one = resolveOne(mapping, sidecar, kept.transformation(), transformation, partitionProjections, variables);
                     }
                     targets.add(one.target());
                     created += one.created();
@@ -755,22 +790,10 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         return new ResolvedOne(resolveSidecar(mapping, sidecar, sql, ensured), ensured.created());
     }
 
-    /**
-     * A sidecar's query: its {@code transformation}, or its view's body with its one reference to the
-     * input table (the queue's own, unless {@code input_table} names another) rewritten to
-     * {@code __base}. Throws if the view does not resolve.
-     */
-    static String sidecarSql(QueueIdToTableMapping mapping, Sidecar sidecar) {
-        if (!sidecar.hasView()) {
-            return sidecar.transformation();
-        }
-        String input = sidecar.inputTable() != null ? sidecar.inputTable()
+    /** The table a sidecar's view reads, which becomes {@code __base}: its input_table, or the queue's. */
+    private static String sidecarInput(QueueIdToTableMapping mapping, Sidecar sidecar) {
+        return sidecar.inputTable() != null ? sidecar.inputTable()
                 : mapping.catalog() + "." + mapping.schema() + "." + mapping.table();
-        try {
-            return resolveViewAs(sidecar.view(), input, Sidecar.BASE);
-        } catch (RuntimeException e) {
-            throw new IllegalStateException("sidecar '%s': %s".formatted(sidecar.table(), e.getMessage()), e);
-        }
     }
 
     /**
@@ -1171,11 +1194,20 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
      * {@code replacement}: {@code __this} for a queue's view, {@code __base} for a sidecar's.
      */
     static String resolveViewAs(String fqView, String fqInputTable, String replacement) {
-        String[] viewParts  = splitFqName(fqView,       "view");
+        return rewriteViewBody(fetchViewBody(fqView), fqView, fqInputTable, replacement);
+    }
+
+    /** A view's body, the query after {@code AS}; throws if the view cannot be read. */
+    static String fetchViewBody(String fqView) {
+        String[] viewParts = splitFqName(fqView, "view");
+        return fetchViewDefinition(viewParts[0], viewParts[1], viewParts[2]);
+    }
+
+    /** {@code body} with its one reference to {@code fqInputTable} rewritten to {@code replacement}. */
+    static String rewriteViewBody(String body, String fqView, String fqInputTable, String replacement) {
         String[] tableParts = splitFqName(fqInputTable, "input_table");
-        String viewSql = fetchViewDefinition(viewParts[0], viewParts[1], viewParts[2]);
         try {
-            return Transformations.rewriteTableAs(viewSql, tableParts[0], tableParts[1], tableParts[2], replacement);
+            return Transformations.rewriteTableAs(body, tableParts[0], tableParts[1], tableParts[2], replacement);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to derive transformation from view '%s' replacing '%s': %s"
