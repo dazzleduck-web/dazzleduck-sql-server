@@ -815,6 +815,28 @@ class SidecarIngestionTest {
     }
 
     @Test
+    void aSidecarViewOverAnEmptyTemplateViewOfTheQueuesTableIsWrittenFromTheBatch() throws Exception {
+        // A guard against costly direct queries on a sidecar view: the view reads an empty template
+        // view of the queue's table, and names it as its input_table. Queried directly it returns
+        // nothing without reading the table; as a sidecar, the template reference becomes __base, so
+        // the template's WHERE false never reaches the sidecar's query.
+        execute("CREATE VIEW %1$s.%2$s.events_shape AS SELECT * FROM %1$s.%2$s.%3$s WHERE false".formatted(CATALOG, SCHEMA, TABLE));
+        execute("CREATE VIEW %1$s.%2$s.v_shape_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.events_shape GROUP BY ALL"
+                .formatted(CATALOG, SCHEMA));
+        var handler = handler("""
+                sidecars = [{ table = "category_counts", transformation_view = "%1$s.%2$s.v_shape_counts", input_table = "%1$s.%2$s.events_shape" }]
+                """.formatted(CATALOG, SCHEMA));
+        var scheduler = new DeterministicScheduler();
+        try (var queue = queue(handler, scheduler)) {
+            write(queue, scheduler, 0);
+        }
+        assertEquals(0L, scalar("SELECT count(*) FROM %s.%s.v_shape_counts".formatted(CATALOG, SCHEMA)),
+                "queried directly, the view returns nothing although the table now has rows");
+        assertEquals(34L, scalar("SELECT n FROM %s.%s.category_counts WHERE category = 'cat0'".formatted(CATALOG, SCHEMA)),
+                "as a sidecar it is computed from the batch");
+    }
+
+    @Test
     void aSidecarViewThatCannotBeReReadKeepsItsLastQuery() throws Exception {
         execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
                 .formatted(CATALOG, SCHEMA, TABLE));
