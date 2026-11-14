@@ -33,7 +33,8 @@ import java.util.stream.IntStream;
  * Sidecar-derivation benchmark: one ingested batch (local, uncompressed Arrow IPC files, as the
  * server stores them) is written as a base table plus N sidecar tables, each sidecar a SQL view
  * over the base rows. Strategies differ in what the sidecars are derived from and how the files
- * reach S3 (MinIO here).
+ * reach S3 (MinIO here): by DuckDB COPYs, by the AWS SDK, or by DuckDB uploading the staged
+ * files unchanged with {@code COPY ... (FORMAT blob)}.
  *
  * Usage: SidecarBench <rowsPerBatch> <inputFiles> <measuredRuns> <s3Endpoint>
  */
@@ -122,6 +123,7 @@ public class SidecarBench {
         strategies.put("F base -> local parquet, sidecars from it, then upload", SidecarBench::localParquetThenUpload);
         strategies.put("G base -> local parquet, upload overlapped with sidecars", SidecarBench::localParquetPipelined);
         strategies.put("H as G, url-connection client on its own executor", SidecarBench::localParquetPipelinedSync);
+        strategies.put("I as G, uploaded by DuckDB: COPY read_blob TO s3 (FORMAT blob)", SidecarBench::localParquetPipelinedDuckDb);
 
         Map<String, List<Timing>> results = new LinkedHashMap<>();
         // Every strategy must write the same rows, with the same column types, to every output. Row counts
@@ -285,6 +287,15 @@ public class SidecarBench {
         return pipelined(prefix, rc, SidecarBench::uploadSync);
     }
 
+    /**
+     * I: as G, but each file is uploaded by DuckDB itself, byte for byte, with its own S3 writer and
+     * secret: {@code COPY (SELECT content FROM read_blob(file)) TO 's3://...' (FORMAT blob)}. No AWS
+     * SDK and no credentials outside DuckDB.
+     */
+    static Timing localParquetPipelinedDuckDb(String prefix, Map<String, Long> rc) throws Exception {
+        return pipelined(prefix, rc, SidecarBench::uploadViaDuckDb);
+    }
+
     interface Uploader {
         CompletableFuture<?> upload(String prefix, String name, Path file);
     }
@@ -381,6 +392,18 @@ public class SidecarBench {
                                     .multipartUpload(m -> m.parts(fs.stream().map(CompletableFuture::join).toList()))),
                                     uploadPool);
                 });
+    }
+
+    /** One file, unchanged, through DuckDB's S3 writer, on a duplicated connection of the upload pool. */
+    static CompletableFuture<?> uploadViaDuckDb(String prefix, String name, Path file) {
+        return CompletableFuture.runAsync(() -> {
+            try (var conn = (DuckDBConnection) db.duplicate()) {
+                exec(conn, "COPY (SELECT content FROM read_blob('" + file + "')) TO '" + s3Path(prefix, name)
+                        + "' (FORMAT blob)");
+            } catch (Exception e) {
+                throw new CompletionException(e);
+            }
+        }, uploadPool);
     }
 
     static byte[] readSlice(Path file, long offset, int length) {

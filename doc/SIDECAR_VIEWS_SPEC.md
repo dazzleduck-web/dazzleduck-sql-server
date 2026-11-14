@@ -122,10 +122,12 @@ twice the alternatives once latency is realistic.
 
 ## Staging locally, then uploading
 
-**Decided: stage locally and upload, overlapping the base's upload with sidecar derivation, with the
-recommended uploader** (strategy H below). It was the fastest strategy for 100k-row batches on both
-DuckDB versions. For 1M-row batches it was level with the direct path on DuckDB 2.0.0 and about 15
-percent faster on 1.5.6, and within about 130 ms of the fastest staged variant.
+**Decided: stage locally and upload.** This section first chose the AWS SDK uploader (strategy H
+below): it was the fastest strategy for 100k-row batches on both DuckDB versions, level with the
+direct path for 1M-row batches on DuckDB 2.0.0 and about 15 percent faster on 1.5.6. **Implemented
+instead: the upload by DuckDB itself** (strategy I, *Upload by DuckDB* under *Benchmark*), which a
+second run found no faster or slower overall and which needs no SDK or credentials of its own. The
+sidecars are derived from the staged base Parquet, after it is written, not overlapped with its upload.
 
 Two properties come with it besides speed: nothing reaches object storage unless every output was
 derived, and a failed upload can be retried without recomputing anything.
@@ -291,12 +293,45 @@ about 250 to about 150 ms. At 1M rows the two were within noise.
 **DuckDB 2.0 cut the direct path's large-batch time** (B: 1,346 to 926 ms), likely from its
 asynchronous Parquet writes, **and nearly doubled its small-batch time** (B: 285 to 449 ms). Its HTTP log
 shows two `HEAD` requests per file before writing that 1.5.6 does not make, and with real latency
-each one is a round trip. The staged strategies do not go through DuckDB's S3 writer and did not
-change. Choosing H does not depend on the version, but the direct fallback should be measured again
-on each upgrade.
+each one is a round trip. Strategies E to H do not go through DuckDB's S3 writer and did not change.
 
 **Caveats.** One machine, synthetic rows, three sidecars, no bandwidth limit, and MinIO rather than
 S3. Treat the numbers as directional until they are repeated against a real bucket.
+
+### Upload by DuckDB (strategy I), the implemented design
+
+DuckDB can upload an existing file unchanged: `COPY (SELECT content FROM read_blob(file)) TO 'dest'
+(FORMAT blob)` writes the file's bytes through its own S3 writer and secret. Strategy I is G with that
+upload. A second run (2026-11-12, all strategies again, median total in ms) and an upload benchmark
+(`UploadBench`, one upload of a file of a fixed size) gave:
+
+| | 100k rows, 1.5.6 | 100k rows, 2.0.0 | 1M rows, 1.5.6 | 1M rows, 2.0.0 |
+|---|---|---|---|---|
+| B: direct `COPY`s, in parallel | 236 | 436 | 1,059 | 775 |
+| H: staged, AWS SDK uploader | 217 | 216 | 893 | 748 |
+| I: staged, uploaded by DuckDB | 227 | 348 | 1,061 | 862 |
+
+| One upload, median ms | 4 KB | 32 KB | 8 MB | 16 MB |
+|---|---|---|---|---|
+| DuckDB `FORMAT blob`, 1.5.6 | 52 | 56 | 210 | 283 |
+| DuckDB `FORMAT blob`, 2.0.0 | 97 | 102 | 319 | 368 |
+| AWS SDK, synchronous client | 110 | 104 | 173 | 310 |
+
+- **On 1.5.6 DuckDB's upload is the fastest uploader**: one `PUT` at any size, half the SDK's time for
+  small files.
+- **On 2.0.0 it makes a `HEAD` before every upload, and a multipart upload (two `POST`s and a `PUT`,
+  one after another) from 8 MB.** Small files are level with the SDK; 8 MB takes 319 against 173 ms.
+  No DuckDB setting changes it (`s3_uploader_max_filesize`, the metadata cache, the curl client);
+  forcing 2.0's 8 MB part size on 1.5.6 reproduces the slowdown.
+- **Across the pipelines no strategy wins every case**: I, H and B are within about 20 percent of each
+  other, in different orders by version and size, and H's own times moved by more than that between
+  the two runs (1M rows on 1.5.6: 1,149 then 893).
+
+With no clear winner, I was chosen for what it leaves out: no `FileUploader`, no AWS SDK, no
+credentials outside DuckDB, and one path for every store DuckDB writes to. If DuckDB's 2.0 writer
+drops the extra `HEAD` and the small multipart upload, I should match 1.5.6 again; re-run this on each
+upgrade. Full tables, including every strategy and the settings tried, are in
+`tools/sidecar-bench/README.md`.
 
 ## Effect on other work
 
