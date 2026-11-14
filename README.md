@@ -742,9 +742,9 @@ to read instead.
   warning on every refresh. The same holds across a registry reload of a dynamic queue.
 - **Partitioned sidecar tables** are written with their partitioning, as the target table is:
   identity, `year`/`month`/`day`/`hour` and `bucket(N)` transforms, with the same limits. A
-  partition column must be one the query produces, checked at startup. A sidecar query with a column
-  named like the key of one of its table's transforms (a `day` column beside `day(ts)`) cannot be
-  written by a COPY, and fails the check. A sidecar table partitioned,
+  partition column must be one the query produces, checked at startup. A sidecar table with a column
+  named like the key of one of its transforms (a `day` column beside `day(ts)`) cannot be written by a
+  COPY, whether or not the query produces that column, and fails the check. A sidecar table partitioned,
   or re-partitioned, under a running queue is picked up on the next refresh; a batch written with the
   old partitioning is retried once with the new one.
 - **A sidecar table dropped under a running queue** is created again after the next failed batch.

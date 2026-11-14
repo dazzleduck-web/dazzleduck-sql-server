@@ -866,6 +866,18 @@ class SidecarIngestionTest {
     }
 
     @Test
+    void aSidecarTableWithAColumnNamedLikeItsPartitionKeyFailsStartupEvenWhenTheQueryLeavesItOut() {
+        // The query does not produce day, but day is a table column, so it is written as NULL beside
+        // the projected day(ts) key: two columns named day in one COPY.
+        execute("CREATE TABLE %s.%s.per_day2 (ts TIMESTAMP, n BIGINT, day BIGINT)".formatted(CATALOG, SCHEMA));
+        execute("ALTER TABLE %s.%s.per_day2 SET PARTITIONED BY (day(ts))".formatted(CATALOG, SCHEMA));
+        var e = assertThrows(IllegalArgumentException.class, () -> handler("""
+                sidecars = [{ table = "per_day2", transformation = "SELECT TIMESTAMP '2026-01-01' AS ts, value AS n FROM __base" }]
+                """));
+        assertTrue(e.getMessage().contains("column named 'day'"), e.getMessage());
+    }
+
+    @Test
     void aSidecarViewThatCannotBeReReadKeepsItsLastQuery() throws Exception {
         execute("CREATE VIEW %1$s.%2$s.v_counts AS SELECT category, count(*) AS n FROM %1$s.%2$s.%3$s GROUP BY ALL"
                 .formatted(CATALOG, SCHEMA, TABLE));

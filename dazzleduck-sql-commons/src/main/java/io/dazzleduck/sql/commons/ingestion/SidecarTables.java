@@ -185,7 +185,7 @@ final class SidecarTables {
             throw new SidecarMismatchException("Queue '%s': sidecar table %s does not match its transformation: %s"
                     .formatted(mapping.ingestionQueue(), qualified(mapping, sidecar.table()), mismatch));
         }
-        checkPartitioning(conn, mapping, sidecar, sql, base, derived, partitionsOut);
+        checkPartitioning(conn, mapping, sidecar, sql, base, derived, existing, partitionsOut);
         return created;
     }
 
@@ -197,6 +197,7 @@ final class SidecarTables {
      */
     private static void checkPartitioning(DuckDBConnection conn, QueueIdToTableMapping mapping, Sidecar sidecar,
                                           String sql, String base, List<SidecarTarget.Column> derived,
+                                          List<SidecarTarget.Column> tableColumns,
                                           List<DuckLakeIngestionHandler.ResolvedPartition> partitionsOut) throws SQLException {
         List<DuckLakeIngestionHandler.ResolvedPartition> partitions;
         try {
@@ -207,6 +208,9 @@ final class SidecarTables {
         }
         java.util.Set<String> produced = derived.stream().map(c -> c.name().toLowerCase(Locale.ROOT))
                 .collect(Collectors.toSet());
+        // Every table column is written, as NULL when the query does not produce it.
+        java.util.Set<String> written = tableColumns.stream().map(c -> c.name().toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
         List<String> projections = new ArrayList<>();
         for (var partition : partitions) {
             if (partition.projection() == null) {
@@ -216,10 +220,11 @@ final class SidecarTables {
                             qualified(mapping, sidecar.table()), partition.token()));
                 }
             } else {
-                // A transform's key that is also one of the query's columns (a day column beside
-                // day(ts)) cannot be written by a COPY: it renames the key (day_1=...), and DuckLake
-                // rejects the file. DuckLake's own writer keeps them apart; the COPY path cannot.
-                if (produced.contains(partition.token().toLowerCase(Locale.ROOT))) {
+                // A transform's key that is also a column the file is written with (a day column
+                // beside day(ts)), whether the query produces it or it is written as NULL, cannot be
+                // written by a COPY: it renames one of the two (day_1), so the rows are partitioned by
+                // the wrong one or DuckLake rejects the file. DuckLake's own writer keeps them apart.
+                if (written.contains(partition.token().toLowerCase(Locale.ROOT))) {
                     throw new SidecarMismatchException(("Queue '%s': sidecar table %s has a column named '%s', which is "
                             + "also the key of one of its partition transforms; a COPY cannot write both. Rename the "
                             + "column, or partition by another transform").formatted(mapping.ingestionQueue(),
