@@ -5,7 +5,7 @@ import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,7 +39,7 @@ class CompactionIntegrationTest {
     static final CompactionTier MAJOR = new CompactionTier(
             "major", true, Duration.ofMillis(100), 512 * 1024L, 10 * 1024 * 1024L, 0, List.of());
 
-    static PostgreSQLContainer<?> postgres;
+    static PostgreSQLContainer postgres;
     static SimpleMeterRegistry registry;
     static CompactionConfig config;
     static String startupScript;
@@ -47,7 +47,7 @@ class CompactionIntegrationTest {
 
     @BeforeAll
     static void setUp() throws Exception {
-        postgres = new PostgreSQLContainer<>("postgres:15-alpine")
+        postgres = new PostgreSQLContainer("postgres:15-alpine")
                 .withDatabaseName("ducklake")
                 .withUsername("duck")
                 .withPassword("duck");

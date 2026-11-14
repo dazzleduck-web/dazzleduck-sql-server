@@ -31,7 +31,6 @@
         <duckdb.native.lib>linux_${duckdb.native.arch}</duckdb.native.lib>
         <!-- Override with -Djib.architecture=arm64 on Apple Silicon -->
         <jib.architecture>amd64</jib.architecture>
-        <testcontainer.version>1.21.2</testcontainer.version>
         <excluded.test.groups>stress</excluded.test.groups>
 
         <!-- Patched DuckLake extension (backports duckdb/ducklake#1453, #1482 and #1484 - file-level
@@ -135,7 +134,7 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>postgresql</artifactId>
+            <artifactId>testcontainers-postgresql</artifactId>
             <version>${testcontainer.version}</version>
             <scope>test</scope>
         </dependency>

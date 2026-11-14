@@ -15,7 +15,6 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <testcontainer.version>2.0.2</testcontainer.version>
         <delta-kernel.version>3.3.2</delta-kernel.version>
         <!-- ResultStreams' JSON writer uses jackson-databind and jsr310 directly. Pinned to the
              version arrow-vector brings jackson-core and jsr310 at, so all three match; otherwise

@@ -679,9 +679,18 @@ ingestion_queue_table_mapping = [{
           transformation = "SELECT minute, service, severity, count(*) AS n FROM __base GROUP BY ALL" }
         { table = "log_errors"
           transformation = "SELECT ts, service, body FROM __base WHERE severity = 'ERROR'" }
+        { table = "log_service_counts"
+          transformation_view = "loglake.main.v_log_service_counts" }
     ]
 }]
 ```
+
+A sidecar's query is a `transformation` over `__base`, or is read from a view with
+`transformation_view`. The view is a query over the queue's table, written by its fully qualified
+name, for example `CREATE VIEW loglake.main.v_log_service_counts AS SELECT service, count(*) AS n
+FROM loglake.main.log GROUP BY ALL`; its one reference to that table is rewritten to `__base`, so
+the view also works as a query over the whole table. `input_table` names another table for the view
+to read instead.
 
 - **`__base`** is the batch's rows as the target table gets them: after the queue's `transformation`
   and the table's partition projections (for example the `bucket` column of a `bucket(N, col)`
@@ -720,12 +729,36 @@ ingestion_queue_table_mapping = [{
   registered. Before the upload nothing has left the staging directory; files already uploaded are
   deleted where they are local, and left for `ducklake_delete_orphaned_files` on object storage. A
   sidecar whose query returns no rows for a batch writes and registers no file.
-- **A sidecar table dropped under a running queue** is created again after the next failed batch. One
-  partitioned under a running queue fails that queue's batches with the reason until it is unpartitioned.
+- **A view-based sidecar changes without a restart.** Its view is read again on every
+  `queue_config_refresh_delay_ms` tick, as a queue's view is, and the new query is checked like a
+  startup one before it is used. A changed view whose query does not fit its table (a column or type
+  it lacks, a type DuckLake cannot register, a partitioning it cannot be written with, or a query
+  that does not run, joining a table that does not exist yet, say) is rejected: the sidecar keeps its
+  previous query, and the reason is logged as an error. The rejected query is checked again on each
+  periodic refresh, with a warning while it still does not fit, and used as soon as it does; not on
+  the forced refresh after a failed batch, which also leaves the time of the next periodic one as it
+  was. Each sidecar is checked on its own, and only the ones whose view changed, so one rejected view
+  does not hold back another's valid change. A view that cannot be read keeps its last query, with a
+  warning on every refresh. The same holds across a registry reload of a dynamic queue.
+- **Partitioned sidecar tables** are written with their partitioning, as the target table is:
+  identity, `year`/`month`/`day`/`hour` and `bucket(N)` transforms, with the same limits. A
+  partition column must be one the query produces, checked at startup. A sidecar table with a column
+  named like the key of one of its transforms (a `day` column beside `day(ts)`) cannot be written by a
+  COPY, whether or not the query produces that column, and fails the check. A sidecar table partitioned,
+  or re-partitioned, under a running queue is picked up on the next refresh; a batch written with the
+  old partitioning is retried once with the new one.
+- **A sidecar table dropped under a running queue** is created again after the next failed batch.
+- **Dynamic queues.** The SQLite registry holds sidecars in an `ingestion_queue_sidecars` table, one
+  row per sidecar: `ingestion_queue`, `sidecar_table`, `transformation` or `transformation_view`
+  (with an optional `input_table`), and an optional `position` that orders them. Bump
+  `schema_version` with any change, as for a queue row, and delete a queue's sidecar rows with the
+  queue: rows left behind attach to any later queue of the same name. A queue with a sidecar row
+  that is not usable keeps the sidecars it was running with (its own row still takes effect, unless
+  it moved the queue to another table: then the whole previous mapping is kept), or, if it is new, is
+  not loaded; it is never loaded without its sidecars. Either way an error is logged until the row is
+  fixed.
 
-Not supported yet: partitioned sidecar tables, a sidecar query taken from a view
-(`transformation_view`), and sidecars on queues of the dynamic SQLite provider. The design, including
-local staging with an uploader for object storage, is in `doc/SIDECAR_VIEWS_SPEC.md`.
+The design is in `doc/SIDECAR_VIEWS_SPEC.md`.
 
 ### Registration conflicts
 

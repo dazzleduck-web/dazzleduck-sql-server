@@ -607,17 +607,33 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
     /**
      * The COPY that writes {@code sidecar}'s rows for this batch: its query over {@code baseRelation}
      * (the batch's staged base files) as {@code __base}, its columns cast by name to its table's
-     * types, to {@code file} in the staging directory; no file when the query returns no rows.
+     * types, into {@code directory} in the staging directory; no file when the query returns no rows.
+     * A partitioned sidecar table is written with its partitioning, as the base is: the keys of its
+     * transforms projected, and {@code PARTITION_BY} its keys.
      */
-    private String constructSidecarWriteQuery(WriteInputs inputs, SidecarTarget sidecar, String baseRelation, String file) {
+    private String constructSidecarWriteQuery(WriteInputs inputs, SidecarTarget sidecar, String baseRelation, Path directory) {
         String query = SidecarTables.writeQuery(withProjections(baseRelation, inputs.sidecarProjections()), sidecar.transformation(),
                 sidecar.columns(), sidecar.produced());
+        if (sidecar.partitionBy().isEmpty()) {
+            return """
+                    COPY
+                        (%s)
+                        TO '%s'
+                        (FORMAT parquet%s, RETURN_FILES, WRITE_EMPTY_FILE false);
+                    """.formatted(query, directory.resolve("dd_" + UUID.randomUUID() + ".parquet").toString().replace("'", "''"),
+                    compressionClause("parquet"));
+        }
+        // A partitioned COPY of no rows writes no file, so WRITE_EMPTY_FILE (which it rejects) is not needed.
+        // APPEND, as for the base: without it every file is named data_0.parquet, so each batch's upload
+        // would overwrite the file an earlier batch registered at the same partition path.
         return """
                 COPY
                     (%s)
                     TO '%s'
-                    (FORMAT parquet%s, RETURN_FILES, WRITE_EMPTY_FILE false);
-                """.formatted(query, file.replace("'", "''"), compressionClause("parquet"));
+                    (FORMAT parquet%s, RETURN_FILES, APPEND, PARTITION_BY (%s));
+                """.formatted(withProjections(query, sidecar.projections()), directory.toString().replace("'", "''"),
+                compressionClause("parquet"), sidecar.partitionBy().stream()
+                        .map(io.dazzleduck.sql.commons.util.HeaderUtils::quoteIdentifier).collect(Collectors.joining(", ")));
     }
 
     /**
@@ -704,10 +720,11 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
 
             String stagedBase = stagedBaseRelation(write, inputs, source, baseOutput.files());
             Map<String, String> sidecarSql = new LinkedHashMap<>();
+            Map<String, Path> sidecarDirs = new LinkedHashMap<>();
             for (SidecarTarget sidecar : inputs.sidecars()) {
-                Path file = Files.createDirectories(stage.resolve("sidecar_" + sidecarSql.size()))
-                        .resolve("dd_" + UUID.randomUUID() + ".parquet");
-                sidecarSql.put(sidecar.table(), constructSidecarWriteQuery(inputs, sidecar, stagedBase, file.toString()));
+                Path directory = Files.createDirectories(stage.resolve("sidecar_" + sidecarSql.size()));
+                sidecarDirs.put(sidecar.table(), directory);
+                sidecarSql.put(sidecar.table(), constructSidecarWriteQuery(inputs, sidecar, stagedBase, directory));
             }
             Map<String, CopyOutput> sidecarOutputs = write.parallel(sidecarSql, sidecarSql::get,
                     (table, copySql) -> write.copy(copySql), SIDECAR_COPY_EXECUTOR);
@@ -730,7 +747,9 @@ public class ParquetIngestionQueue extends BulkIngestQueue<String, IngestionResu
                 }
                 List<String> files = new ArrayList<>();
                 for (String file : output.files()) {
-                    String destination = sidecar.path() + "/" + Path.of(file).getFileName();
+                    // Its path under the sidecar's staging directory: the partition directories, if any.
+                    String relative = sidecarDirs.get(sidecar.table()).relativize(Path.of(file)).toString().replace('\\', '/');
+                    String destination = sidecar.path() + "/" + relative;
                     destinations.put(destination, file);
                     files.add(destination);
                 }

@@ -18,7 +18,7 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.duckdb.DuckDBConnection;
 import org.junit.jupiter.api.*;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
@@ -83,7 +83,7 @@ public class DuckLakePostgresLoadTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private PostgreSQLContainer<?> postgres;
+    private PostgreSQLContainer postgres;
     private Runtime runtime;
     private BufferAllocator allocator;
     private int httpPort;
@@ -95,7 +95,7 @@ public class DuckLakePostgresLoadTest {
     void setup() throws Exception {
         tempDir = Files.createTempDirectory("ducklake-pg-load-test");
 
-        postgres = new PostgreSQLContainer<>("postgres:15-alpine")
+        postgres = new PostgreSQLContainer("postgres:15-alpine")
                 .withDatabaseName("ducklake")
                 .withUsername("duck")
                 .withPassword("duck");

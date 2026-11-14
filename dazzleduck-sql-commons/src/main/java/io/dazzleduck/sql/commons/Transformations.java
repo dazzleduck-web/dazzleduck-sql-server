@@ -585,9 +585,18 @@ public class Transformations {
      */
     public static String rewriteTableAsThis(String sql, String inputCatalog, String inputSchema, String inputTable)
             throws SQLException, JsonProcessingException {
+        return rewriteTableAs(sql, inputCatalog, inputSchema, inputTable, "__this");
+    }
+
+    /**
+     * As {@link #rewriteTableAsThis}, with the single reference to the input table replaced by the
+     * table name {@code replacement} (for example {@code __base} for a sidecar's view).
+     */
+    public static String rewriteTableAs(String sql, String inputCatalog, String inputSchema, String inputTable,
+                                        String replacement) throws SQLException, JsonProcessingException {
         JsonNode ast = parseToTree(sql);
         int[] count = {0};
-        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, count);
+        replaceBaseTableNode(ast, inputCatalog, inputSchema, inputTable, replacement, count);
         if (count[0] == 0) {
             throw new IllegalArgumentException(
                     "input_table '%s.%s.%s' not found in view body: %s"
@@ -601,7 +610,8 @@ public class Transformations {
         return parseToSql(ast);
     }
 
-    private static void replaceBaseTableNode(JsonNode node, String catalog, String schema, String table, int[] count) {
+    private static void replaceBaseTableNode(JsonNode node, String catalog, String schema, String table,
+                                             String replacement, int[] count) {
         if (node == null || node instanceof NullNode || !node.isContainerNode()) return;
         if (count[0] > 1) return; // already invalid — no point scanning further
         if (node.isObject()) {
@@ -615,13 +625,13 @@ public class Transformations {
                     ObjectNode obj = (ObjectNode) node;
                     obj.put(ExpressionConstants.FIELD_CATALOG_NAME, "");
                     obj.put(ExpressionConstants.FIELD_SCHEMA_NAME, "");
-                    obj.put(ExpressionConstants.FIELD_TABLE_NAME, "__this");
+                    obj.put(ExpressionConstants.FIELD_TABLE_NAME, replacement);
                     return; // don't recurse into the node we just mutated
                 }
             }
-            node.fields().forEachRemaining(e -> replaceBaseTableNode(e.getValue(), catalog, schema, table, count));
+            node.fields().forEachRemaining(e -> replaceBaseTableNode(e.getValue(), catalog, schema, table, replacement, count));
         } else {
-            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, count));
+            node.forEach(child -> replaceBaseTableNode(child, catalog, schema, table, replacement, count));
         }
     }
 

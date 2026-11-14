@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -109,7 +109,7 @@ class CompactionStressTest {
     static DuckLakeHousekeeper housekeeper;
     static CompactionState state;
 
-    static PostgreSQLContainer<?> postgres;
+    static PostgreSQLContainer postgres;
     static String startupScript;
     static CompactionRunLog runLog;
     static CompactionService service;
@@ -121,7 +121,7 @@ class CompactionStressTest {
 
     @BeforeAll
     static void setUp() throws Exception {
-        postgres = new PostgreSQLContainer<>("postgres:15-alpine")
+        postgres = new PostgreSQLContainer("postgres:15-alpine")
                 .withDatabaseName("ducklake")
                 .withUsername("duck")
                 .withPassword("duck");
