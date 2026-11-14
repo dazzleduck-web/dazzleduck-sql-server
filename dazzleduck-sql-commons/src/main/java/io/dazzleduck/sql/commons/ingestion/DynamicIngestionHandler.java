@@ -106,7 +106,7 @@ public class DynamicIngestionHandler extends DuckLakeIngestionHandler {
             logger.debug("schema_version changed ({} → {}), reloading ingestion queues",
                     lastSeenVersion.get(), currentVersion);
 
-            updateMappings(DynamicQueueRepository.loadAll(readConn));
+            updateMappings(DynamicQueueRepository.loadAll(readConn, currentMappings()));
             lastSeenVersion.set(currentVersion);
         } catch (Exception e) {
             logger.warn("Failed to reload ingestion queue registry from {}", dbPath, e);

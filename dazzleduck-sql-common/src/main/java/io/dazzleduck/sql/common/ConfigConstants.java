@@ -47,6 +47,8 @@ public class ConfigConstants {
     public static final String EXTRACT_CLAIMS_KEY = "extract_claims";
     // Tables written beside the queue's table from every batch: [{ table = ..., transformation = ... }]
     public static final String SIDECARS_KEY       = "sidecars";
+    // A sidecar's query read from a view (re-read on refresh) instead of given as transformation
+    public static final String SIDECAR_TRANSFORMATION_VIEW_KEY = "transformation_view";
 
     // Ingestion queue partitioning keys — split a queue into N hash-routed sub-queues.
     // NUM_PARTITIONS_KEY: number of partitions (>= 1; 1 disables partitioning).

@@ -9,8 +9,11 @@ file is then uploaded unchanged with `COPY (SELECT content FROM read_blob(file))
 Queues without sidecars write directly, as before. Measured against B and H on DuckDB 1.5.6 and
 2.0.0, small and large files, I had no clear loss or win (see the bench README), and it needs no
 `FileUploader`, no AWS SDK, no credentials outside DuckDB and no per-cloud code, so *The uploader*,
-*Library*, *Authentication* and *Uploader configuration* below are not pursued. Not built yet:
-`transformation_view` and its reload check, partitioned sidecar tables, and dynamic queues. Startup
+*Library*, *Authentication* and *Uploader configuration* below are not pursued. Also built: a
+sidecar query read from a view (`transformation_view`, over the queue's table or an `input_table`,
+rewritten to `__base`) with the reload check below; partitioned sidecar tables; and sidecars on
+dynamic queues, stored in an `ingestion_queue_sidecars` table of the SQLite registry, one row per
+sidecar (open question 1). Startup
 also rejects sidecar columns DuckLake cannot register from Parquet (`HUGEINT`, `UHUGEINT`, `TIMETZ`).
 Without an `input_schema`, the startup check runs over the target table's columns. User
 documentation is in the README under *Sidecars*.
@@ -310,8 +313,8 @@ S3. Treat the numbers as directional until they are repeated against a real buck
 
 ## Open questions
 
-1. **Dynamic queues.** How the SQLite queue registry stores a queue's sidecars: a JSON column, or a
-   child table keyed by queue.
+1. **Dynamic queues.** Decided: a child table, `ingestion_queue_sidecars`, one row per sidecar keyed
+   by queue and sidecar table, rather than a JSON column on the queue row.
 2. **Azure and GCS.** Their SDKs are heavier than the S3 one. The alternative is a small DuckDB
    extension that copies a local file through DuckDB's own file system, which would reuse DuckDB's
    secrets for every cloud and need no Java SDK, at the cost of DuckDB's S3 writer and its 2.0

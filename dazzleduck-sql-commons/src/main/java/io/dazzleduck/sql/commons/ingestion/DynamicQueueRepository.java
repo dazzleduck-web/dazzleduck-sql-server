@@ -20,8 +20,9 @@ import java.util.Map;
  *
  * <p>Schema:
  * <pre>
- *   ingestion_queues  — one row per queue; deleted row = tombstone
- *   schema_version    — single row (id=1); owned by the writer to track remote sync progress.
+ *   ingestion_queues         — one row per queue; deleted row = tombstone
+ *   ingestion_queue_sidecars — one row per sidecar of a queue (see {@link Sidecar})
+ *   schema_version           — single row (id=1); owned by the writer to track remote sync progress.
  * </pre>
  *
  * <p>Change detection for {@link DynamicIngestionHandler} polls {@link #readSchemaVersion(Connection)}
@@ -40,6 +41,9 @@ public class DynamicQueueRepository implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(DynamicQueueRepository.class);
 
     static final String ATTACHMENT = "q_reg";
+
+    /** The registry's table of queue sidecars: one row per sidecar, keyed by queue and sidecar table. */
+    static final String SIDECARS_TABLE = "ingestion_queue_sidecars";
 
     private final String dbPath;
 
@@ -92,6 +96,16 @@ public class DynamicQueueRepository implements AutoCloseable {
                     st.execute("ALTER TABLE " + ATTACHMENT + ".ingestion_queues ADD COLUMN " + column + " TEXT");
                 }
             }
+            st.execute("""
+                CREATE TABLE IF NOT EXISTS %s.%s (
+                    ingestion_queue     TEXT NOT NULL,
+                    sidecar_table       TEXT NOT NULL,
+                    transformation      TEXT,
+                    transformation_view TEXT,
+                    input_table         TEXT,
+                    position            INTEGER,
+                    PRIMARY KEY (ingestion_queue, sidecar_table)
+                )""".formatted(ATTACHMENT, SIDECARS_TABLE));
             st.execute("""
                 CREATE TABLE IF NOT EXISTS %s.schema_version (
                     id      INTEGER PRIMARY KEY CHECK (id = 1),
@@ -233,6 +247,17 @@ public class DynamicQueueRepository implements AutoCloseable {
      * key/value relation holding the queue's session variables (see {@link IngestionVariables}).
      */
     public static Map<String, QueueIdToTableMapping> loadAll(Connection conn) throws SQLException {
+        return loadAll(conn, Map.of());
+    }
+
+    /**
+     * As {@link #loadAll(Connection)}, for a reload: a queue whose sidecar rows are not usable keeps
+     * the sidecars it has in {@code current}, with its own row as it now reads, rather than being left
+     * out, which would evict a running queue over a typo in one row. A new queue with unusable rows is
+     * still left out.
+     */
+    public static Map<String, QueueIdToTableMapping> loadAll(Connection conn, Map<String, QueueIdToTableMapping> current)
+            throws SQLException {
         Map<String, QueueIdToTableMapping> result = new LinkedHashMap<>();
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -263,7 +288,101 @@ public class DynamicQueueRepository implements AutoCloseable {
                         .withVariables(variablesOf(queueId, rs)));
             }
         }
+        Map<String, java.util.List<Sidecar>> sidecars = loadSidecars(conn);
+        for (var entry : sidecars.entrySet()) {
+            QueueIdToTableMapping mapping = result.get(entry.getKey());
+            if (mapping == null) {
+                logger.warn("Ignoring sidecars of '{}', which is not a queue in the registry", entry.getKey());
+                continue;
+            }
+            QueueIdToTableMapping usable = null;
+            if (entry.getValue() != null) { // null: a sidecar row was unusable, logged by loadSidecars
+                try {
+                    usable = mapping.withSidecars(entry.getValue());
+                } catch (IllegalArgumentException e) {
+                    logger.error("Queue '{}': its sidecar rows are not usable: {}", entry.getKey(), e.getMessage());
+                }
+            }
+            QueueIdToTableMapping kept = null;
+            QueueIdToTableMapping before = current.get(entry.getKey());
+            boolean moved = before != null && !(before.catalog().equals(mapping.catalog())
+                    && before.schema().equals(mapping.schema()) && before.table().equals(mapping.table()));
+            if (usable == null && moved) {
+                // Its previous sidecars belong to its previous table: applied to the new one, they would
+                // create tables in the wrong schema, or read the wrong table. Nothing changes until fixed.
+                kept = before;
+                logger.error("Queue '{}' keeps its whole previous mapping, ignoring the move of its table too, until "
+                        + "its sidecar rows are fixed", entry.getKey());
+            } else if (usable == null && before != null) {
+                // The queue's own row as it now reads, with the sidecars it was running with: a typo in
+                // a sidecar row neither evicts the queue nor holds back a change to its own row.
+                try {
+                    kept = mapping.withSidecars(current.get(entry.getKey()).sidecars());
+                    logger.error("Queue '{}' keeps its previous sidecars until its sidecar rows are fixed", entry.getKey());
+                } catch (IllegalArgumentException e) {
+                    // Its previous sidecars do not fit its new row either (one is its new table, say):
+                    // the whole previous mapping is kept, its row change too, until both are fixed.
+                    kept = current.get(entry.getKey());
+                    logger.error("Queue '{}' keeps its whole previous mapping, ignoring the change to its own row too, "
+                            + "until its sidecar rows are fixed: its previous sidecars do not fit its new row: {}",
+                            entry.getKey(), e.getMessage());
+                }
+            }
+            if (usable != null) {
+                result.put(entry.getKey(), usable);
+            } else if (kept != null) {
+                result.put(entry.getKey(), kept);
+            } else {
+                // Left out rather than loaded without its sidecars, which would write its batches
+                // with no sidecar rows and nothing saying why; the other queues load as usual.
+                logger.error("Queue '{}' is not loaded until its sidecar rows are fixed", entry.getKey());
+                result.remove(entry.getKey());
+            }
+        }
         return result;
+    }
+
+    /**
+     * The registry's sidecars, by queue, in {@code position} order (then by table). A registry
+     * created before the sidecars table existed has none. A queue with a row that is not a usable
+     * sidecar maps to {@code null}, and is left out of the load (see {@link #loadAll}).
+     */
+    private static Map<String, java.util.List<Sidecar>> loadSidecars(Connection conn) throws SQLException {
+        Map<String, java.util.List<Sidecar>> sidecars = new LinkedHashMap<>();
+        if (!tableExists(conn, SIDECARS_TABLE)) {
+            return sidecars;
+        }
+        java.util.Set<String> unusable = new java.util.HashSet<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT ingestion_queue, sidecar_table, transformation, transformation_view,"
+                     + " input_table FROM " + ATTACHMENT + "." + SIDECARS_TABLE
+                     + " ORDER BY ingestion_queue, position NULLS LAST, sidecar_table")) {
+            while (rs.next()) {
+                String queueId = rs.getString("ingestion_queue");
+                try {
+                    sidecars.computeIfAbsent(queueId, k -> new java.util.ArrayList<>()).add(new Sidecar(
+                            rs.getString("sidecar_table"), rs.getString("transformation"),
+                            rs.getString("transformation_view"), rs.getString("input_table")));
+                } catch (IllegalArgumentException e) {
+                    logger.error("Queue '{}': sidecar row '{}' is not usable: {}",
+                            queueId, rs.getString("sidecar_table"), e.getMessage());
+                    unusable.add(queueId);
+                }
+            }
+        }
+        unusable.forEach(queueId -> sidecars.put(queueId, null));
+        return sidecars;
+    }
+
+    private static boolean tableExists(Connection conn, String table) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT count(*) FROM duckdb_tables() WHERE database_name = ? AND table_name = ?")) {
+            ps.setString(1, ATTACHMENT);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getLong(1) > 0;
+            }
+        }
     }
 
     /**

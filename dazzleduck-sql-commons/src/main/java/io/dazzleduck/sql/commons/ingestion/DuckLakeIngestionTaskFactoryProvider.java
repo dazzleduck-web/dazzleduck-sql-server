@@ -89,36 +89,37 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
     }
 
     /**
-     * The queue's {@code sidecars} list. Each entry is {@code { table = ..., transformation = ... }};
-     * a view-based sidecar ({@code transformation_view}) is not supported yet and fails the load, as
-     * does any other key, rather than be silently ignored.
+     * The queue's {@code sidecars} list. Each entry is {@code { table, transformation }}, or
+     * {@code { table, transformation_view [, input_table] }}; any other key fails the load rather
+     * than be silently ignored.
      */
     static List<Sidecar> sidecars(String ingestionQueue, Config c) {
         if (!c.hasPath(ConfigConstants.SIDECARS_KEY)) {
             return List.of();
         }
+        java.util.Set<String> keys = java.util.Set.of("table", ConfigConstants.TRANSFORMATION_KEY,
+                ConfigConstants.SIDECAR_TRANSFORMATION_VIEW_KEY, ConfigConstants.INPUT_TABLE_KEY);
         List<Sidecar> sidecars = new java.util.ArrayList<>();
         for (Config entry : c.getConfigList(ConfigConstants.SIDECARS_KEY)) {
             for (String key : entry.root().keySet()) {
-                if (key.equals("transformation_view")) {
-                    throw new IllegalArgumentException(("Queue '%s': sidecar 'transformation_view' is not supported "
-                            + "yet; give the query as 'transformation'").formatted(ingestionQueue));
-                }
-                if (!key.equals("table") && !key.equals(ConfigConstants.TRANSFORMATION_KEY)) {
-                    throw new IllegalArgumentException("Queue '%s': unknown sidecar key '%s'; expected 'table' and '%s'"
-                            .formatted(ingestionQueue, key, ConfigConstants.TRANSFORMATION_KEY));
+                if (!keys.contains(key)) {
+                    throw new IllegalArgumentException("Queue '%s': unknown sidecar key '%s'; expected one of %s"
+                            .formatted(ingestionQueue, key, new java.util.TreeSet<>(keys)));
                 }
             }
-            String table = entry.hasPath("table") ? entry.getString("table") : null;
-            String transformation = entry.hasPath(ConfigConstants.TRANSFORMATION_KEY)
-                    ? entry.getString(ConfigConstants.TRANSFORMATION_KEY) : null;
             try {
-                sidecars.add(new Sidecar(table, transformation));
+                sidecars.add(new Sidecar(string(entry, "table"), string(entry, ConfigConstants.TRANSFORMATION_KEY),
+                        string(entry, ConfigConstants.SIDECAR_TRANSFORMATION_VIEW_KEY), string(entry, ConfigConstants.INPUT_TABLE_KEY)));
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("Queue '%s': %s".formatted(ingestionQueue, e.getMessage()), e);
             }
         }
         return sidecars;
+    }
+
+
+    private static String string(Config entry, String key) {
+        return entry.hasPath(key) ? entry.getString(key) : null;
     }
 
     @Override

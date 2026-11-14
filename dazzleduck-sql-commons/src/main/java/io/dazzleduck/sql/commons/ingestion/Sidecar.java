@@ -15,10 +15,19 @@ import java.util.Set;
  * <p>{@code __base} is the base table's rows for the batch as written: after the queue's
  * transformation and its partition projections. See {@code doc/SIDECAR_VIEWS_SPEC.md}.
  *
+ * <p>The query is either given as {@code transformation}, or read from a view
+ * ({@code transformation_view}): a query over the queue's table (or {@code input_table}), whose one
+ * reference to that table is rewritten to {@code __base}. A view is read again on every refresh, so
+ * the query can change without a restart.
+ *
  * @param table          the sidecar table's name, in the queue's catalog and schema
- * @param transformation a single query that reads {@code __base}
+ * @param transformation a single query that reads {@code __base}; {@code null} for a view
+ * @param view           the view the query is read from, as {@code catalog.schema.view}; {@code null}
+ *                       for a transformation
+ * @param inputTable     the table the view reads, as {@code catalog.schema.table}, rewritten to
+ *                       {@code __base}; {@code null} for the queue's own table
  */
-public record Sidecar(String table, String transformation) {
+public record Sidecar(String table, String transformation, String view, String inputTable) {
 
     /** Name the batch's base rows are exposed under in a sidecar's transformation. */
     public static final String BASE = "__base";
@@ -27,8 +36,45 @@ public record Sidecar(String table, String transformation) {
         if (table == null || table.isBlank()) {
             throw new IllegalArgumentException("a sidecar needs a 'table'");
         }
-        if (transformation == null || transformation.isBlank()) {
-            throw new IllegalArgumentException("sidecar '%s' needs a 'transformation'".formatted(table));
+        boolean hasTransformation = transformation != null && !transformation.isBlank();
+        boolean hasView = view != null && !view.isBlank();
+        if (hasTransformation == hasView) {
+            throw new IllegalArgumentException("sidecar '%s' needs exactly one of 'transformation' and 'transformation_view'"
+                    .formatted(table));
+        }
+        if (hasView) {
+            requireQualified(table, "transformation_view", view);
+        }
+        if (inputTable != null && !inputTable.isBlank()) {
+            if (!hasView) {
+                throw new IllegalArgumentException("sidecar '%s': 'input_table' goes with 'transformation_view'".formatted(table));
+            }
+            requireQualified(table, "input_table", inputTable);
+        } else {
+            inputTable = null;
+        }
+        if (!hasTransformation) {
+            transformation = null;
+        }
+        if (!hasView) {
+            view = null;
+        }
+    }
+
+    /** A sidecar whose query is given as {@code transformation}. */
+    public Sidecar(String table, String transformation) {
+        this(table, transformation, null, null);
+    }
+
+    /** Whether the query is read from a view. */
+    public boolean hasView() {
+        return view != null;
+    }
+
+    private static void requireQualified(String table, String key, String name) {
+        if (name.split("\\.", -1).length != 3 || name.contains("..") || name.startsWith(".") || name.endsWith(".")) {
+            throw new IllegalArgumentException("sidecar '%s': '%s' must be fully qualified as 'catalog.schema.name', got '%s'"
+                    .formatted(table, key, name));
         }
     }
 
@@ -49,7 +95,9 @@ public record Sidecar(String table, String transformation) {
                 throw new IllegalArgumentException("Queue '%s': sidecar table '%s' is declared more than once"
                         .formatted(ingestionQueue, sidecar.table()));
             }
-            validateTransformation(ingestionQueue, sidecar);
+            if (!sidecar.hasView()) {
+                validateTransformation(ingestionQueue, sidecar); // a view's query is checked when it is read
+            }
         }
     }
 
