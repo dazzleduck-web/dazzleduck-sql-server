@@ -252,10 +252,13 @@ final class TierLoop {
         }
         state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
         publish("RUNNING", null);
-        if (!listed.isEmpty()) {
+        if (called > 0) {
             logger.info("Tier '{}' pass for {}: {} table(s) listed, {} called ({} merged, {} failed), {} carried over, in {} ms",
                     tier.name(), database, listed.size(), called, merged, failed, carryOver.size(),
                     Duration.between(passStart, end).toMillis());
+        } else if (!listed.isEmpty()) {
+            // every listed table backed off or held by another job: logged at each idle sleep otherwise
+            logger.debug("Tier '{}' pass for {}: {} table(s) listed, none called", tier.name(), database, listed.size());
         }
         return new PassResult(false, listed.size(), called, merged, failed, carryOver.size());
     }

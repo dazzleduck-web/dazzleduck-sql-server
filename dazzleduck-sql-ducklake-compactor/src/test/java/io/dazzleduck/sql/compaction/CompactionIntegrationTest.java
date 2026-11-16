@@ -297,6 +297,51 @@ class CompactionIntegrationTest {
         assertEquals(1L, state.getSnapshot(config.databases()).databases().get(CATALOG).totalFilesRewritten());
     }
 
+    @Test
+    @Order(10)
+    void theStartedServiceMergesNewFilesOnItsOwnAndReportsItsLoops() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(conn, "CREATE TABLE %s.main.live (id BIGINT, name VARCHAR)".formatted(CATALOG));
+        }
+        CompactionTier minor = MINOR.withIdleSleep(Duration.ofMillis(200));
+        CompactionTier major = MAJOR.withIdleSleep(Duration.ofMillis(200));
+        CompactionConfig liveConfig = new CompactionConfig(List.of(CATALOG), List.of(minor, major),
+                Duration.ofHours(1), Duration.ofSeconds(5), List.of(), 0, CompactionRunLog.DEFAULT_CAPACITY);
+        SimpleMeterRegistry liveRegistry = new SimpleMeterRegistry();
+        CompactionState state = new CompactionState(liveRegistry, liveConfig.databases(), List.of("minor", "major"));
+        try (CompactionService live = new CompactionService(liveConfig, startupScript,
+                new DuckDbTierCompactor(startupScript, state), new DuckLakeHousekeeper(startupScript,
+                liveConfig.snapshotRetention(), List.of(), state), state, new CompactionRunLog(50))) {
+            live.start();
+            for (int i = 0; i < 5; i++) {
+                try (Connection conn = ConnectionPool.getConnection()) {
+                    ConnectionPool.execute(conn, "INSERT INTO %s.main.live SELECT range, 'x' FROM range(10)".formatted(CATALOG));
+                }
+            }
+            long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+            while (liveFiles("live") > 1) {
+                assertTrue(System.nanoTime() < deadline, "the minor loop should merge the five files");
+                Thread.sleep(100);
+            }
+            assertEquals(50L, ConnectionPool.collectFirst("SELECT count(*) FROM %s.main.live".formatted(CATALOG), Long.class));
+            CompactionStats stats = live.getStats();
+            CompactionStats.TierStatus minorLoop = stats.databases().get(CATALOG).tiers().get("minor");
+            assertEquals("RUNNING", minorLoop.state());
+            assertTrue(minorLoop.passes() >= 1);
+            assertTrue(minorLoop.threads() >= 1);
+            assertTrue(liveRegistry.get("ducklake.compaction.commits").tag("tier", "minor").functionCounter().count() >= 1);
+            assertTrue(stats.alerts().isEmpty(), stats.alerts().toString());
+        }
+    }
+
+    private static long liveFiles(String table) throws Exception {
+        return ConnectionPool.collectFirst((
+                "SELECT COUNT(*) FROM %1$s.ducklake_data_file d JOIN %1$s.ducklake_table t USING (table_id) "
+                        + "WHERE d.end_snapshot IS NULL AND t.end_snapshot IS NULL AND t.table_name = '%2$s'")
+                        .formatted(MD_DATABASE, table),
+                Long.class);
+    }
+
     private static long activeDeleteFiles(String table) throws Exception {
         return ConnectionPool.collectFirst((
                 "SELECT COUNT(*) FROM %1$s.ducklake_delete_file d JOIN %1$s.ducklake_table t USING (table_id) "
