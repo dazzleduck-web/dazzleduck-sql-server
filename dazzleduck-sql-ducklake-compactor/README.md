@@ -174,9 +174,9 @@ reported as starved.
 
 The catalog's `idle_in_transaction_session_timeout` is read from Postgres when a tier's connection
 opens, so an `options=-cidle_in_transaction_session_timeout=600000` in the ATTACH string counts. A
-value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier one full
-group of whose smallest files (3,200 files for minor) would not fit in 80% of the timeout does not
-start.
+value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier does not
+start if one full group of its smallest files (3,200 files for minor, about 144 s) would not fit in
+80% of the timeout.
 
 The images set `MALLOC_ARENA_MAX=2`: most compactor memory is native `malloc` memory outside
 DuckDB's `memory_limit`, kept by glibc's per-thread arenas.
