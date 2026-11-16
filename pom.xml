@@ -53,6 +53,25 @@
         <!-- The JVM the images run on (and CI builds/tests on). Names the base image tag. -->
         <java.runtime.version>25</java.runtime.version>
         <duckdb.version>1.5.6.0</duckdb.version>
+        <!-- Patched DuckLake extension baked into every image that loads DuckLake (runtime,
+             otel-collector, ducklake-compactor; jib and native). It backports duckdb/ducklake#1453,
+             #1482 and #1484 (file-level conflict detection for concurrent compactions and deletes),
+             rowid file pruning and the duckdb/ducklake#1895 fix onto DuckLake's v1.5-variegata branch
+             at the DuckDB v1.5.6 bump, whose extension source is the commit (ac7595b0) duckdb.version
+             pins via duckdb/duckdb's own ducklake.cmake. Built and published by dazzleduck-web/ducklake's
+             build-and-publish-extension.yml workflow; see
+             dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md for how these properties relate and
+             how to update them. ducklake.patch.built.for.duckdb.version MUST equal duckdb.version,
+             enforced by DuckLakePatchVersionTest. -->
+        <ducklake.patch.release>v1.5.6-dazzleduck.3</ducklake.patch.release>
+        <ducklake.patch.built.for.duckdb.version>1.5.6.0</ducklake.patch.built.for.duckdb.version>
+        <!-- The DuckDB library-version string (not duckdb.version) DuckDB uses to name its
+             extension cache directory, e.g. ~/.duckdb/extensions/v1.5.6/linux_amd64/. Verified via
+             `select * from pragma_version()` against duckdb_jdbc:${duckdb.version}. -->
+        <ducklake.extension.cache.version>v1.5.6</ducklake.extension.cache.version>
+        <!-- See the download-patched-ducklake-extension execution below: false only for the
+             commands that build a jib image. -->
+        <ducklake.extension.download.skip>true</ducklake.extension.download.skip>
         <typesafe-config.version>1.4.4</typesafe-config.version>
         <calcite.version>1.25.0</calcite.version>
         <!-- 4.4.1, not 4.5.x. 4.4.1 has the NioSocket write fix (4.4.0 dropped response bytes on a
@@ -191,6 +210,48 @@
     </profiles>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Downloads the patched DuckLake extension for the arch being built (jib.architecture)
+                     from the dazzleduck-web/ducklake release, before jib bakes it into the image (each
+                     image module's jib extraDirectories). Inherited by every module that declares
+                     exec-maven-plugin. Mirrors the Dockerfile.native curl step for the same binary; see
+                     DUCKLAKE_PATCH.md.
+
+                     Skipped by default (ducklake.extension.download.skip=true): it is bound to
+                     generate-resources only to run ahead of an explicit `jib:build`/`jib:dockerBuild`,
+                     but generate-resources is also part of `mvn test`/`install`/`verify`, none of which
+                     need this 36MB asset. Commands that build an image pass
+                     -Dducklake.extension.download.skip=false (release.yml, scripts/docker-publish.sh,
+                     .claude/commands/publish-docker.md, the module READMEs); without it jib fails on
+                     the missing target/ducklake-extension/linux_<arch> directory. -->
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <version>3.3.0</version>
+                    <executions>
+                        <execution>
+                            <id>download-patched-ducklake-extension</id>
+                            <phase>generate-resources</phase>
+                            <goals>
+                                <goal>exec</goal>
+                            </goals>
+                            <configuration>
+                                <skip>${ducklake.extension.download.skip}</skip>
+                                <executable>curl</executable>
+                                <arguments>
+                                    <argument>-fsSL</argument>
+                                    <argument>--create-dirs</argument>
+                                    <argument>-o</argument>
+                                    <argument>${project.build.directory}/ducklake-extension/linux_${jib.architecture}/ducklake.duckdb_extension</argument>
+                                    <argument>https://github.com/dazzleduck-web/ducklake/releases/download/${ducklake.patch.release}/ducklake-linux_${jib.architecture}.duckdb_extension</argument>
+                                </arguments>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
             <plugin>
                 <groupId>org.commonjava.maven.plugins</groupId>

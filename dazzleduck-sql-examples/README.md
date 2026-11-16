@@ -28,7 +28,8 @@ that exclusion.
   #  so -am is not enough — install first.)
   ./mvnw install -DskipTests
   # Build the runtime image for your arch (use amd64 on Intel/CI):
-  ./mvnw -pl dazzleduck-sql-runtime jib:dockerBuild -Djib.architecture=arm64
+  # (generate-resources and the flag download the patched DuckLake extension the image bakes in.)
+  ./mvnw -pl dazzleduck-sql-runtime generate-resources jib:dockerBuild -Djib.architecture=arm64 -Dducklake.extension.download.skip=false
   # Tag the unsuffixed name the compose files expect:
   docker tag dazzleduck/dazzleduck:latest-arm64 dazzleduck/dazzleduck:latest
   ```

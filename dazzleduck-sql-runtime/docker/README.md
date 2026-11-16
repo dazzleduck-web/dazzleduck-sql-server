@@ -69,7 +69,9 @@ docker build \
   .
 ```
 
-> Run from the repo root (`dazzleduck-sql-server/`). The version is read directly
+> Run from the repo root (`dazzleduck-sql-server/`).
+
+The image bakes in the patched DuckLake extension (see `dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`). Its download is skipped by default, so image builds pass `-Dducklake.extension.download.skip=false` and run at least the `generate-resources` phase; without them jib fails on the missing extension directory. The version is read directly
 > from `duckdb.version` in `pom.xml` — no manual sync needed.
 
 ---
@@ -78,16 +80,18 @@ docker build \
 
 Run from the repo root (`dazzleduck-sql-server/`).
 
+The image bakes in the patched DuckLake extension (see `dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`). Its download is skipped by default, so image builds pass `-Dducklake.extension.download.skip=false` and run at least the `generate-resources` phase; without them jib fails on the missing extension directory.
+
 ### Build and push to Docker Hub (CI/CD)
 
 ```bash
-./mvnw clean package jib:build -pl dazzleduck-sql-runtime -am -DskipTests
+./mvnw clean package jib:build -pl dazzleduck-sql-runtime -am -DskipTests -Dducklake.extension.download.skip=false
 ```
 
 ### Build to local Docker daemon only (development)
 
 ```bash
-./mvnw clean package jib:dockerBuild -pl dazzleduck-sql-runtime -am -DskipTests
+./mvnw clean package jib:dockerBuild -pl dazzleduck-sql-runtime -am -DskipTests -Dducklake.extension.download.skip=false
 ```
 
 > Defaults to `amd64`, which works on Intel/AMD Linux, Windows, and Apple Silicon (via Rosetta 2).
@@ -96,7 +100,7 @@ Run from the repo root (`dazzleduck-sql-server/`).
 ### Build only the runtime module (if other modules are already built)
 
 ```bash
-./mvnw jib:dockerBuild -pl dazzleduck-sql-runtime -DskipTests
+./mvnw generate-resources jib:dockerBuild -pl dazzleduck-sql-runtime -DskipTests -Dducklake.extension.download.skip=false
 ```
 
 ---

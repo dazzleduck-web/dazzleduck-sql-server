@@ -167,6 +167,13 @@
                 </configuration>
             </plugin>
 
+            <!-- Runs the parent pom's download-patched-ducklake-extension execution, which the jib
+                 extraDirectories below bake into the image. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+            </plugin>
+
             <!-- Docker image -->
             <plugin>
                 <groupId>com.google.cloud.tools</groupId>
@@ -205,6 +212,20 @@
                             <jvmFlag>--sun-misc-unsafe-memory-access=allow</jvmFlag>
                         </jvmFlags>
                     </container>
+                    <extraDirectories>
+                        <paths>
+                            <!-- The patched DuckLake extension (parent pom's
+                                 download-patched-ducklake-extension), at the cache path DuckDB
+                                 resolves INSTALL/LOAD/autoload from, so no stock build is fetched.
+                                 duckdb.properties sets allow_unsigned_extensions=true, since this
+                                 build isn't signed with DuckDB Labs' key. Only this arch's
+                                 subdirectory, so a target/ left over from the other arch adds nothing. -->
+                            <path>
+                                <from>${project.build.directory}/ducklake-extension/linux_${jib.architecture}</from>
+                                <into>/root/.duckdb/extensions/${ducklake.extension.cache.version}/linux_${jib.architecture}</into>
+                            </path>
+                        </paths>
+                    </extraDirectories>
                 </configuration>
             </plugin>
         </plugins>

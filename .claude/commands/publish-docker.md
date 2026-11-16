@@ -36,11 +36,16 @@ Fail fast if this returns non-zero.
 
 ### Step 3a — Build and push runtime + otel-collector images (run all 4 in parallel)
 
+Both images bake in the patched DuckLake extension (see
+`dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`). The download step is skipped by default,
+so every command passes `-Dducklake.extension.download.skip=false`; without it jib fails on the
+missing extension directory.
+
 **dazzleduck/dazzleduck arm64:**
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"
 ./mvnw package -DskipTests jib:build -pl dazzleduck-sql-runtime \
-  -Djib.architecture=arm64 \
+  -Djib.architecture=arm64 -Dducklake.extension.download.skip=false \
   -Djib.to.image=docker.io/dazzleduck/dazzleduck:<version>-arm64
 ```
 
@@ -48,7 +53,7 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"
 ./mvnw package -DskipTests jib:build -pl dazzleduck-sql-runtime \
-  -Djib.architecture=amd64 \
+  -Djib.architecture=amd64 -Dducklake.extension.download.skip=false \
   -Djib.to.image=docker.io/dazzleduck/dazzleduck:<version>-amd64
 ```
 
@@ -56,7 +61,7 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"
 ./mvnw package -DskipTests jib:build -pl dazzleduck-sql-otel-collector \
-  -Djib.architecture=arm64 \
+  -Djib.architecture=arm64 -Dducklake.extension.download.skip=false \
   -Djib.to.image=docker.io/dazzleduck/dazzleduck-otel-collector:<version>-arm64
 ```
 
@@ -64,7 +69,7 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"
 ./mvnw package -DskipTests jib:build -pl dazzleduck-sql-otel-collector \
-  -Djib.architecture=amd64 \
+  -Djib.architecture=amd64 -Dducklake.extension.download.skip=false \
   -Djib.to.image=docker.io/dazzleduck/dazzleduck-otel-collector:<version>-amd64
 ```
 
@@ -76,9 +81,8 @@ one after the other — **not** in parallel, and not alongside another build of 
 
 The compactor pom already sets the target image to
 `dazzleduck/ducklake-compactor:${project.version}-${jib.architecture}` (plus a `latest-${arch}`
-tag), so no `-Djib.to.image` override is needed — only `-Djib.architecture`. It also bakes in a
-patched DuckLake extension (see `dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`); that
-download step is skipped by default, so it needs `-Dducklake.extension.download.skip=false` here.
+tag), so no `-Djib.to.image` override is needed — only `-Djib.architecture`. Like the images
+above, it needs `-Dducklake.extension.download.skip=false` for the patched DuckLake extension.
 
 ```bash
 export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow"

@@ -14,8 +14,8 @@
 FROM ghcr.io/graalvm/native-image-community:25 AS build
 ARG TARGETARCH
 # Nothing to install: the GraalVM 25 image (Oracle Linux 10) already has libz.so, which the
-# native-image link needs (gcc ... -lz), via zlib-ng-compat-devel. Installing zlib-devel
-# conflicts with it.
+# native-image link needs (gcc ... -lz), via zlib-ng-compat-devel, and curl, which fetches the
+# patched DuckLake extension below. Installing zlib-devel conflicts with zlib-ng-compat-devel.
 WORKDIR /src
 COPY . .
 # -Pnative binds native-maven-plugin's compile-no-fork to the package phase and emits target/collector.
@@ -24,23 +24,40 @@ RUN --mount=type=cache,target=/root/.m2 \
     ./mvnw -q -Pnative -pl dazzleduck-sql-otel-collector -am -DskipTests package \
       -Dduckdb.native.arch="${TARGETARCH}"
 
-# Pre-download the DuckDB extensions the collector uses (arrow + ducklake) for the exact engine
-# version, into /root/.duckdb, so the runtime image needs no network to load them. The engine
-# version is read from the pom's duckdb.version property (single source of truth — no hardcoding).
-# Extensions are keyed to engine version and platform, so this must run on the target architecture.
+# Pre-download the DuckDB extensions the collector uses (arrow + patched ducklake) for the exact
+# engine version, into /root/.duckdb, so the runtime image needs no network to load them. The engine
+# version and the patched-extension release are read from the parent pom (single source of truth),
+# see dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md. Extensions are keyed to engine version
+# and platform, so this must run on the target architecture.
 RUN --mount=type=cache,target=/root/.m2 <<'SH'
 set -e
 DUCKDB_VERSION="$(./mvnw -q -N help:evaluate -Dexpression=duckdb.version -DforceStdout)"
-echo "duckdb.version = ${DUCKDB_VERSION}"
+DUCKLAKE_PATCH_RELEASE="$(./mvnw -q -N help:evaluate -Dexpression=ducklake.patch.release -DforceStdout)"
+DUCKLAKE_EXT_CACHE_VERSION="$(./mvnw -q -N help:evaluate -Dexpression=ducklake.extension.cache.version -DforceStdout)"
+echo "duckdb.version = ${DUCKDB_VERSION}, ducklake.patch.release = ${DUCKLAKE_PATCH_RELEASE}, arch = ${TARGETARCH}"
 DUCKJAR="/root/.m2/repository/org/duckdb/duckdb_jdbc/${DUCKDB_VERSION}/duckdb_jdbc-${DUCKDB_VERSION}.jar"
 [ -f "$DUCKJAR" ] || { echo "ERROR: DuckDB jar not found: $DUCKJAR"; exit 1; }
+
+# Pre-place the patched DuckLake extension at the exact local cache path DuckDB resolves LOAD from,
+# instead of INSTALL-ing the stock extension over the network.
+DUCKLAKE_EXT_DIR="/root/.duckdb/extensions/${DUCKLAKE_EXT_CACHE_VERSION}/linux_${TARGETARCH}"
+mkdir -p "$DUCKLAKE_EXT_DIR"
+curl -fsSL -o "${DUCKLAKE_EXT_DIR}/ducklake.duckdb_extension" \
+  "https://github.com/dazzleduck-web/ducklake/releases/download/${DUCKLAKE_PATCH_RELEASE}/ducklake-linux_${TARGETARCH}.duckdb_extension"
+
 mkdir -p /tmp/ext
 cat > /tmp/ext/Install.java <<'JAVA'
 import java.sql.*;
+import java.util.Properties;
 public class Install {
   public static void main(String[] a) throws Exception {
-    try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
-      for (String sql : new String[]{"INSTALL arrow FROM community","INSTALL ducklake","LOAD arrow","LOAD ducklake"})
+    // allow_unsigned_extensions must be a connection property, not a `SET` statement: DuckDB
+    // rejects changing it once the instance is running. The pre-placed extension isn't signed
+    // with DuckDB Labs' key. The collector sets it the same way (src/main/resources/duckdb.properties).
+    Properties props = new Properties();
+    props.setProperty("allow_unsigned_extensions", "true");
+    try (Connection c = DriverManager.getConnection("jdbc:duckdb:", props); Statement s = c.createStatement()) {
+      for (String sql : new String[]{"INSTALL arrow FROM community","LOAD arrow","LOAD ducklake"})
         s.execute(sql);
     }
     System.out.println("duckdb extensions installed");
@@ -57,7 +74,7 @@ SH
 FROM debian:12-slim AS runtime
 LABEL org.opencontainers.image.title="dazzleduck-sql-otel-collector (native)"
 COPY --from=build /src/dazzleduck-sql-otel-collector/target/collector /usr/local/bin/collector
-# Pre-installed DuckDB extensions (arrow, ducklake) so the collector loads them without network.
+# Pre-installed DuckDB extensions (arrow, patched ducklake) so the collector loads them without network.
 COPY --from=build /root/.duckdb /root/.duckdb
 # DuckDB extracts its bundled native library to java.io.tmpdir on first use; /tmp is writable.
 EXPOSE 4317
