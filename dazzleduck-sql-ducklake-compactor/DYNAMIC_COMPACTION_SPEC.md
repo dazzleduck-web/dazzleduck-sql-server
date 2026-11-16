@@ -30,11 +30,11 @@ Bands are contiguous, so every file belongs to one tier and outputs move up the 
 
 | Tier | Input band [min, max) | Target (`ducklake_target_file_size`) | Groups per table per call (static cap) |
 | --- | --- | --- | --- |
-| minor | [0, 8 MB) | 16 MB | 16 |
+| minor | [0, 8 MB) | 16 MB | 12 |
 | major | [8 MB, 64 MB) | 64 MB | 16 |
 | mega | [64 MB, 256 MB) | 256 MB | 5 |
 
-These caps keep each call at about 1 GB of input or less (minor 16 × 16 MB, major 16 × 64 MB, mega 5 × 256 MB). A backlog drains over consecutive passes, each committing its own batch.
+These caps keep each call at about 1 GB of input or less (minor 12 × 16 MB, major 16 × 64 MB, mega 5 × 256 MB). A backlog drains over consecutive passes, each committing its own batch.
 
 - Startup checks: bands must not overlap, every tier has a target, and each target must be at least its band max. With a lower target, DuckLake skips in-band files at or above it, and they never merge.
 - DuckLake checks a group's total before adding each file, so outputs overshoot the target by at most one input file (minor outputs stay under 24 MB).
@@ -60,7 +60,7 @@ So a group's size sets the call's peak memory (one group is in memory at a time)
 call_time ≈ groups × (files_per_group × sec_per_file + bytes_per_group ÷ throughput)
 ```
 
-**Why a file limit too.** The target bounds a group's bytes, not its files. Tiny files make a full minor group about 3,200 files (16 MB ÷ 5 KB), about 144 s at the measured 0.045 s per file, so 16 full groups would hold the transaction open for over 38 minutes. Minor time depends almost entirely on file count, so each call also gets a limit on input files, `MAX_FILES_PER_CALL`. Major and mega groups are a few large files, and their static caps already bound them.
+**Why a file limit too.** The target bounds a group's bytes, not its files. Tiny files make a full minor group about 3,200 files (16 MB ÷ 5 KB), about 144 s at the measured 0.045 s per file, so 12 full groups would hold the transaction open for about 29 minutes. Minor time depends almost entirely on file count, so each call also gets a limit on input files, `MAX_FILES_PER_CALL`. Major and mega groups are a few large files, and their static caps already bound them.
 
 **The cap for one call.** From the discovery query's files waiting and average file size:
 
@@ -70,11 +70,11 @@ file_cap        = max(1, floor(MAX_FILES_PER_CALL ÷ files_per_group))
 cap             = min(static_cap, max(file_cap, busy_partitions + 1))
 ```
 
-- In steady state groups are a few files and the cap is the static cap (16).
+- In steady state groups are a few files and the cap is the static cap (12 for minor).
 - During a minor backlog of 5 KB files the file cap is 1 or 2, so a call merges one or two full groups and commits in minutes.
 - The cap is never above the static cap, so `ducklake_target_file_size` and groups per call always hold.
 
-**Busy partitions and starvation.** DuckLake v1.5 picks partitions in a fixed order and a busy partition always has work, so a cap at or below the number of busy partitions can give every slot to the same partitions on every call: the table's other partitions never compact. So, within the static cap, the cap is at least busy partitions + 1, even when that goes past the file limit. When busy partitions + 1 is above the static cap, the static cap still wins and the table raises a starvation alert. The real fix is upstream: a partition filter or oldest-first groups in DuckLake.
+**Busy partitions and starvation.** DuckLake v1.5 picks partitions in a fixed order and a busy partition always has work, so a cap at or below the number of busy partitions can give every slot to the same partitions on every call: the table's other partitions never compact. So, within the static cap, the cap is at least busy partitions + 1, even when that goes past the file limit. When busy partitions + 1 is above the static cap, the static cap still wins and the table raises a starvation alert. Minor's static cap is 12 so that even this worst case, 12 full groups of tiny files at about 144 s each, stays near 29 minutes, under a 30-minute idle-in-transaction timeout. The real fix is upstream: a partition filter or oldest-first groups in DuckLake.
 
 **Memory.** A call's peak memory is one group: files per group × a per-file cost. That cost is 0.12 MiB for a table with a sort key and 0.85 MiB without one (measured, 1,000 small files), so a full minor group of tiny files needs about 385 MiB sorted but about 2.7 GiB unsorted. DuckLake cannot limit files per group, so unsorted tables with tiny files need a sort key or a larger `memory_limit`; the discovery query flags tables without a sort key.
 
@@ -170,7 +170,7 @@ If the file limit proves too blunt, replace it with a time-based cap, still neve
 
 | Constant | Value | Source |
 | --- | --- | --- |
-| Static caps (minor, major, mega) | 16, 16, 5 | About 1 GB of input per call at most |
+| Static caps (minor, major, mega) | 12, 16, 5 | About 1 GB of input per call at most; minor's 12 full groups of tiny files stay under a 30-min idle-in-transaction timeout |
 | MAX_FILES_PER_CALL | 6,000 | About 4.5 min at the measured sorted rate (0.045 s per file, 4 threads); about 9 min if unsorted tables take twice as long (a guess) |
 | MINOR_MIN_FILES | 4 | Proposed; each waiting small file is one more file a query opens |
 | MINOR_MAX_WAIT | 5 min | Proposed; the longest a small file waits before it is merged |
