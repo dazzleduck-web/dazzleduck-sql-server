@@ -294,6 +294,25 @@ class DuckDbTierCompactorTest {
     }
 
     @Test
+    void everyInstanceReturnsFreedMemoryAfterEachTask() throws Exception {
+        // Review on #542: DuckDB's allocator otherwise keeps memory a merge freed, outside memory_limit
+        try (Connection c = RawConnections.open(startup, List.of()); Statement s = c.createStatement();
+             ResultSet rs = s.executeQuery("SELECT current_setting('allocator_background_threads'),"
+                     + " current_setting('allocator_flush_threshold')")) {
+            rs.next();
+            assertTrue(rs.getBoolean(1));
+            assertEquals(64_000_000L, DuckDbTierCompactor.parseDuckDbSize(rs.getString(2)), 1_000_000L);
+        }
+        try (Connection c = RawConnections.open(startup, List.of("SET allocator_flush_threshold = '256MB'"));
+             Statement s = c.createStatement();
+             ResultSet rs = s.executeQuery("SELECT current_setting('allocator_flush_threshold')")) {
+            rs.next();
+            assertEquals(256_000_000L, DuckDbTierCompactor.parseDuckDbSize(rs.getString(1)), 1_000_000L,
+                    "an instance's own settings win");
+        }
+    }
+
+    @Test
     void theOtherInstancesGetASliceOfTheMemoryToo() {
         // Review on #542: housekeeping, retention and the file-count instance had DuckDB's default
         assertEquals(List.of("SET memory_limit = '160000000 bytes'", "SET enable_external_file_cache = false"),

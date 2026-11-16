@@ -103,6 +103,8 @@ class CallSizingTest {
         CallSizing.Plan unsorted = CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), timeout, -1);
         assertTrue(unsorted.reduced());
         assertEquals(1_600L * 5_000, unsorted.target(), "144 s / 0.09 s = 1,600 files of 5 KB");
+        assertEquals(1_600L * 5_000 / 2, unsorted.maxFileSize(), "half the lowered target");
+        assertEquals(8_000_000L, sorted.maxFileSize(), "the band's own");
         assertEquals(1_600, unsorted.cap().filesPerGroup());
         assertEquals(1, unsorted.cap().cap(), "1,600 files at 0.09 s fill the 144 s");
 

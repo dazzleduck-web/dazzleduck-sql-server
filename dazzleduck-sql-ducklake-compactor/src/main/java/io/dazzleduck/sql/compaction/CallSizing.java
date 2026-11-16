@@ -67,11 +67,13 @@ public final class CallSizing {
     /**
      * What one call does: its cap and the session target it runs with.
      *
-     * @param target  {@code ducklake_target_file_size} for this call: the tier's target, or a lower one
-     *                when a full group would not fit (see {@link #plan})
-     * @param reduced whether {@code target} is lowered
+     * @param target      {@code ducklake_target_file_size} for this call: the tier's target, or a lower
+     *                    one when a full group would not fit (see {@link #plan})
+     * @param maxFileSize the {@code max_file_size} for this call: the band's, or half the lowered
+     *                    target, so a lowered call leaves the outputs of earlier ones alone
+     * @param reduced     whether {@code target} is lowered
      */
-    public record Plan(Cap cap, long target, boolean reduced) {
+    public record Plan(Cap cap, long target, long maxFileSize, boolean reduced) {
     }
 
     /**
@@ -108,7 +110,7 @@ public final class CallSizing {
         long fullGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
         long maxFiles = Math.min(maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes), groupFilesLimit);
         if (fullGroup <= maxFiles) {
-            return new Plan(of(tier, work, idleTxnTimeoutMs), tier.targetFileSize(), false);
+            return new Plan(of(tier, work, idleTxnTimeoutMs), tier.targetFileSize(), tier.maxFileSize(), false);
         }
         if (maxFiles < 2) {
             return null;
@@ -116,7 +118,12 @@ public final class CallSizing {
         // a group adds files while its total is below the target: this many average files, no more
         long target = maxFiles * average;
         CompactionTier lowered = tier.withTargetFileSize(target);
-        return new Plan(of(lowered, work, idleTxnTimeoutMs), target, true);
+        // Merged tiny files compress several-fold, so an output lands far below the target and would be
+        // grouped with the next tiny files and rewritten on every pass. Files of half the lowered target
+        // or more are left for when the table can be merged at the tier's own target, which bounds how
+        // often one output is rewritten. DuckLake needs max_file_size above min_file_size.
+        long maxFileSize = Math.max(tier.minFileSize() + 1, Math.min(tier.maxFileSize(), target / 2));
+        return new Plan(of(lowered, work, idleTxnTimeoutMs), target, maxFileSize, true);
     }
 
     /** {@link #plan(CompactionTier, TableWork, long, long, long)} with no limit learnt for the table. */

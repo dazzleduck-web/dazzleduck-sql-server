@@ -102,6 +102,11 @@ public record CompactionTier(
                 passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, value, connectionSettings);
     }
 
+    public CompactionTier withMaxFileSize(long value) {
+        return new CompactionTier(name, enabled, minFileSize, value, targetFileSize, maxCompactedFiles, cpuShare,
+                passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
+    }
+
     public CompactionTier withTargetFileSize(long value) {
         return new CompactionTier(name, enabled, minFileSize, maxFileSize, value, maxCompactedFiles, cpuShare,
                 passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);

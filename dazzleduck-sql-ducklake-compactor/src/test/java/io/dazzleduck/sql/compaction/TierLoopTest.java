@@ -303,7 +303,10 @@ class TierLoopTest {
         loop.runPass();
         assertEquals(List.of("main.unsorted", "main.sorted"), compactor.calledTables(), "both make progress");
         assertEquals(1_600L * 5_000, compactor.calls.get(0).target(), "the files that fit x the average file");
+        assertEquals(1_600L * 5_000 / 2, compactor.calls.get(0).maxFileSize(),
+                "earlier lowered outputs, at half the lowered target or more, are left alone");
         assertEquals(16_000_000L, compactor.calls.get(1).target(), "a sorted group fits at the tier's own target");
+        assertEquals(8_000_000L, compactor.calls.get(1).maxFileSize(), "the band's own maximum");
         assertEquals(List.of(), loop.status().oversized());
     }
 
@@ -357,6 +360,21 @@ class TierLoopTest {
                 compactor.calls.stream().map(FakeTierCompactor.Call::target).toList());
         assertEquals(List.of(1, 3, 1), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList());
         assertEquals(List.of(), loop.status().backoffs(), "it commits before a third failure");
+    }
+
+    @Test
+    void limitsLearntFromATimeoutExpireAnHourAfterTheLastOne() {
+        // Review on #542: a busy table never leaves discovery, so the limits must expire on their own
+        compactor.work = List.of(table("main.hot", 500, 500L * 1_000_000, T0, 0, true));
+        compactor.failing.put("main.hot", "Failed to execute query \"ROLLBACK\": server closed the connection");
+        loop.runPass(); // 12 killed
+        compactor.failing.clear();
+        loop.runPass(); // 6
+        clock.advance(Duration.ofMinutes(59));
+        loop.runPass(); // still limited: 11, below the ceiling of 12
+        clock.advance(Duration.ofMinutes(2));
+        loop.runPass(); // over an hour since the timeout: the full cap again
+        assertEquals(List.of(12, 6, 11, 12), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList());
     }
 
     @Test

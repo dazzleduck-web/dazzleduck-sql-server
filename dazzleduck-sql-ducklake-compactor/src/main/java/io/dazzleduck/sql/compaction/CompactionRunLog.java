@@ -83,6 +83,7 @@ public final class CompactionRunLog {
         long timeoutLimitMs = runs.get(runs.size() - 1).commitTimeoutMs();
 
         long filesRetired = 0, durationMsForFiles = 0;
+        long rssGrowth = 0, filesForRss = 0;
         long empties = 0;
         Map<CompactionRun.FailureClass, Long> failures = new EnumMap<>(CompactionRun.FailureClass.class);
         List<Long> durations = new ArrayList<>(runs.size());
@@ -93,6 +94,10 @@ public final class CompactionRunLog {
             }
             if (r.outcome() == CompactionRun.Outcome.FAILED) {
                 failures.merge(r.failureClass(), 1L, Long::sum);
+            }
+            if (r.rssBeforeBytes() >= 0 && r.rssAfterBytes() >= 0 && r.filesProcessed() != null && r.filesProcessed() > 0) {
+                rssGrowth += r.rssAfterBytes() - r.rssBeforeBytes();
+                filesForRss += r.filesProcessed();
             }
             Long retired = r.filesRetired();
             if (retired != null && r.durationTotalMs() > 0) {
@@ -108,18 +113,25 @@ public final class CompactionRunLog {
         double headroom = timeoutLimitMs > 0 ? (double) p95 / timeoutLimitMs : 0;
         double idleRatio = (double) empties / runs.size();
 
-        return new DerivedAggregates(runs.size(), throughputFiles, p95, headroom, idleRatio, failures);
+        double rssPerFile = filesForRss > 0 ? (double) rssGrowth / filesForRss : 0;
+        return new DerivedAggregates(runs.size(), throughputFiles, p95, headroom, idleRatio, rssPerFile, failures);
     }
 
-    /** Consumer-computed quantities over a window of calls — not stored on the record. */
+    /**
+     * Consumer-computed quantities over a window of calls — not stored on the record.
+     * {@code rssGrowthBytesPerFile} is the process RSS the calls left behind per input file merged:
+     * memory held after the commit, outside {@code memory_limit}, to calibrate the per-file costs of
+     * Call sizing against.
+     */
     public record DerivedAggregates(
             int windowSize,
             double throughputFilesPerSec,
             long p95DurationMs,
             double durationHeadroom,
             double idleRatio,
+            double rssGrowthBytesPerFile,
             Map<CompactionRun.FailureClass, Long> failuresByClass) {
 
-        static final DerivedAggregates EMPTY = new DerivedAggregates(0, 0, 0, 0, 0, Map.of());
+        static final DerivedAggregates EMPTY = new DerivedAggregates(0, 0, 0, 0, 0, 0, Map.of());
     }
 }

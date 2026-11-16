@@ -50,6 +50,12 @@ final class TierLoop {
      * query over the whole catalog's file metadata, per tier and database.
      */
     static final Duration MIN_REFRESH_INTERVAL = Duration.ofSeconds(5);
+    /**
+     * How long a table's limits learnt from a timeout last after the last one. A busy table never
+     * leaves the discovery list, so without this one slow spell on the catalog would shrink its calls
+     * until a restart; a timeout after expiry learns them again.
+     */
+    static final Duration LEARNED_LIMITS_EXPIRE = Duration.ofHours(1);
 
     private final String database;
     private final CompactionTier tier;
@@ -82,6 +88,18 @@ final class TierLoop {
          * table leaves the discovery list.
          */
         long groupFilesLimit = Long.MAX_VALUE;
+        /** When the timeout last killed a call of the table, or null. */
+        Instant lastTimeout;
+
+        /** Forgets the limits learnt from timeouts once the last is older than {@link #LEARNED_LIMITS_EXPIRE}. */
+        void expireLearnedLimits(Instant now) {
+            if (lastTimeout != null && Duration.between(lastTimeout, now).compareTo(LEARNED_LIMITS_EXPIRE) >= 0) {
+                capLimit = Integer.MAX_VALUE;
+                capCeiling = Integer.MAX_VALUE;
+                groupFilesLimit = Long.MAX_VALUE;
+                lastTimeout = null;
+            }
+        }
         TableWork lastWork;
     }
 
@@ -253,6 +271,9 @@ final class TierLoop {
             TableWork work = order.get(i);
             String key = work.leaseKey(database);
             TableHealth known = tables.get(work.name());
+            if (known != null) {
+                known.expireLearnedLimits(clock.instant());
+            }
             CallSizing.Plan plan = CallSizing.plan(tier, work, readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes(),
                     known != null ? known.groupFilesLimit : Long.MAX_VALUE);
             if (plan == null) {
@@ -379,6 +400,7 @@ final class TierLoop {
         health.starved = cap.starved();
 
         Instant startedAt = clock.instant();
+        long rssBefore = ResourceSampler.rssBytes();
         long gapMs = lastCallEnded != null ? Duration.between(lastCallEnded, startedAt).toMillis() : -1;
         TierCompactor.MergeOutcome merge = null;
         CompactionRun.Outcome outcome;
@@ -386,7 +408,10 @@ final class TierLoop {
         String error = null;
         CallResult result;
         try {
-            merge = compactor.compact(database, tier, work, cap.cap(), plan.target());
+            // A lowered target also lowers max_file_size, so the outputs of earlier lowered calls (merged
+            // tiny files compress well and stay under the target) are not merged again pass after pass.
+            CompactionTier band = plan.reduced() ? tier.withMaxFileSize(plan.maxFileSize()) : tier;
+            merge = compactor.compact(database, band, work, cap.cap(), plan.target());
             boolean mergedAny = merge.filesProcessed() != null && merge.filesProcessed() > 0;
             outcome = mergedAny ? CompactionRun.Outcome.SUCCESS : CompactionRun.Outcome.EMPTY;
             result = mergedAny ? CallResult.MERGED : CallResult.EMPTY;
@@ -414,6 +439,7 @@ final class TierLoop {
                     || invalidatesInstance(e);
             result = connectionLost ? CallResult.CONNECTION_LOST : CallResult.FAILED;
             if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT) {
+                health.lastTimeout = clock.instant();
                 // The rates behind the sizing were too fast for this table: half as many groups next time,
                 // and never again as many as the timeout killed.
                 if (cap.cap() > 1) {
@@ -445,8 +471,9 @@ final class TierLoop {
             }
         }
         Instant endedAt = clock.instant();
+        long rssAfter = ResourceSampler.rssBytes();
         lastCallEnded = endedAt;
-        record(work, cap, startedAt, endedAt, gapMs, merge, outcome, failureClass, error, timeoutMs);
+        record(work, cap, startedAt, endedAt, gapMs, rssBefore, rssAfter, merge, outcome, failureClass, error, timeoutMs);
         return result;
     }
 
@@ -468,7 +495,7 @@ final class TierLoop {
     }
 
     private void record(TableWork work, CallSizing.Cap cap, Instant startedAt, Instant endedAt, long gapMs,
-                        TierCompactor.MergeOutcome merge, CompactionRun.Outcome outcome,
+                        long rssBefore, long rssAfter, TierCompactor.MergeOutcome merge, CompactionRun.Outcome outcome,
                         CompactionRun.FailureClass failureClass, String error, long timeoutMs) {
         try {
             String tempDir = ResourceSampler.tempDirectory(tier.connectionSettings());
@@ -482,13 +509,16 @@ final class TierLoop {
                     merge != null ? merge.durationMergeMs() : -1,
                     outcome, failureClass, error,
                     ResourceSampler.rssPeakBytes(),
+                    rssBefore,
+                    rssAfter,
                     ResourceSampler.dirSizeBytes(tempDir),
                     ResourceSampler.memoryLimitBytes(tier.connectionSettings()),
                     timeoutMs);
             runLog.record(run);
             state.recordOutcome(database, tier.name(), outcome);
             state.recordCall(database, tier.name(), tier.maxCompactedFiles(), cap.cap(),
-                    outcome == CompactionRun.Outcome.SUCCESS, run.spillPeakBytes());
+                    outcome == CompactionRun.Outcome.SUCCESS, run.spillPeakBytes(),
+                    runLog.aggregates(new CompactionRunLog.Key(database, tier.name())).rssGrowthBytesPerFile());
             state.updateRssPeak(run.rssPeakBytes());
         } catch (Exception e) {
             // Telemetry must never take down a call.

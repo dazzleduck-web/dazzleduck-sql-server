@@ -54,8 +54,21 @@ class CompactionRunLogTest {
         log.record(new CompactionRun(run.runId(), run.database(), run.tierName(), run.tableName(), run.startedAt(),
                 run.endedAt(), run.actualGapMs(), run.filesWaiting(), run.bytesWaiting(), run.cap(), run.staticCap(),
                 run.busyPartitions(), run.filesProcessed(), run.filesCreated(), run.durationTotalMs(),
-                run.durationMergeMs(), run.outcome(), run.failureClass(), run.errorMessage(), -1, -1, -1, 0));
+                run.durationMergeMs(), run.outcome(), run.failureClass(), run.errorMessage(), -1, -1, -1, -1, -1, 0));
         assertEquals(0.0, log.aggregates(KEY).durationHeadroom());
+    }
+
+    @Test
+    void theRssTheCallsLeftBehindIsAveragedPerInputFile() {
+        // Review on #542: memory kept outside memory_limit after a call, to calibrate the per-file costs
+        CompactionRunLog log = new CompactionRunLog(10);
+        log.record(TestRuns.run(1, 0, 1, 0, 1_000L, 1L, CompactionRun.Outcome.SUCCESS, CompactionRun.FailureClass.NONE,
+                100L << 20, 400L << 20)); // +300 MiB over 1,000 files
+        log.record(TestRuns.run(2, 2, 3, 0, 1_000L, 1L, CompactionRun.Outcome.SUCCESS, CompactionRun.FailureClass.NONE,
+                400L << 20, 400L << 20)); // released nothing, kept nothing more
+        log.record(TestRuns.run(3, 4, 5, 0, null, null, CompactionRun.Outcome.EMPTY, CompactionRun.FailureClass.NONE,
+                400L << 20, 900L << 20)); // merged nothing: not counted
+        assertEquals((300L << 20) / 2_000.0, log.aggregates(KEY).rssGrowthBytesPerFile(), 1e-6);
     }
 
     @Test

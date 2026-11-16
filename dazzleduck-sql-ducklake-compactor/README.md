@@ -46,7 +46,9 @@ above the tier's static cap (see [Call sizing](#call-sizing)).
 A failure costs one table's call: the table is retried on the next pass, and after 3 failures in a
 row it backs off for 15 minutes. A call the catalog's idle-in-transaction timeout killed is retried
 with half the cap, down to 1; each commit doubles it again, but never back to a cap the timeout
-killed. A killed call of a single group halves the table's files per group instead. A table runs at most one job at a time across tiers, data
+killed. A killed call of a single group halves the table's files per group instead. These learnt
+limits expire an hour after the last timeout, so a slow spell on the catalog does not shrink a busy
+table's calls for good. A table runs at most one job at a time across tiers, data
 retention and the delete-file rewrite (a **table lease**): a loop skips a table another job holds,
 and retention and the rewrite wait for it.
 
@@ -183,13 +185,19 @@ start if one full group of its smallest files (3,200 files for minor, about 144 
 80% of the timeout. An unsorted table is twice as slow per file and needs about 7 times the memory
 (0.85 MiB per file against 0.12 MiB), so its full group may not fit in 80% of the timeout or of the
 instance's `memory_limit`. Its calls then run with a lower target, so a group holds only the files
-that fit; the outputs stay in the band and are merged again later. A table of which not even two
+that fit, and with `max_file_size` at half that target, so the outputs of earlier such calls (merged
+tiny files compress several-fold) are not merged again pass after pass; they stay in the band and are
+merged once the table can be merged at the tier's own target. A table of which not even two
 files fit is skipped and reported (`oversized`). A sort key, a longer timeout, more memory or larger
 files avoid both. If the timeout of a
 Postgres catalog cannot be read, the tier retries opening its connection rather than run without it.
 
 The images set `MALLOC_ARENA_MAX=2`: most compactor memory is native `malloc` memory outside
-DuckDB's `memory_limit`, kept by glibc's per-thread arenas.
+DuckDB's `memory_limit`, kept by glibc's per-thread arenas. Every DuckDB instance also runs with
+`allocator_background_threads = true` and `allocator_flush_threshold = '64MB'`, so DuckDB's own
+allocator returns memory a merge freed instead of keeping it across calls; an instance's own
+settings can override them. Each call records RSS before and after; `rss_growth_per_file` is what a
+tier's recent calls left behind per input file merged.
 
 ### Data retention
 
@@ -509,6 +517,7 @@ Micrometer metrics are emitted via the logging registry by default, and over OTL
 | `ducklake.compaction.failures_by_class` | `class`, `database` | Failures by cause, including `PLANNING` |
 | `ducklake.compaction.commits` | `tier`, `database` | Calls that committed a merge, one snapshot each; its rate is the commits per minute expiry must keep up with |
 | `ducklake.compaction.passes` / `pass_age` | `tier`, `database` | Completed passes, and seconds since the last one |
+| `ducklake.compaction.rss_growth_per_file` | `tier`, `database` | Process RSS the tier's recent calls left behind per input file merged: memory kept outside `memory_limit` |
 | `ducklake.compaction.tier_last_success_age` | `tier`, `database` | Seconds since one of this tier's calls completed without an error (`last_success_age` is the same across the database's tiers) |
 | `ducklake.compaction.queue` / `carry_over` / `backoffs` | `tier`, `database` | Tables the latest pass listed, left for the next pass, and backed off |
 | `ducklake.compaction.max_compacted_files` / `cap` | `tier`, `database` | The static cap, and the cap the latest call was given |

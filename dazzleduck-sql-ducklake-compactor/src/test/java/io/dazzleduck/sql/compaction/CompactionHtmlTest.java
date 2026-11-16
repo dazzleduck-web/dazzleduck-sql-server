@@ -47,7 +47,7 @@ class CompactionHtmlTest {
         CompactionRun run = new CompactionRun(1, "db", "tier", "main.<b>t</b>", base.startedAt(), base.endedAt(),
                 100, null, null, 4, 12, 0, null, null, 5, 5,
                 CompactionRun.Outcome.FAILED, CompactionRun.FailureClass.OTHER, "<script>alert(1)</script>",
-                -1, -1, -1, TestRuns.TIMEOUT_MS);
+                -1, -1, -1, -1, -1, TestRuns.TIMEOUT_MS);
         log.record(run);
         String html = CompactionHtml.renderPage(log, 5);
         assertFalse(html.contains("<script>alert(1)</script>"));

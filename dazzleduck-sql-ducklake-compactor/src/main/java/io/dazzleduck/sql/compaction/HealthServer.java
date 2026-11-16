@@ -221,6 +221,8 @@ public class HealthServer implements Closeable {
                 + ", \"filesRetired\": " + r.filesRetired()
                 + ", \"actualGapMs\": " + r.actualGapMs()
                 + ", \"rssPeakBytes\": " + r.rssPeakBytes()
+                + ", \"rssBeforeBytes\": " + r.rssBeforeBytes()
+                + ", \"rssAfterBytes\": " + r.rssAfterBytes()
                 + ", \"spillPeakBytes\": " + r.spillPeakBytes()
                 + ", \"memoryLimitBytes\": " + r.memoryLimitBytes()
                 + ", \"commitTimeoutMs\": " + r.commitTimeoutMs()
@@ -230,6 +232,7 @@ public class HealthServer implements Closeable {
                 + ", \"p95DurationMs\": " + a.p95DurationMs()
                 + ", \"durationHeadroom\": " + round(a.durationHeadroom())
                 + ", \"idleRatio\": " + round(a.idleRatio())
+                + ", \"rssGrowthBytesPerFile\": " + Math.round(a.rssGrowthBytesPerFile())
                 + "}}";
     }
 

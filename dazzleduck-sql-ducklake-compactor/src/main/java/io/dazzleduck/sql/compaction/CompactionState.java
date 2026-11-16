@@ -49,6 +49,7 @@ public class CompactionState {
     private static final String RSS_METRIC = "ducklake.process.rss_bytes";
     private static final String MEMORY_LIMIT_METRIC = "ducklake.process.memory_limit_bytes";
     private static final String SPILL_PEAK_METRIC = "ducklake.compaction.spill_peak_bytes";
+    private static final String RSS_GROWTH_METRIC = "ducklake.compaction.rss_growth_per_file";
     private static final String RSS_PEAK_METRIC = "ducklake.compaction.rss_peak_bytes";
     private static final String BOUNDARY_LAG_METRIC = "ducklake.retention.boundary_lag";
     private static final String ROWS_DELETED_METRIC = "ducklake.retention.rows_deleted";
@@ -82,6 +83,7 @@ public class CompactionState {
         volatile long maxCompactedFiles;
         volatile long cap;
         volatile long spillPeakBytes;
+        volatile double rssGrowthPerFile;
         volatile long queue;
         volatile long carryOver;
         volatile long backoffs;
@@ -175,6 +177,11 @@ public class CompactionState {
                 .tag("database", db).tag("tier", tierName).register(registry);
         FunctionCounter.builder(COMMITS_METRIC, g.commits, AtomicLong::doubleValue)
                 .description("Table calls that committed a merge; each commits one snapshot")
+                .tag("database", db).tag("tier", tierName).register(registry);
+        Gauge.builder(RSS_GROWTH_METRIC, g, h -> h.rssGrowthPerFile)
+                .description("Process RSS this tier's recent calls left behind per input file merged: memory kept"
+                        + " outside memory_limit after the commit")
+                .baseUnit("bytes")
                 .tag("database", db).tag("tier", tierName).register(registry);
         Gauge.builder(SPILL_PEAK_METRIC, g, h -> h.spillPeakBytes)
                 .description("Temp-directory (spill) bytes at the end of the latest call")
@@ -367,8 +374,10 @@ public class CompactionState {
     }
 
     /** One table call's cap, and the tier's static cap and spill reading at its end. */
-    public void recordCall(String db, String tierName, long staticCap, int cap, boolean committed, long spillPeakBytes) {
+    public void recordCall(String db, String tierName, long staticCap, int cap, boolean committed, long spillPeakBytes,
+                           double rssGrowthPerFile) {
         TierGauges g = tierGauges(db, tierName);
+        g.rssGrowthPerFile = rssGrowthPerFile;
         g.maxCompactedFiles = staticCap;
         g.cap = cap;
         if (committed) {

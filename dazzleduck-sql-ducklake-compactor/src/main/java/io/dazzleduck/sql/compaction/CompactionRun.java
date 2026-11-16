@@ -22,6 +22,9 @@ import java.time.Instant;
  * @param cap             the {@code max_compacted_files} the call was given
  * @param staticCap       the tier's static cap, the most any call is given
  * @param busyPartitions  the table's groups with a file committed in the last 10 minutes
+ * @param rssBeforeBytes  process RSS just before the call, or -1 (not Linux)
+ * @param rssAfterBytes   process RSS just after it: the growth over its input files calibrates the
+ *                        per-file memory the call kept, outside DuckDB's {@code memory_limit}
  * @param commitTimeoutMs the catalog's idle-in-transaction timeout, or 0 for none
  */
 public record CompactionRun(
@@ -45,6 +48,8 @@ public record CompactionRun(
         FailureClass failureClass,
         String errorMessage,
         long rssPeakBytes,
+        long rssBeforeBytes,
+        long rssAfterBytes,
         long spillPeakBytes,
         long memoryLimitBytes,
         long commitTimeoutMs) {
