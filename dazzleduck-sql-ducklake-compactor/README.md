@@ -180,14 +180,19 @@ reported as starved.
 
 The catalog's `idle_in_transaction_session_timeout` is read from Postgres when a tier's connection
 opens, so an `options=-cidle_in_transaction_session_timeout=600000` in the ATTACH string counts. A
-value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier does not
-start if one full group of its smallest files (3,200 files for minor, about 144 s) would not fit in
-80% of the timeout. An unsorted table is twice as slow per file and needs about 7 times the memory
-(0.85 MiB per file against 0.12 MiB), so its full group may not fit in 80% of the timeout or of the
+value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A group's memory
+is sized per file as a fixed cost (0.12 MiB with a sort key, 0.85 MiB without) plus 4 times the
+file's bytes, which dominates for files of megabytes. A tier is refused at startup only when not even
+two of its band's smallest files fit in a group within 80% of the timeout and of its instance's
+`memory_limit` (mega in a small container, say); when one full group does not fit (3,200 tiny files
+take about 144 s), it starts with a warning. An unsorted table is also twice as slow per file and
+needs about 7 times the fixed memory, so its full group may not fit in 80% of the timeout or of the
 instance's `memory_limit`. Its calls then run with a lower target, so a group holds only the files
-that fit, and with `max_file_size` at half that target, so the outputs of earlier such calls (merged
+that fit (10 MB files in a 256 MiB major instance: 5 a group, a 50 MB target), and with `max_file_size` at half that target, so the outputs of earlier such calls (merged
 tiny files compress several-fold) are not merged again pass after pass; they stay in the band and are
-merged once the table can be merged at the tier's own target. A table of which not even two
+merged once the table can be merged at the tier's own target. A lowered call that merged nothing is not repeated until the
+table's waiting files change. A call that runs out of memory or spill space halves the table's files
+per group for an hour, as a timed-out single group does. A table of which not even two
 files fit is skipped and reported (`oversized`). A sort key, a longer timeout, more memory or larger
 files avoid both. If the timeout of a
 Postgres catalog cannot be read, the tier retries opening its connection rather than run without it.

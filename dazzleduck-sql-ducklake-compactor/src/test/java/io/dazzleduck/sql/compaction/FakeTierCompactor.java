@@ -17,6 +17,8 @@ final class FakeTierCompactor implements TierCompactor {
     volatile List<TableWork> work = List.of();
     /** Table names (schema.table) whose calls throw, with the message to throw. */
     final Map<String, String> failing = new HashMap<>();
+    /** Table names (schema.table) whose calls merge nothing. */
+    final java.util.Set<String> empty = new java.util.HashSet<>();
     /** Thrown by discover when set. */
     volatile RuntimeException discoverFailure;
     /** Returned by prepare. */
@@ -57,6 +59,9 @@ final class FakeTierCompactor implements TierCompactor {
         String failure = failing.get(table.name());
         if (failure != null) {
             throw new IllegalStateException(failure);
+        }
+        if (empty.contains(table.name())) {
+            return new MergeOutcome(3, null, null);
         }
         return new MergeOutcome(3, 4L, 1L);
     }

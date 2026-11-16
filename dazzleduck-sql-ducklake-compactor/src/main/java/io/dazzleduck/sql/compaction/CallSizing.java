@@ -36,6 +36,13 @@ public final class CallSizing {
     public static final long PER_FILE_COST_UNSORTED = (long) (0.85 * 1024 * 1024);
     /** Share of an instance's memory_limit one group is sized to use. */
     public static final double MEMORY_LIMIT_SHARE = 0.8;
+    /**
+     * Memory a merge needs per byte of input file, on top of the per-file cost: decompression, the
+     * sort, and the writer's row-group buffer grow with a group's bytes, which dominates for files of
+     * megabytes. A starting value; calibrate it with the per-call RSS readings
+     * ({@code rss_growth_per_file}).
+     */
+    public static final double BYTES_EXPANSION = 4.0;
 
     private CallSizing() {
     }
@@ -77,9 +84,18 @@ public final class CallSizing {
     }
 
     /**
+     * The memory one input file of {@code fileBytes} adds to a group: a per-file cost (measured on small
+     * files: 0.12 MiB sorted, 0.85 MiB unsorted) plus {@link #BYTES_EXPANSION} times its bytes.
+     */
+    public static double memoryPerFile(long fileBytes, boolean sorted) {
+        return (sorted ? PER_FILE_COST_SORTED : PER_FILE_COST_UNSORTED) + BYTES_EXPANSION * fileBytes;
+    }
+
+    /**
      * The most files one group of the table may have and still commit within 80% of the catalog's
      * idle-in-transaction timeout at the table's per-file rate, and fit in 80% of the instance's
-     * {@code memory_limit} at its per-file cost. {@link Long#MAX_VALUE} when neither is known.
+     * {@code memory_limit} at {@link #memoryPerFile} for its average file. {@link Long#MAX_VALUE}
+     * when neither is known.
      */
     public static long maxFilesPerGroup(TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
         long max = Long.MAX_VALUE;
@@ -87,8 +103,8 @@ public final class CallSizing {
             max = Math.min(max, (long) Math.floor(TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0 / secPerFile(work.sorted())));
         }
         if (memoryLimitBytes > 0) {
-            long cost = work.sorted() ? PER_FILE_COST_SORTED : PER_FILE_COST_UNSORTED;
-            max = Math.min(max, (long) Math.floor(MEMORY_LIMIT_SHARE * memoryLimitBytes / cost));
+            double perFile = memoryPerFile(Math.max(1, work.averageFileSize()), work.sorted());
+            max = Math.min(max, (long) Math.floor(MEMORY_LIMIT_SHARE * memoryLimitBytes / perFile));
         }
         return max;
     }
@@ -96,8 +112,9 @@ public final class CallSizing {
     /**
      * The call for one table. DuckLake cannot cut a group by file count, so when a full group at the
      * tier's target would outrun the catalog's timeout or the instance's memory (an unsorted table of
-     * tiny files: 3,200 files, 288 s and about 2.7 GiB), the call runs with a lower session target, the
-     * files that fit times the average file size. Its outputs are smaller and stay in the band, to be
+     * tiny files: 3,200 files, 288 s and about 2.7 GiB; or 10 MB files in a 256 MiB instance, which
+     * holds 5), the call runs with a lower session target, the files that fit times the average file
+     * size. Its outputs are smaller and stay in the band, to be
      * merged again later, but the table makes progress instead of being killed call after call.
      *
      * @param groupFilesLimit the most files per group this table has shown it can commit (see
@@ -145,13 +162,34 @@ public final class CallSizing {
     }
 
     /**
-     * The startup check: whether one full group of the tier's smallest files fits in 80% of the
-     * timeout at the sorted rate. Unsorted tables, twice as slow, are sized per table by
-     * {@link #plan}. A tier whose single group cannot commit before the catalog kills
-     * the transaction would fail every call, so it does not start. Always true without a timeout.
+     * Whether one full group of the tier's smallest files fits in 80% of the timeout at the sorted
+     * rate. When it does not, the tier still starts and {@link #plan} runs its tables with a lowered
+     * target; see {@link #startupRefusal}. Always true without a timeout.
      */
     public static boolean fullGroupFits(CompactionTier tier, long idleTxnTimeoutMs) {
         return idleTxnTimeoutMs <= 0 || fullGroupSeconds(tier) <= TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0;
+    }
+
+    /**
+     * The startup check, under the same condition as {@link #plan} returning null: why the tier must
+     * not start, or {@code null}. A tier is refused only when not even two of its band's smallest files
+     * fit in a group within 80% of the timeout (at the sorted rate) or 80% of the instance's
+     * {@code memory_limit}: then no table of it could ever be merged. Otherwise full groups that do not
+     * fit run with a lowered target.
+     */
+    public static String startupRefusal(CompactionTier tier, long idleTxnTimeoutMs, long memoryLimitBytes) {
+        long smallest = Math.max(tier.minFileSize(), TINY_FILE_BYTES);
+        if (idleTxnTimeoutMs > 0 && 2 * SEC_PER_FILE_SORTED > TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0) {
+            return ("not even two files fit in one group within %.0f%% of the catalog's idle-in-transaction"
+                    + " timeout (%d ms)").formatted(TIMEOUT_SHARE * 100, idleTxnTimeoutMs);
+        }
+        if (memoryLimitBytes > 0 && 2 * memoryPerFile(smallest, true) > MEMORY_LIMIT_SHARE * memoryLimitBytes) {
+            return ("not even two of its smallest files (%d bytes) fit in one group within %.0f%% of the instance's"
+                    + " memory_limit (%d bytes): give the tier more memory (memory_limit in its connection_settings,"
+                    + " or a larger cpu_share or container) or disable it").formatted(smallest,
+                    MEMORY_LIMIT_SHARE * 100, memoryLimitBytes);
+        }
+        return null;
     }
 
     /** Seconds one full group of the tier's smallest files takes at the sorted rate. */

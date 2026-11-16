@@ -240,7 +240,7 @@ class CompactionIntegrationTest {
 
     @Test
     @Order(9)
-    void theIdleTransactionTimeoutIsReadFromPostgresAndRefusesATierWhoseGroupCannotFit() throws Exception {
+    void theIdleTransactionTimeoutIsReadFromPostgresAndRefusesATierOfWhichNotTwoFilesFit() throws Exception {
         // The timeout comes from the catalog's own session, so an option in the ATTACH string counts.
         String withTimeout = ("INSTALL ducklake; LOAD ducklake;\nATTACH 'ducklake:postgres:%s options=-cidle_in_transaction_session_timeout=%d'"
                 + " AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);");
@@ -255,9 +255,15 @@ class CompactionIntegrationTest {
         }
         try (TierCompactor compactor = new DuckDbTierCompactor(
                 withTimeout.formatted(connectionString, 100_000, CATALOG, dataPath), state)) {
+            TierCompactor.Readiness lowered = compactor.prepare(CATALOG, specMinor);
+            assertFalse(lowered.isRefused(), "80 s cannot hold one 144 s group, but its calls run with a lower target");
+            assertEquals(100_000, lowered.idleTxnTimeoutMs());
+        }
+        try (TierCompactor compactor = new DuckDbTierCompactor(
+                withTimeout.formatted(connectionString, 100, CATALOG, dataPath), state)) {
             TierCompactor.Readiness refused = compactor.prepare(CATALOG, specMinor);
-            assertTrue(refused.isRefused(), "80 s cannot hold one 144 s group");
-            assertTrue(refused.refused().contains("does not fit"), refused.refused());
+            assertTrue(refused.isRefused(), "not even two files fit in 80 ms");
+            assertTrue(refused.refused().contains("not even two files"), refused.refused());
         }
     }
 

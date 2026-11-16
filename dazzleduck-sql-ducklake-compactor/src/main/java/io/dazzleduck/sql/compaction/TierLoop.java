@@ -51,9 +51,10 @@ final class TierLoop {
      */
     static final Duration MIN_REFRESH_INTERVAL = Duration.ofSeconds(5);
     /**
-     * How long a table's limits learnt from a timeout last after the last one. A busy table never
-     * leaves the discovery list, so without this one slow spell on the catalog would shrink its calls
-     * until a restart; a timeout after expiry learns them again.
+     * How long a table's limits learnt from a resource failure (a timeout, out of memory or of spill
+     * space) last after the last one. A busy table never leaves the discovery list, so without this one
+     * slow spell on the catalog would shrink its calls until a restart; a failure after expiry learns
+     * them again.
      */
     static final Duration LEARNED_LIMITS_EXPIRE = Duration.ofHours(1);
 
@@ -88,8 +89,16 @@ final class TierLoop {
          * table leaves the discovery list.
          */
         long groupFilesLimit = Long.MAX_VALUE;
-        /** When the timeout last killed a call of the table, or null. */
-        Instant lastTimeout;
+        /**
+         * When a call of the table last ran out of a resource (the catalog's timeout, memory or spill
+         * space), or null: the limits learnt from it expire {@link #LEARNED_LIMITS_EXPIRE} after.
+         */
+        Instant lastResourceFailure;
+        /**
+         * The files and bytes waiting when a call with a lowered target last merged nothing: the files
+         * left are too large for that target. The table is not called again until they change.
+         */
+        long[] emptyReducedAt;
         Instant lastCall;
         CompactionRun.Outcome lastOutcome;
         Instant lastSuccess;
@@ -97,11 +106,11 @@ final class TierLoop {
 
         /** Forgets the limits learnt from timeouts once the last is older than {@link #LEARNED_LIMITS_EXPIRE}. */
         void expireLearnedLimits(Instant now) {
-            if (lastTimeout != null && Duration.between(lastTimeout, now).compareTo(LEARNED_LIMITS_EXPIRE) >= 0) {
+            if (lastResourceFailure != null && Duration.between(lastResourceFailure, now).compareTo(LEARNED_LIMITS_EXPIRE) >= 0) {
                 capLimit = Integer.MAX_VALUE;
                 capCeiling = Integer.MAX_VALUE;
                 groupFilesLimit = Long.MAX_VALUE;
-                lastTimeout = null;
+                lastResourceFailure = null;
             }
         }
         TableWork lastWork;
@@ -286,6 +295,13 @@ final class TierLoop {
                 skipOversized(work);
                 continue;
             }
+            if (plan.reduced() && known != null && known.emptyReducedAt != null
+                    && known.emptyReducedAt[0] == work.filesWaiting() && known.emptyReducedAt[1] == work.bytesWaiting()) {
+                // Its last lowered call merged nothing and nothing has changed since: calling again would too
+                logger.debug("Tier '{}' skips {}.{}: nothing it can merge at its lowered target has arrived",
+                        tier.name(), database, work.name());
+                continue;
+            }
             if (!leases.tryAcquire(key)) {
                 logger.debug("Tier '{}' skips {}.{} this pass: another job holds it", tier.name(), database, work.name());
                 continue;
@@ -419,6 +435,8 @@ final class TierLoop {
             CompactionTier band = plan.reduced() ? tier.withMaxFileSize(plan.maxFileSize()) : tier;
             merge = compactor.compact(database, band, work, cap.cap(), plan.target());
             boolean mergedAny = merge.filesProcessed() != null && merge.filesProcessed() > 0;
+            health.emptyReducedAt = plan.reduced() && !mergedAny
+                    ? new long[]{work.filesWaiting(), work.bytesWaiting()} : null;
             outcome = mergedAny ? CompactionRun.Outcome.SUCCESS : CompactionRun.Outcome.EMPTY;
             result = mergedAny ? CallResult.MERGED : CallResult.EMPTY;
             health.failures = 0;
@@ -444,8 +462,18 @@ final class TierLoop {
                     || failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT
                     || invalidatesInstance(e);
             result = connectionLost ? CallResult.CONNECTION_LOST : CallResult.FAILED;
+            if ((failureClass == CompactionRun.FailureClass.OUT_OF_MEMORY
+                    || failureClass == CompactionRun.FailureClass.SPILL_EXCEEDED) && cap.filesPerGroup() > 2) {
+                // One group at a time is in memory, so fewer groups would not help: fewer files per group,
+                // through a lower target, as for a group too slow for the timeout
+                health.lastResourceFailure = clock.instant();
+                health.groupFilesLimit = Math.max(2, cap.filesPerGroup() / 2);
+                logger.warn("Tier '{}' halves the files per group of {}.{} to {} after a call ran out of {}",
+                        tier.name(), database, work.name(), health.groupFilesLimit,
+                        failureClass == CompactionRun.FailureClass.OUT_OF_MEMORY ? "memory" : "spill space");
+            }
             if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT) {
-                health.lastTimeout = clock.instant();
+                health.lastResourceFailure = clock.instant();
                 // The rates behind the sizing were too fast for this table: half as many groups next time,
                 // and never again as many as the timeout killed.
                 if (cap.cap() > 1) {

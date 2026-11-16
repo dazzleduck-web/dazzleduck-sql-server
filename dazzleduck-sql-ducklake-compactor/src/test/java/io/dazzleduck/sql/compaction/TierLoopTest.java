@@ -417,6 +417,42 @@ class TierLoopTest {
     }
 
     @Test
+    void anOutOfMemoryCallHalvesTheFilesPerGroup() {
+        // Review on #542: OUT_OF_MEMORY used to retry the identical plan until it backed off, forever
+        compactor.work = List.of(table("main.wide", 98_000, 98_000L * 5_000, T0, 0, true));
+        compactor.failing.put("main.wide", "Out of Memory Error: could not allocate block of size 76.5 MiB");
+        loop.runPass();
+        compactor.failing.clear();
+        loop.runPass();
+        assertEquals(List.of(16_000_000L, 1_600L * 5_000),
+                compactor.calls.stream().map(FakeTierCompactor.Call::target).toList(),
+                "3,200 files a group, then 1,600, through a lower target");
+        assertEquals(List.of(), loop.status().backoffs());
+
+        clock.advance(TierLoop.LEARNED_LIMITS_EXPIRE.plusMinutes(1));
+        compactor.calls.clear();
+        loop.runPass();
+        assertEquals(16_000_000L, compactor.calls.get(0).target(), "the limit expires like a timeout's");
+    }
+
+    @Test
+    void aLoweredCallThatMergedNothingIsNotRepeatedUntilItsFilesChange() {
+        // Files too large for the lowered target cannot merge at this memory: calling again changes nothing
+        compactor.readiness = TierCompactor.Readiness.ready(0, 2, 256L << 20);
+        CompactionTier major = CompactionTier.of("major", 8_000_000, 64_000_000, 64_000_000, 16);
+        TierLoop majorLoop = new TierLoop(DB, major, compactor, leases, state, runLog, clock);
+        compactor.work = List.of(table("main.big", 12, 12L * 10_000_000, T0, 0, true));
+        compactor.empty.add("main.big");
+        majorLoop.runPass();
+        majorLoop.runPass();
+        assertEquals(1, compactor.calls.size(), "the second pass does not repeat a call that merged nothing");
+
+        compactor.work = List.of(table("main.big", 14, 14L * 10_000_000, T0, 0, true)); // new files arrived
+        majorLoop.runPass();
+        assertEquals(2, compactor.calls.size());
+    }
+
+    @Test
     void aConflictDoesNotChangeTheCap() {
         compactor.work = List.of(table("main.busy", 500, 500L * 1_000_000, T0, 0, true));
         compactor.failing.put("main.busy", "TransactionContext Error: Transaction conflict");

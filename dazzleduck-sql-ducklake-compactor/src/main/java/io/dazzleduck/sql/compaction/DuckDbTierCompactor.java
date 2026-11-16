@@ -127,11 +127,15 @@ public class DuckDbTierCompactor implements TierCompactor {
             return new Readiness(e.getMessage(), 0, threads);
         }
         long timeoutMs = idleTxnTimeoutMs(connection, database, tier);
+        String refusal = CallSizing.startupRefusal(tier, timeoutMs, memoryLimitBytes);
+        if (refusal != null) {
+            return new Readiness(refusal, timeoutMs, threads, memoryLimitBytes);
+        }
         if (!CallSizing.fullGroupFits(tier, timeoutMs)) {
-            return new Readiness(("one full group (%.0f s at %.3f s per file) does not fit in %.0f%% of the"
-                            + " catalog's idle-in-transaction timeout (%d ms)")
-                    .formatted(CallSizing.fullGroupSeconds(tier), CallSizing.SEC_PER_FILE_SORTED,
-                            CallSizing.TIMEOUT_SHARE * 100, timeoutMs), timeoutMs, threads);
+            logger.warn(("Tier '{}' for {}: one full group of its smallest files ({} s at {} s per file) does not fit in"
+                            + " {}% of the catalog's idle-in-transaction timeout ({} ms); its calls run with a lowered"
+                            + " target"), tier.name(), database, Math.round(CallSizing.fullGroupSeconds(tier)),
+                    CallSizing.SEC_PER_FILE_SORTED, Math.round(CallSizing.TIMEOUT_SHARE * 100), timeoutMs);
         }
         return Readiness.ready(timeoutMs, threads, memoryLimitBytes);
     }
