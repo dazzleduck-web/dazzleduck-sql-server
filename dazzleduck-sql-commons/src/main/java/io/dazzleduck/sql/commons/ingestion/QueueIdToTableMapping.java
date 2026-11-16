@@ -1,5 +1,6 @@
 package io.dazzleduck.sql.commons.ingestion;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -41,6 +42,8 @@ import java.util.Map;
  *                      carries a claims column; required when {@code numPartitions > 1}, ignored otherwise
  * @param sidecars      tables written beside the target table from every batch and registered in the
  *                      same transaction (see {@link Sidecar}); empty when none are configured
+ * @param maxDelay      the longest a batch of this queue waits before it is written, overriding the
+ *                      global {@code ingestion.max_delay_ms}; {@code null} to use the global value
  */
 public record QueueIdToTableMapping(
         String ingestionQueue,
@@ -57,7 +60,8 @@ public record QueueIdToTableMapping(
         int numPartitions,
         String partitionExpression,
         IngestionVariables variables,
-        List<Sidecar> sidecars) {
+        List<Sidecar> sidecars,
+        Duration maxDelay) {
 
     /** Validates invariants on every construction path. */
     public QueueIdToTableMapping {
@@ -87,6 +91,20 @@ public record QueueIdToTableMapping(
         }
         rejectWatermarkKeys(ingestionQueue, additionalParameters);
         Sidecar.validate(ingestionQueue, table, sidecars);
+        if (maxDelay != null && (maxDelay.isZero() || maxDelay.isNegative())) {
+            throw new IllegalArgumentException("Queue '%s': 'max_delay_ms' must be positive, got %d"
+                    .formatted(ingestionQueue, maxDelay.toMillis()));
+        }
+    }
+
+    /** A mapping with sidecars, and the global {@code max_delay_ms}. */
+    public QueueIdToTableMapping(String ingestionQueue, String outputPath, String catalog, String schema,
+                                 String table, Map<String, String> additionalParameters, String transformation,
+                                 String view, String inputTable, String inputSchema, boolean extractClaims,
+                                 int numPartitions, String partitionExpression, IngestionVariables variables,
+                                 List<Sidecar> sidecars) {
+        this(ingestionQueue, outputPath, catalog, schema, table, additionalParameters, transformation, view,
+                inputTable, inputSchema, extractClaims, numPartitions, partitionExpression, variables, sidecars, null);
     }
 
     /** A mapping without sidecars. */
@@ -150,34 +168,44 @@ public record QueueIdToTableMapping(
     public QueueIdToTableMapping withInputSchema(String inputSchema) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables, sidecars);
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
     }
 
     /** Returns a copy of this mapping with {@code extractClaims} set. */
     public QueueIdToTableMapping withExtractClaims(boolean extractClaims) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables, sidecars);
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
     }
 
     /** Returns a copy of this mapping with the partitioning fields set. */
     public QueueIdToTableMapping withPartitioning(int numPartitions, String partitionExpression) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables, sidecars);
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
     }
 
     /** Returns a copy of this mapping with its session variables set. */
     public QueueIdToTableMapping withVariables(IngestionVariables variables) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables, sidecars);
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
+    }
+
+    /**
+     * Returns a copy of this mapping with its own {@code max_delay_ms}, or {@code null} for the
+     * global one.
+     */
+    public QueueIdToTableMapping withMaxDelay(Duration maxDelay) {
+        return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
+                additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
     }
 
     /** Returns a copy of this mapping with its sidecars set. */
     public QueueIdToTableMapping withSidecars(List<Sidecar> sidecars) {
         return new QueueIdToTableMapping(ingestionQueue, outputPath, catalog, schema, table,
                 additionalParameters, transformation, view, inputTable, inputSchema, extractClaims,
-                numPartitions, partitionExpression, variables, sidecars);
+                numPartitions, partitionExpression, variables, sidecars, maxDelay);
     }
 }

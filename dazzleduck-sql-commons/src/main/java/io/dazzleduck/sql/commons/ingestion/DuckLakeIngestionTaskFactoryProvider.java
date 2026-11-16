@@ -82,7 +82,9 @@ public class DuckLakeIngestionTaskFactoryProvider extends AbstractIngestionTaskF
                     .withExtractClaims(extractClaims)
                     .withPartitioning(numPartitions, partitionExpression)
                     .withVariables(IngestionVariables.fromConfig(c))
-                    .withSidecars(sidecars(ingestionQueue, c));
+                    .withSidecars(sidecars(ingestionQueue, c))
+                    .withMaxDelay(c.hasPath(ConfigConstants.MAX_DELAY_MS_KEY)
+                            ? java.time.Duration.ofMillis(c.getLong(ConfigConstants.MAX_DELAY_MS_KEY)) : null);
             mappings.put(mapping.ingestionQueue(), mapping);
         });
         return mappings;
