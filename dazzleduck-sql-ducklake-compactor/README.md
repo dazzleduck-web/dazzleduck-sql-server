@@ -399,7 +399,8 @@ and no back-off drops off the list, and its history with it.
 
 `alerts` lists the conditions that hold now: a tier with no completed pass in 15 minutes (a pass
 that finds no work counts), a tier that did not start, a table backed off after 3 failures, a
-starved table, a table skipped because one group cannot beat the catalog's timeout, a table whose oldest file with something to merge has waited over 30 minutes, a band
+starved table, a table skipped because not even two of its files fit in one group within the
+catalog's timeout and the instance's memory, a table whose oldest file with something to merge has waited over 30 minutes, a band
 whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
 RSS above 75% of the container's memory limit. The status is always `UP` while the process is
 running; watch `alerts` (or the metrics below) instead.

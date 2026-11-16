@@ -220,7 +220,8 @@ public class CompactionService implements Closeable {
         status.starved().forEach(t -> alerts.add(prefix + " may starve partitions of " + t
                 + ": its busy partitions want more slots than its cap"));
         status.oversized().forEach(t -> alerts.add(prefix + " skips " + t
-                + ": one group of its files cannot commit within the catalog's idle-in-transaction timeout"));
+                + ": not even two of its files fit in one group within the catalog's idle-in-transaction timeout"
+                + " and the instance's memory_limit"));
         status.stale().forEach(t -> alerts.add("%s: %s has had a file waiting over %d minutes"
                 .formatted(prefix, t, TierLoop.STALE_AFTER.toMinutes())));
         if (state.fileCountRising(db, tier.name(), RISING_ALERT_AFTER, now)) {
