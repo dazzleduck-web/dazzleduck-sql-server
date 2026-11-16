@@ -544,10 +544,24 @@ configure `ingestion_queue_table_mapping` entries:
 | `view` + `input_table` | No | View-based transformation (see below); both fully qualified `catalog.schema.name`, must be set together, mutually exclusive with `transformation` |
 | `additional_parameters` | No | Reserved for per-queue extensions; no key is read today. Ingestion watermarks were removed, so a mapping with a `watermark_` key fails to load |
 | `sidecars` | No | Tables written beside the target table from every batch, in the same transaction (see [Sidecars](#sidecars)) |
+| `max_delay_ms` | No | This queue's own flush delay, overriding `ingestion.max_delay_ms`: the longest a batch of the queue waits before it is written. Positive; omit for the global value |
 
 Alternatively, `DynamicDuckLakeIngestionTaskFactoryProvider` reads queue mappings from a SQLite
 registry (`db_path`), polled at `config_load_interval_ms`, so queues can be added and removed at
 runtime without a restart.
+
+### Per-queue flush delay
+
+Every queue flushes a bucket once it reaches `ingestion.min_bucket_size` or has waited
+`ingestion.max_delay_ms`. A queue can set its own `max_delay_ms`: in its
+`ingestion_queue_table_mapping` entry, or in the `max_delay_ms` column of its registry row (NULL
+uses the global value; a value that is not positive is logged and ignored). A latency-sensitive
+queue can flush every few hundred milliseconds while a bulk queue waits longer for larger files.
+
+The value is applied to the running queue each time a batch arrives, so a change to a registry row
+takes effect without recreating the queue or dropping what it holds. A shorter delay brings the
+pending flush forward; a longer one applies from the next flush check. A partitioned queue applies
+it to every partition. `min_bucket_size` is not per queue.
 
 ### Transformation
 

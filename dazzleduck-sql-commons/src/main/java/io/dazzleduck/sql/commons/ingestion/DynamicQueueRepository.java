@@ -91,6 +91,9 @@ public class DynamicQueueRepository implements AutoCloseable {
             if (!existing.contains("partition_expression")) {
                 st.execute("ALTER TABLE " + ATTACHMENT + ".ingestion_queues ADD COLUMN partition_expression TEXT");
             }
+            if (!existing.contains("max_delay_ms")) {
+                st.execute("ALTER TABLE " + ATTACHMENT + ".ingestion_queues ADD COLUMN max_delay_ms INTEGER");
+            }
             for (String column : VARIABLES_COLUMNS) {
                 if (!existing.contains(column)) {
                     st.execute("ALTER TABLE " + ATTACHMENT + ".ingestion_queues ADD COLUMN " + column + " TEXT");
@@ -241,7 +244,9 @@ public class DynamicQueueRepository implements AutoCloseable {
      * DuckLake table's own metadata. The registry supplies {@code catalog}/{@code schema}/
      * {@code table} (plus optional {@code transformation}/{@code view}/{@code input_table} and
      * {@code input_schema}, the latter used only by {@code manageTables} to derive the table columns);
-     * the {@code partition_by} column is reserved for future use and not read here. The
+     * the {@code partition_by} and {@code min_bucket_size} columns are reserved for future use and
+     * not read here. {@code max_delay_ms}, when set, overrides the global {@code ingestion.max_delay_ms}
+     * for the queue, and a change applies to its running queue on its next batch. The
      * {@code num_partitions}/{@code partition_expression} columns split a queue into hash-routed
      * sub-queues (see {@link PartitionedIngestionQueue}). The {@code variables_*} columns name a
      * key/value relation holding the queue's session variables (see {@link IngestionVariables}).
@@ -263,7 +268,7 @@ public class DynamicQueueRepository implements AutoCloseable {
              ResultSet rs = st.executeQuery(
                      "SELECT ingestion_queue, catalog, schema_name, table_name," +
                      " transformation, view_name, input_table, input_schema," +
-                     " num_partitions, partition_expression, variables_view," +
+                     " num_partitions, partition_expression, max_delay_ms, variables_view," +
                      " variables_key_column, variables_value_column, variables_expiration_column" +
                      " FROM " + ATTACHMENT + ".ingestion_queues")) {
             while (rs.next()) {
@@ -280,12 +285,24 @@ public class DynamicQueueRepository implements AutoCloseable {
                     numPartitions = 1; // NULL (legacy row) / unset means "not partitioned"
                 }
                 String partitionExpr = rs.getString("partition_expression");
+                long maxDelayMs = rs.getLong("max_delay_ms");
+                java.time.Duration maxDelay = null;
+                if (!rs.wasNull()) {
+                    if (maxDelayMs > 0) {
+                        maxDelay = java.time.Duration.ofMillis(maxDelayMs);
+                    } else {
+                        // One bad row must not fail the whole reload: the queue uses the global value
+                        logger.warn("Queue '{}': ignoring max_delay_ms {}, which is not positive; it uses the global"
+                                + " ingestion.max_delay_ms", queueId, maxDelayMs);
+                    }
+                }
                 // outputPath omitted: derived from DuckLake metadata by the handler.
                 result.put(queueId, new QueueIdToTableMapping(
                         queueId, catalog, schema, table, Map.of(), transform, view, inputTable)
                         .withInputSchema(inputSchema)
                         .withPartitioning(numPartitions, partitionExpr)
-                        .withVariables(variablesOf(queueId, rs)));
+                        .withVariables(variablesOf(queueId, rs))
+                        .withMaxDelay(maxDelay));
             }
         }
         Map<String, java.util.List<Sidecar>> sidecars = loadSidecars(conn);

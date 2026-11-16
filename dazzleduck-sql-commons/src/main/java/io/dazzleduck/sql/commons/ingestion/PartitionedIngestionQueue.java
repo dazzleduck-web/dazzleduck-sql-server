@@ -175,6 +175,15 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
     }
 
     // -----------------------------------------------------------------------
+    /** Applies to every partition: each is a queue of its own with its own flush loop. */
+    @Override
+    public synchronized void setMaxDelayOverride(Duration override) {
+        super.setMaxDelayOverride(override);
+        for (ParquetIngestionQueue child : children) {
+            child.setMaxDelayOverride(override);
+        }
+    }
+
     // Metric accessors — aggregate across children, since the parent's own
     // accept/flush machinery is bypassed by the overridden add().
     // -----------------------------------------------------------------------
