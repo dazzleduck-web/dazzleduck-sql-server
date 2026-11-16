@@ -59,6 +59,7 @@ public record CompactionStats(
      * @param oversized        tables skipped because not even two files fit in a group within the
      *                         catalog's timeout and the instance's memory
      * @param reduced          tables whose calls run with a lowered target because a full group does not fit
+     * @param tables           every table the tier tracks: listed by its latest refresh, or backed off
      * @param idleTxnTimeoutMs the catalog's idle-in-transaction timeout, 0 for none, -1 unknown
      * @param duckdbMemoryBytes {@code duckdb_memory()} of its instance at its latest pass, -1 unknown
      */
@@ -76,7 +77,39 @@ public record CompactionStats(
             List<String> reduced,
             long idleTxnTimeoutMs,
             int threads,
-            long duckdbMemoryBytes) {
+            long duckdbMemoryBytes,
+            List<TableStatus> tables) {
+    }
+
+    /**
+     * One table in one tier.
+     *
+     * @param filesWaiting        eligible files in its groups of two or more, at the latest refresh;
+     *                            0 for a table no longer listed (backed off and caught up)
+     * @param oldestWaitSeconds   age of its oldest file with something to merge
+     * @param lastCall            when its latest call ended, or null
+     * @param lastOutcome         SUCCESS (merged), EMPTY (merged nothing), FAILED, or null
+     * @param lastSuccess         when a call of it last completed without an error, or null
+     * @param backoffUntil        the end of its back-off, or null
+     * @param capLimit            the cap learnt from a timeout, or null for none
+     * @param groupFilesLimit     the files per group learnt from a timeout, or null for none
+     * @param flags               stale, starved, oversized, reduced, backoff
+     */
+    public record TableStatus(
+            String table,
+            long filesWaiting,
+            long bytesWaiting,
+            long oldestWaitSeconds,
+            int busyPartitions,
+            boolean sorted,
+            Instant lastCall,
+            String lastOutcome,
+            Instant lastSuccess,
+            int consecutiveFailures,
+            Instant backoffUntil,
+            Integer capLimit,
+            Long groupFilesLimit,
+            List<String> flags) {
     }
 
     public Duration uptime() {

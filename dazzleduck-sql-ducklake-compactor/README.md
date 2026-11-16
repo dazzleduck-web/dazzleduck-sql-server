@@ -389,6 +389,14 @@ reason, `STOPPED`), its last pass, queue, carry-over, back-offs, starved and sta
 tables it skips as `oversized` and those it merges with a lowered target (`reduced`), the catalog
 timeout it sizes calls by, its threads and `duckdb_memory()`.
 
+`loop.tables` has one entry per table the tier tracks (listed by its latest refresh, or backed off):
+files and bytes waiting in mergeable groups, the age of its oldest waiting file, busy partitions,
+whether it is sorted, its last call and outcome (`SUCCESS` merged, `EMPTY` merged nothing,
+`FAILED`), its last success (a call that completed without an error), consecutive failures, the end
+of its back-off, the cap and files per group a timeout has taught the tier (`null` for none), and
+its flags (`stale`, `starved`, `oversized`, `reduced`, `backoff`). A table with nothing left to merge
+and no back-off drops off the list, and its history with it.
+
 `alerts` lists the conditions that hold now: a tier with no completed pass in 15 minutes (a pass
 that finds no work counts), a tier that did not start, a table backed off after 3 failures, a
 starved table, a table skipped because one group cannot beat the catalog's timeout, a table whose oldest file with something to merge has waited over 30 minutes, a band

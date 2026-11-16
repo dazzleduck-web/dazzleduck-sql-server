@@ -383,6 +383,40 @@ class TierLoopTest {
     }
 
     @Test
+    void eachTrackedTableReportsItsWorkAndItsLastCalls() {
+        compactor.work = List.of(work("main.good", 40, T0.minus(Duration.ofMinutes(31))), work("main.bad", 30, T0));
+        compactor.failing.put("main.bad", "Binder Error: no such column");
+        compactor.duringCall = t -> clock.advance(Duration.ofSeconds(2));
+        loop.runPass();
+        loop.runPass();
+        loop.runPass();
+        var tables = loop.status().tables();
+        assertEquals(List.of("main.bad", "main.good"), tables.stream().map(CompactionStats.TableStatus::table).toList());
+
+        var bad = tables.get(0);
+        assertEquals(30, bad.filesWaiting());
+        assertEquals("FAILED", bad.lastOutcome());
+        assertNull(bad.lastSuccess());
+        assertEquals(3, bad.consecutiveFailures());
+        assertNotNull(bad.backoffUntil());
+        assertEquals(List.of("backoff"), bad.flags());
+
+        var good = tables.get(1);
+        assertEquals(40, good.filesWaiting());
+        assertEquals("SUCCESS", good.lastOutcome());
+        assertEquals(good.lastCall(), good.lastSuccess());
+        assertEquals(0, good.consecutiveFailures());
+        assertTrue(good.oldestWaitSeconds() > 31 * 60);
+        assertEquals(List.of("stale"), good.flags());
+        assertNull(good.capLimit(), "nothing learnt from a timeout");
+
+        compactor.work = List.of(work("main.bad", 30, T0)); // main.good caught up
+        loop.runPass();
+        assertEquals(List.of("main.bad"), loop.status().tables().stream().map(CompactionStats.TableStatus::table).toList(),
+                "a table with nothing to merge and no back-off is no longer tracked");
+    }
+
+    @Test
     void aConflictDoesNotChangeTheCap() {
         compactor.work = List.of(table("main.busy", 500, 500L * 1_000_000, T0, 0, true));
         compactor.failing.put("main.busy", "TransactionContext Error: Transaction conflict");

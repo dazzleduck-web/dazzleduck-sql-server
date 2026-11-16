@@ -159,7 +159,36 @@ public class HealthServer implements Closeable {
                 + ", \"idleTxnTimeoutMs\": " + t.idleTxnTimeoutMs()
                 + ", \"threads\": " + t.threads()
                 + ", \"duckdbMemoryBytes\": " + t.duckdbMemoryBytes()
+                + ", \"tables\": " + tablesJson(t.tables())
                 + "}";
+    }
+
+    /** Each table the tier tracks, one compact object per line. */
+    private static String tablesJson(java.util.List<CompactionStats.TableStatus> tables) {
+        if (tables.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < tables.size(); i++) {
+            CompactionStats.TableStatus t = tables.get(i);
+            sb.append(i > 0 ? "," : "").append("\n            {")
+                    .append("\"table\": ").append(string(t.table()))
+                    .append(", \"filesWaiting\": ").append(t.filesWaiting())
+                    .append(", \"bytesWaiting\": ").append(t.bytesWaiting())
+                    .append(", \"oldestWaitSeconds\": ").append(t.oldestWaitSeconds())
+                    .append(", \"busyPartitions\": ").append(t.busyPartitions())
+                    .append(", \"sorted\": ").append(t.sorted())
+                    .append(", \"lastCall\": ").append(instant(t.lastCall()))
+                    .append(", \"lastOutcome\": ").append(string(t.lastOutcome()))
+                    .append(", \"lastSuccess\": ").append(instant(t.lastSuccess()))
+                    .append(", \"consecutiveFailures\": ").append(t.consecutiveFailures())
+                    .append(", \"backoffUntil\": ").append(instant(t.backoffUntil()))
+                    .append(", \"capLimit\": ").append(t.capLimit())
+                    .append(", \"groupFilesLimit\": ").append(t.groupFilesLimit())
+                    .append(", \"flags\": ").append(stringArray(t.flags()))
+                    .append("}");
+        }
+        return sb.append("]").toString();
     }
 
     private static String stringArray(java.util.List<String> values) {

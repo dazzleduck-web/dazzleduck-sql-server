@@ -90,6 +90,10 @@ final class TierLoop {
         long groupFilesLimit = Long.MAX_VALUE;
         /** When the timeout last killed a call of the table, or null. */
         Instant lastTimeout;
+        Instant lastCall;
+        CompactionRun.Outcome lastOutcome;
+        Instant lastSuccess;
+        boolean listed;
 
         /** Forgets the limits learnt from timeouts once the last is older than {@link #LEARNED_LIMITS_EXPIRE}. */
         void expireLearnedLimits(Instant now) {
@@ -111,6 +115,7 @@ final class TierLoop {
     private List<String> stale = List.of();
     private List<String> oversized = List.of();
     private List<String> reduced = List.of();
+    private List<CompactionStats.TableStatus> tableStatuses = List.of();
     private TierCompactor.Readiness readiness;
     private Instant lastCallEnded;
     private long passes;
@@ -145,7 +150,7 @@ final class TierLoop {
         this.runLog = runLog;
         this.clock = clock;
         this.status = new CompactionStats.TierStatus("STARTING", null, null, 0, 0, 0, List.of(), List.of(), List.of(),
-                List.of(), List.of(), -1, 0, -1);
+                List.of(), List.of(), -1, 0, -1, List.of());
     }
 
     CompactionTier tier() {
@@ -473,6 +478,11 @@ final class TierLoop {
         }
         Instant endedAt = clock.instant();
         long rssAfter = ResourceSampler.rssBytes();
+        health.lastCall = endedAt;
+        health.lastOutcome = outcome;
+        if (outcome != CompactionRun.Outcome.FAILED) {
+            health.lastSuccess = endedAt;
+        }
         lastCallEnded = endedAt;
         record(work, cap, startedAt, endedAt, gapMs, rssBefore, rssAfter, merge, outcome, failureClass, error, timeoutMs);
         return result;
@@ -541,6 +551,7 @@ final class TierLoop {
         List<String> staleNow = new ArrayList<>();
         List<String> oversizedNow = new ArrayList<>();
         List<String> reducedNow = new ArrayList<>();
+        List<CompactionStats.TableStatus> statusesNow = new ArrayList<>();
         var it = tables.entrySet().iterator();
         while (it.hasNext()) {
             var entry = it.next();
@@ -550,6 +561,7 @@ final class TierLoop {
             if (backedOff) {
                 backedOffNow.add(name);
             }
+            health.listed = seen.contains(name);
             if (seen.contains(name)) {
                 TableWork work = health.lastWork;
                 Duration age = Duration.between(work.oldestWaiting(), now);
@@ -580,6 +592,43 @@ final class TierLoop {
         stale = List.copyOf(staleNow);
         oversized = List.copyOf(oversizedNow);
         reduced = List.copyOf(reducedNow);
+        tables.forEach((name, health) -> statusesNow.add(tableStatus(name, health, now)));
+        statusesNow.sort(java.util.Comparator.comparing(CompactionStats.TableStatus::table));
+        tableStatuses = List.copyOf(statusesNow);
+    }
+
+    private static CompactionStats.TableStatus tableStatus(String name, TableHealth health, Instant now) {
+        TableWork work = health.listed ? health.lastWork : null;
+        boolean backedOff = health.backoffUntil != null && now.isBefore(health.backoffUntil);
+        List<String> flags = new ArrayList<>();
+        if (work != null && Duration.between(work.oldestWaiting(), now).compareTo(STALE_AFTER) > 0) {
+            flags.add("stale");
+        }
+        if (health.starved) {
+            flags.add("starved");
+        }
+        if (health.oversized) {
+            flags.add("oversized");
+        } else if (health.reducedTarget) {
+            flags.add("reduced");
+        }
+        if (backedOff) {
+            flags.add("backoff");
+        }
+        return new CompactionStats.TableStatus(name,
+                work != null ? work.filesWaiting() : 0,
+                work != null ? work.bytesWaiting() : 0,
+                work != null ? Math.max(0, Duration.between(work.oldestWaiting(), now).toSeconds()) : 0,
+                work != null ? work.busyPartitions() : 0,
+                health.lastWork != null && health.lastWork.sorted(),
+                health.lastCall,
+                health.lastOutcome != null ? health.lastOutcome.name() : null,
+                health.lastSuccess,
+                health.failures,
+                backedOff ? health.backoffUntil : null,
+                health.capLimit == Integer.MAX_VALUE ? null : health.capLimit,
+                health.groupFilesLimit == Long.MAX_VALUE ? null : health.groupFilesLimit,
+                List.copyOf(flags));
     }
 
     private void publish(String loopState, String refused) {
@@ -587,6 +636,6 @@ final class TierLoop {
         status = new CompactionStats.TierStatus(loopState, refused, state.getLastPass(database, tier.name()), passes,
                 queue, carryOver.size(), backoffs, starved, stale, oversized, reduced,
                 readiness != null ? readiness.idleTxnTimeoutMs() : -1,
-                readiness != null ? readiness.threads() : 0, memory);
+                readiness != null ? readiness.threads() : 0, memory, tableStatuses);
     }
 }
