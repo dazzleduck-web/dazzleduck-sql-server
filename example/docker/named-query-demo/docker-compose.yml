@@ -5,7 +5,7 @@
 #
 # Prerequisites:
 #   Build the Docker image first:
-#   ./mvnw clean package -DskipTests && ./mvnw jib:dockerBuild -pl dazzleduck-sql-runtime
+#   ./mvnw clean install -DskipTests && ./mvnw generate-resources jib:dockerBuild -pl dazzleduck-sql-runtime -Dducklake.extension.download.skip=false
 #
 # Test named queries:
 #   # Login

@@ -246,6 +246,18 @@
                                 <from>${project.basedir}/../example/startup</from>
                                 <into>/startup</into>
                             </path>
+                            <!-- The patched DuckLake extension (parent pom's
+                                 download-patched-ducklake-extension), at the cache path DuckDB
+                                 resolves INSTALL/LOAD/autoload from, so no stock build is fetched.
+                                 duckdb.properties sets allow_unsigned_extensions=true, since this
+                                 build isn't signed with DuckDB Labs' key. Only this arch's
+                                 subdirectory, so a target/ left over from the other arch adds nothing.
+                                 The docker-arm64/docker-amd64 executions need -Djib.architecture to
+                                 match. -->
+                            <path>
+                                <from>${project.build.directory}/ducklake-extension/linux_${jib.architecture}</from>
+                                <into>/root/.duckdb/extensions/${ducklake.extension.cache.version}/linux_${jib.architecture}</into>
+                            </path>
                         </paths>
                         <permissions>
                             <permission>

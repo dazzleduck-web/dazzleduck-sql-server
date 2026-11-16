@@ -101,14 +101,14 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             ./mvnw $JIB_ARGS package jib:build -pl dazzleduck-sql-runtime \
-              -Djib.architecture=$arch
+              -Djib.architecture=$arch -Dducklake.extension.download.skip=false
           done
 
       - name: Build and push dazzleduck-otel-collector
         run: |
           for arch in amd64 arm64; do
             ./mvnw $JIB_ARGS package jib:build -pl dazzleduck-sql-otel-collector \
-              -Djib.architecture=$arch
+              -Djib.architecture=$arch -Dducklake.extension.download.skip=false
           done
 
       - name: Build and push ducklake-compactor

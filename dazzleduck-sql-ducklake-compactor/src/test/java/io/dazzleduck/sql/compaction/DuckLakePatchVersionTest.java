@@ -41,7 +41,7 @@ class DuckLakePatchVersionTest {
                      dazzleduck-web/ducklake onto the new DuckDB-pinned ducklake commit, update its \
                      .github/duckdb-version, and dispatch build-and-publish-extension.yml with a new \
                      release_tag.
-                  2. Update this module's pom.xml: ducklake.patch.release, \
+                  2. Update the parent pom.xml: ducklake.patch.release, \
                      ducklake.extension.cache.version, and ducklake.patch.built.for.duckdb.version.
                 See DUCKLAKE_PATCH.md for the full procedure.
                 """.formatted(duckdbVersion, patchedForVersion, patchRelease));
@@ -57,7 +57,7 @@ class DuckLakePatchVersionTest {
         assertEquals(expectedCacheVersion, cacheVersion, () -> """
                 ducklake.extension.cache.version (%s) does not match the value DuckDB %s actually \
                 uses for its extension cache directory (%s). Update ducklake.extension.cache.version \
-                in pom.xml; see DUCKLAKE_PATCH.md.
+                in the parent pom.xml; see DUCKLAKE_PATCH.md.
                 """.formatted(cacheVersion, duckdbVersion, expectedCacheVersion));
     }
 }

@@ -1,8 +1,8 @@
 # Patched DuckLake Extension
 
-This module's Docker images (both the GraalVM native image and the Jib image) bake in a
-custom-built DuckLake extension instead of the stock one DuckDB would otherwise fetch over the
-network. This document explains what the patch is, how it's built and published, how the images
+Every image that loads DuckLake bakes in a custom-built DuckLake extension instead of the stock one
+DuckDB would otherwise fetch over the network: this module's GraalVM native and Jib images, the
+runtime (`dazzleduck/dazzleduck`) Jib image, and the otel-collector's Jib and native images. This document explains what the patch is, how it's built and published, how the images
 consume it, and the exact steps to update it when `duckdb.version` changes.
 
 ## What the patch fixes
@@ -38,6 +38,12 @@ concurrent delete. Data retention depends on it: its `DELETE` would otherwise ke
 continuous ingestion. `RetentionConcurrentIngestionTest` runs against the pinned release and fails
 on the stock extension.
 
+The runtime and the otel-collector need it as well, not only the compactor. A commit's conflict
+check runs in the committing process, so an ingestion commit made with the stock extension can
+still fail against a concurrent retention `DELETE` or compaction even when the compactor is
+patched; the otel-collector also runs its own DuckLake maintenance. One DuckLake build everywhere
+also means every process writes the same metadata, including the rowid stats rows.
+
 All of it is backported onto DuckLake's `v1.5-variegata` branch at its DuckDB `v1.5.6` bump
 (`343df36a`). Its extension source is exactly `ac7595b0`, the DuckLake commit DuckDB `v1.5.6` pins via
 its own `.github/config/extensions/ducklake.cmake` (the bump commit only changes CI files and
@@ -62,9 +68,9 @@ select extension_version from duckdb_extensions() where extension_name = 'duckla
 | Patched source | [`dazzleduck-web/ducklake`](https://github.com/dazzleduck-web/ducklake), branch `backport/v1.5.6-dazzleduck` |
 | Build + publish workflow | same repo, `.github/workflows/build-and-publish-extension.yml` (manually triggered) |
 | Published binaries | GitHub Releases on that repo, e.g. [`v1.5.6-dazzleduck.3`](https://github.com/dazzleduck-web/ducklake/releases/tag/v1.5.6-dazzleduck.3), assets `ducklake-<platform>.duckdb_extension` for `linux_amd64`, `linux_arm64` (the Docker images), `osx_amd64`, `osx_arm64` and `windows_amd64` (native binaries and local testing) |
-| Version pins in this repo | `dazzleduck-sql-ducklake-compactor/pom.xml`: `ducklake.patch.release`, `ducklake.patch.built.for.duckdb.version`, `ducklake.extension.cache.version` |
+| Version pins in this repo | the parent `pom.xml`: `ducklake.patch.release`, `ducklake.patch.built.for.duckdb.version`, `ducklake.extension.cache.version` |
 | Drift guard | `DuckLakePatchVersionTest` (fails the build if `duckdb.version` diverges from `ducklake.patch.built.for.duckdb.version`, or if `ducklake.extension.cache.version` no longer matches `duckdb.version`'s first three components) |
-| Runtime enablement | Two separate connections need it, both set as a JDBC connection **property** (not a `SET` statement — DuckDB rejects changing it once the instance is running): `RawConnections.java` for the compaction/housekeeping connections, and `src/main/resources/duckdb.properties` for the shared commons singleton `Main.java` runs the startup script against first (`ConnectionPool.executeOnSingleton` has no other hook for connection properties) |
+| Runtime enablement | `allow_unsigned_extensions=true`, always as a JDBC connection **property** (not a `SET` statement — DuckDB rejects changing it once the instance is running). In the compactor: `RawConnections.java` for the compaction/housekeeping connections, and `src/main/resources/duckdb.properties` for the shared commons singleton `Main.java` runs the startup script against first (`ConnectionPool.executeOnSingleton` has no other hook for connection properties). In the runtime and the otel-collector: each module's `src/main/resources/duckdb.properties`, read by `ConnectionPool` |
 
 The build itself runs via DuckDB's own official `duckdb/extension-ci-tools` reusable workflow —
 the same manylinux-style environment official extensions use — so the binaries link against an
@@ -77,20 +83,27 @@ Neither the native Dockerfile nor the Jib packaging talks to the ducklake fork's
 just download the two published release assets and place them at the exact local path DuckDB
 resolves `LOAD ducklake` from: `~/.duckdb/extensions/<ducklake.extension.cache.version>/linux_<arch>/ducklake.duckdb_extension`.
 
-- **`Dockerfile.native`** reads `ducklake.patch.release` and `ducklake.extension.cache.version`
+- **`Dockerfile.native`** (this module's and the otel-collector's) reads `ducklake.patch.release` and `ducklake.extension.cache.version`
   from the pom, `curl`s the matching-arch asset into that path, then a small Java program opens its
   verification connection with `allow_unsigned_extensions=true` as a **connection property** (not a
   `SET` statement — see "Runtime enablement" above) and calls `LOAD ducklake` to confirm it loads
   before baking it into the runtime stage.
-- **Jib packaging** (`pom.xml`) runs an `exec-maven-plugin` execution bound to `generate-resources`
+- **Jib packaging** runs the parent pom's `download-patched-ducklake-extension` execution (an
+  `exec-maven-plugin` execution in `pluginManagement`, run by every module that declares the plugin:
+  the compactor, the runtime and the otel-collector), bound to `generate-resources`,
   that `curl`s the asset for whichever `jib.architecture` is being built into
   `target/ducklake-extension/linux_<arch>/`, then Jib's `extraDirectories` copies that arch's
-  subdirectory into the image at the same cache path. This download is **skipped by default**
+  subdirectory into the image at the same cache path (each module's jib configuration). A startup
+  script's `INSTALL ducklake` finds the extension already in place and keeps it, and autoloading
+  (for example on `ATTACH 'ducklake:...'`) loads it too. This download is **skipped by default**
   (`ducklake.extension.download.skip=true`) since `generate-resources` also runs for plain
   `test`/`install`/`verify` and the native profile's own `package`, none of which need this ~36MB
   asset — callers that actually build the jib image pass
-  `-Dducklake.extension.download.skip=false` (see `release.yml`, `scripts/docker-publish.sh`, this
-  module's own README, `.claude/commands/publish-docker.md`).
+  `-Dducklake.extension.download.skip=false` (see `release.yml`, `scripts/docker-publish.sh`, the
+  module READMEs, `.claude/commands/publish-docker.md`). A bare `jib:dockerBuild` runs no
+  lifecycle phase, so it also needs `generate-resources` before it. Without the download, jib fails
+  on the missing `target/ducklake-extension/linux_<arch>` directory rather than building an image
+  with the stock extension.
 
 Both paths therefore need re-running (a normal Docker/Jib build) whenever the release tag changes
 — nothing else to wire up.
@@ -146,7 +159,7 @@ build until the patch is rebuilt for that version. Steps:
    gh release view vX.Y.Z-dazzleduck.1 --repo dazzleduck-web/ducklake
    ```
 
-5. **Update this repo's pins** in `dazzleduck-sql-ducklake-compactor/pom.xml`:
+5. **Update this repo's pins** in the parent `pom.xml`:
    - `ducklake.patch.release` → the new release tag
    - `ducklake.patch.built.for.duckdb.version` → the new `duckdb.version` (must match exactly —
      this is what `DuckLakePatchVersionTest` checks)
@@ -161,12 +174,15 @@ build until the patch is rebuilt for that version. Steps:
 If `duckdb/ducklake#1453`, `#1482`, `#1484` and the rowid pruning merge upstream and a future
 DuckDB release's pinned DuckLake commit already contains them, this whole mechanism can be removed:
 
-- `Dockerfile.native`: replace the `curl`-and-place block with a plain `INSTALL ducklake` again.
-- `pom.xml`: remove the `download-patched-ducklake-extension` execution, the `extraDirectories`
-  block, and the `ducklake.patch.*`/`ducklake.extension.cache.version`/
-  `ducklake.extension.download.skip` properties.
+- Both `Dockerfile.native` files (this module's and the otel-collector's): replace the
+  `curl`-and-place block with a plain `INSTALL ducklake` again.
+- Parent `pom.xml`: remove the `download-patched-ducklake-extension` execution and the
+  `ducklake.patch.*`/`ducklake.extension.cache.version`/`ducklake.extension.download.skip`
+  properties. In the compactor, runtime and otel-collector poms, remove the patched-extension
+  `extraDirectories` path and the bare `exec-maven-plugin` declaration that only runs the download.
 - `RawConnections.java`: remove the `allow_unsigned_extensions` connection property.
-- Delete `src/main/resources/duckdb.properties`.
+- Delete `src/main/resources/duckdb.properties` in the compactor, the runtime and the otel-collector.
 - Delete `DuckLakePatchVersionTest` and `src/test/resources-filtered/`.
-- Revert the `-Dducklake.extension.download.skip=false` flag added to `release.yml`,
-  `scripts/docker-publish.sh`, this module's README, and `.claude/commands/publish-docker.md`.
+- Revert the `-Dducklake.extension.download.skip=false` flag (and the `generate-resources` phase
+  added for it) in `release.yml`, `scripts/docker-publish.sh`, `CLAUDE.md`, the module READMEs, the
+  example docker-compose comments, and `.claude/commands/publish-docker.md`.

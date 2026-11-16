@@ -13,7 +13,7 @@ export MAVEN_OPTS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java
 ./mvnw test -pl dazzleduck-sql-http                            # one module
 ./mvnw test -pl dazzleduck-sql-http -Dtest=QueryServiceTest    # one class
 ./mvnw exec:java -pl dazzleduck-sql-runtime -Dexec.mainClass="io.dazzleduck.sql.runtime.Main" -Dexec.args="--conf warehouse=warehouse"
-./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime -Djib.architecture=arm64   # local image
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-runtime -Djib.architecture=arm64 -Dducklake.extension.download.skip=false   # local image
 ```
 
 - Surefire gets the Arrow/Netty JVM flags from the parent pom's `arrow.jvm.flags`.

@@ -573,10 +573,10 @@ java -cp ... io.dazzleduck.sql.otel.collector.Main -c /etc/otel-collector.conf
 
 ## Docker
 
-The collector is published as `dazzleduck/dazzleduck-otel-collector` (multi-arch). Local build via Jib:
+The collector is published as `dazzleduck/dazzleduck-otel-collector` (multi-arch). The image bakes in the patched DuckLake extension (see `dazzleduck-sql-ducklake-compactor/DUCKLAKE_PATCH.md`), whose download is skipped unless the build passes `-Dducklake.extension.download.skip=false`. Local build via Jib:
 
 ```bash
-./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector -Dducklake.extension.download.skip=false
 # Apple Silicon:
-./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector -Djib.architecture=arm64
+./mvnw package -DskipTests jib:dockerBuild -pl dazzleduck-sql-otel-collector -Djib.architecture=arm64 -Dducklake.extension.download.skip=false
 ```
