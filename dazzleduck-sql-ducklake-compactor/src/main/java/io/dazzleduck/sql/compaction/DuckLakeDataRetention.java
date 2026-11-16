@@ -410,7 +410,7 @@ public class DuckLakeDataRetention implements DataRetention {
 
     /** The metadata catalog under DuckLake's default name, as the rest of the compactor reads it. */
     private static String metadataCatalog(RetentionPolicy policy) {
-        return "\"__ducklake_metadata_" + policy.catalog() + "\"";
+        return Sql.metadataCatalog(policy.catalog());
     }
 
     /** The time-column range of one live data file, in UTC epoch microseconds. */

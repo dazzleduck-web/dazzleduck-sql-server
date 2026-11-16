@@ -85,6 +85,23 @@ final class ResourceSampler {
         return -1;
     }
 
+    /** The memory this process may use: the container's limit, else the machine's, or -1. */
+    static long totalMemoryBytes() {
+        long limit = containerMemoryLimitBytes();
+        if (limit > 0) {
+            return limit;
+        }
+        try {
+            if (java.lang.management.ManagementFactory.getOperatingSystemMXBean()
+                    instanceof com.sun.management.OperatingSystemMXBean os) {
+                return os.getTotalMemorySize();
+            }
+        } catch (Throwable e) {
+            logger.debug("Could not read the machine's memory", e);
+        }
+        return -1;
+    }
+
     /** Total bytes currently under {@code dir} (spill/temp usage), or -1 when unknown/missing. */
     static long dirSizeBytes(String dir) {
         if (dir == null || dir.isBlank()) {

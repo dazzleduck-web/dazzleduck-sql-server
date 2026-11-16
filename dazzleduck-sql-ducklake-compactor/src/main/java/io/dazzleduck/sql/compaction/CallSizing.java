@@ -59,6 +59,21 @@ public final class CallSizing {
         return new Cap((int) Math.min(Integer.MAX_VALUE, cap), floor > upper, filesPerGroup);
     }
 
+    /**
+     * Whether one group of the table, at its own per-file rate, commits within 80% of the catalog's
+     * idle-in-transaction timeout. DuckLake cannot cut a group by file count, so a table whose single
+     * group cannot (an unsorted table of tiny files under a short timeout) would only be killed by the
+     * catalog, call after call: it is skipped and reported instead. Always true without a timeout.
+     */
+    public static boolean groupFits(CompactionTier tier, TableWork work, long idleTxnTimeoutMs) {
+        if (idleTxnTimeoutMs <= 0) {
+            return true;
+        }
+        long average = Math.max(1, work.averageFileSize());
+        long filesPerGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
+        return filesPerGroup * secPerFile(work.sorted()) <= TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0;
+    }
+
     public static double secPerFile(boolean sorted) {
         return sorted ? SEC_PER_FILE_SORTED : SEC_PER_FILE_UNSORTED;
     }
@@ -74,7 +89,8 @@ public final class CallSizing {
 
     /**
      * The startup check: whether one full group of the tier's smallest files fits in 80% of the
-     * timeout at the sorted rate. A tier whose single group cannot commit before the catalog kills
+     * timeout at the sorted rate. Unsorted tables, twice as slow, are checked per table by
+     * {@link #groupFits}. A tier whose single group cannot commit before the catalog kills
      * the transaction would fail every call, so it does not start. Always true without a timeout.
      */
     public static boolean fullGroupFits(CompactionTier tier, long idleTxnTimeoutMs) {

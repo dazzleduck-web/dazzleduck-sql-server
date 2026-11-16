@@ -97,7 +97,7 @@ class DuckDbTierCompactorTest {
     }
 
     private Map<String, TableWork> discover(CompactionTier tier) throws Exception {
-        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4)) {
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
             return compactor.discover("lake", tier).stream().collect(Collectors.toMap(TableWork::name, Function.identity()));
         }
     }
@@ -162,7 +162,7 @@ class DuckDbTierCompactorTest {
     @Test
     void aCallMergesOnlyItsTableUpToTheCap() throws Exception {
         Map<String, TableWork> listed = discover(ALL);
-        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4)) {
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
             TierCompactor.MergeOutcome out = compactor.compact("lake", ALL, listed.get("main.t"), 10);
             assertEquals(4L, out.filesProcessed());
             assertEquals(1L, out.filesCreated());
@@ -195,7 +195,7 @@ class DuckDbTierCompactorTest {
         // so main.t's four files make two groups of two. A cap of 1 merges only the first.
         CompactionTier pairs = CompactionTier.of("pairs", 0, fileSize + 1, fileSize + 1, 10);
         TableWork t = discover(pairs).get("main.t");
-        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4)) {
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
             TierCompactor.MergeOutcome out = compactor.compact("lake", pairs, t, 1);
             assertEquals(2L, out.filesProcessed(), "one group of two");
             assertEquals(1L, out.filesCreated());
@@ -205,7 +205,7 @@ class DuckDbTierCompactorTest {
 
     @Test
     void theSessionTargetIsSetAndReadBack() throws Exception {
-        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4)) {
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
             TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
             assertFalse(readiness.isRefused(), String.valueOf(readiness.refused()));
             assertEquals(0, readiness.idleTxnTimeoutMs(), "a DuckDB-file catalog has no idle-in-transaction timeout");
@@ -218,6 +218,86 @@ class DuckDbTierCompactorTest {
                 rs.next();
                 assertEquals("1000000000 bytes", rs.getString(1));
             }
+        }
+    }
+
+    @Test
+    void mergedOutputsLeaveTheBandOrStayAsItsOneLeftover() throws Exception {
+        // Review question on #542: with target = band max, a merge stops adding files once a group
+        // reaches the target, and its output can come out a little smaller than its inputs, so it may
+        // stay just under the band max. It then merges again with whatever shares its group, which
+        // moves it out of the band. Repeated passes must converge: nothing left to list, at most one
+        // file of the table left in the band.
+        long fileSize = liveFileSize("t");
+        CompactionTier band = CompactionTier.of("band", 0, 2 * fileSize, 2 * fileSize, 10);
+        int passes = 0;
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
+            for (TableWork t = compactor.discover("lake", band).stream().filter(w -> w.name().equals("main.t"))
+                    .findFirst().orElse(null); t != null; t = compactor.discover("lake", band).stream()
+                    .filter(w -> w.name().equals("main.t")).findFirst().orElse(null)) {
+                assertTrue(++passes <= 4, "merges must converge");
+                compactor.compact("lake", band, t, 10);
+            }
+        }
+        assertTrue(passes >= 1);
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
+            for (String sql : startup.split(";\n")) {
+                s.execute(sql);
+            }
+            try (ResultSet rs = s.executeQuery(("SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file d"
+                    + " JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id)"
+                    + " JOIN __ducklake_metadata_lake.ducklake_schema sc ON sc.schema_id = t.schema_id"
+                    + " WHERE t.table_name = 't' AND sc.schema_name = 'main' AND t.end_snapshot IS NULL"
+                    + " AND d.end_snapshot IS NULL AND d.file_size_bytes < %d").formatted(2 * fileSize))) {
+                rs.next();
+                assertTrue(rs.getLong(1) <= 1, "at most one leftover in the band, got " + rs.getLong(1));
+            }
+        }
+    }
+
+    private long liveFileSize(String table) throws Exception {
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
+            for (String sql : startup.split(";\n")) {
+                s.execute(sql);
+            }
+            try (ResultSet rs = s.executeQuery("SELECT max(file_size_bytes) FROM __ducklake_metadata_lake.ducklake_data_file"
+                    + " JOIN __ducklake_metadata_lake.ducklake_table USING (table_id) WHERE table_name = '" + table + "'")) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    @Test
+    void duckDbSizesAreParsedAsDuckDbWritesThem() {
+        assertEquals(16_000_000L, DuckDbTierCompactor.parseDuckDbSize("16000000 bytes"));
+        assertEquals(16_000_000L, DuckDbTierCompactor.parseDuckDbSize("16.0 MB"));
+        assertEquals(16L * 1024 * 1024, DuckDbTierCompactor.parseDuckDbSize("16.0 MiB"));
+        assertEquals(-1L, DuckDbTierCompactor.parseDuckDbSize("sixteen"));
+    }
+
+    @Test
+    void threadsAndMemoryAreAProcessBudgetSplitAcrossDatabases() {
+        CompactionTier minor = CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12).withCpuShare(0.5);
+        assertEquals(8, minor.threads(8, 1), "2 x 0.5 x 8 CPUs");
+        assertEquals(3, minor.threads(8, 3), "three databases each run a minor instance");
+        assertEquals(1, minor.threads(1, 4), "at least one");
+
+        DuckDbTierCompactor oneDb = new DuckDbTierCompactor(startup, state, 8, 1, 4_000_000_000L);
+        assertEquals(1_200_000_000L, oneDb.defaultMemoryLimitBytes(minor), "60% of 4 GB x 0.5");
+        DuckDbTierCompactor twoDbs = new DuckDbTierCompactor(startup, state, 8, 2, 4_000_000_000L);
+        assertEquals(600_000_000L, twoDbs.defaultMemoryLimitBytes(minor));
+        assertEquals(-1L, oneDb.defaultMemoryLimitBytes(minor.withConnectionSettings(List.of("SET memory_limit='2GB'"))),
+                "an explicit memory_limit wins");
+        assertEquals(-1L, new DuckDbTierCompactor(startup, state, 8, 1, -1).defaultMemoryLimitBytes(minor),
+                "unknown memory: DuckDB's default");
+    }
+
+    @Test
+    void theInstanceGetsItsMemoryLimitAndThreads() throws Exception {
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 2, 4_000_000_000L)) {
+            TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
+            assertEquals(4, readiness.threads(), "2 x 1.0 x 4 CPUs / 2 databases");
         }
     }
 

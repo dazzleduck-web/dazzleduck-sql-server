@@ -219,6 +219,8 @@ public class CompactionService implements Closeable {
                 .formatted(prefix, t, TierLoop.FAILURES_BEFORE_BACKOFF)));
         status.starved().forEach(t -> alerts.add(prefix + " may starve partitions of " + t
                 + ": its busy partitions want more slots than its cap"));
+        status.oversized().forEach(t -> alerts.add(prefix + " skips " + t
+                + ": one group of its files cannot commit within the catalog's idle-in-transaction timeout"));
         status.stale().forEach(t -> alerts.add("%s: %s has had a file waiting over %d minutes"
                 .formatted(prefix, t, TierLoop.STALE_AFTER.toMinutes())));
         if (state.fileCountRising(db, tier.name(), RISING_ALERT_AFTER, now)) {
@@ -278,7 +280,7 @@ public class CompactionService implements Closeable {
      */
     void refreshFileCounts(String database) {
         state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
-        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
+        String mdDatabase = Sql.metadataCatalog(database);
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
         for (CompactionTier tier : config.tiers()) {
             sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""

@@ -29,6 +29,16 @@ public class DuckDbTierCompactor implements TierCompactor {
     private final String startupScript;
     private final CompactionState metrics;
     private final int availableProcessors;
+    private final int databases;
+    private final long totalMemoryBytes;
+
+    /**
+     * Share of the process's memory (the container's limit, else physical memory) that the tiers'
+     * DuckDB instances may use together, split by {@code cpu_share} and database, for an instance
+     * whose connection_settings set no {@code memory_limit}. The rest is headroom for what DuckDB
+     * allocates outside its {@code memory_limit} and for the JVM.
+     */
+    static final double MEMORY_SHARE = 0.6;
 
     private record Open(Connection connection, Readiness readiness) {
     }
@@ -36,14 +46,36 @@ public class DuckDbTierCompactor implements TierCompactor {
     private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
 
     public DuckDbTierCompactor(String startupScript, CompactionState metrics) {
-        this(startupScript, metrics, Runtime.getRuntime().availableProcessors());
+        this(startupScript, metrics, 1);
     }
 
-    /** @param availableProcessors the CPUs the tiers' {@code cpu_share} values divide */
-    public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors) {
+    /** @param databases the configured databases: each runs its own instance of every tier */
+    public DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases) {
+        this(startupScript, metrics, Runtime.getRuntime().availableProcessors(), databases,
+                ResourceSampler.totalMemoryBytes());
+    }
+
+    /**
+     * @param availableProcessors the CPUs the tiers' {@code cpu_share} values divide
+     * @param databases           the configured databases, which divide them again: each database runs
+     *                            its own instance of every tier, so the shares are a process budget
+     * @param totalMemoryBytes    the process's memory, or -1 when unknown (no default memory_limit)
+     */
+    public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
+                               long totalMemoryBytes) {
         this.startupScript = startupScript;
         this.metrics = metrics;
         this.availableProcessors = availableProcessors;
+        this.databases = Math.max(1, databases);
+        this.totalMemoryBytes = totalMemoryBytes;
+    }
+
+    /** The instance's {@code memory_limit} when connection_settings set none, or -1 for DuckDB's default. */
+    long defaultMemoryLimitBytes(CompactionTier tier) {
+        if (totalMemoryBytes <= 0 || ResourceSampler.memoryLimitBytes(tier.connectionSettings()) >= 0) {
+            return -1;
+        }
+        return Math.max(64L << 20, (long) (MEMORY_SHARE * totalMemoryBytes * tier.cpuShare() / databases));
     }
 
     @Override
@@ -53,11 +85,17 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (existing != null) {
             return existing.readiness();
         }
-        int threads = tier.threads(availableProcessors);
+        int threads = tier.threads(availableProcessors, databases);
+        long memoryLimit = defaultMemoryLimitBytes(tier);
         // threads first, so a connection_settings entry that sets it explicitly still wins
         List<String> settings = new ArrayList<>();
         settings.add("SET threads = " + threads);
+        if (memoryLimit > 0) {
+            settings.add("SET memory_limit = '" + memoryLimit + " bytes'");
+        }
         settings.addAll(tier.connectionSettings());
+        logger.info("Tier '{}' opens its DuckDB instance for {}: {} thread(s), memory_limit {}", tier.name(), database,
+                threads, memoryLimit > 0 ? memoryLimit + " bytes" : "from connection_settings or DuckDB's default");
         Connection connection = RawConnections.open(startupScript, settings);
         try {
             Readiness readiness = check(connection, database, tier, threads);
@@ -85,6 +123,8 @@ public class DuckDbTierCompactor implements TierCompactor {
                         0, threads);
             }
             throw e;
+        } catch (TargetMismatchException e) {
+            return new Readiness(e.getMessage(), 0, threads);
         }
         long timeoutMs = idleTxnTimeoutMs(connection, database, tier);
         if (!CallSizing.fullGroupFits(tier, timeoutMs)) {
@@ -108,11 +148,48 @@ public class DuckDbTierCompactor implements TierCompactor {
         try (Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT current_setting('ducklake_target_file_size')")) {
             String actual = rs.next() ? rs.getString(1) : null;
-            if (actual == null || !actual.trim().equalsIgnoreCase(value)) {
-                throw new IllegalStateException("ducklake_target_file_size is %s after setting it to %s"
+            long bytes = actual == null ? -1 : parseDuckDbSize(actual);
+            // A display may round (e.g. "16.0 MB"); anything further off is not the target we set.
+            if (bytes < 0 || Math.abs(bytes - tier.targetFileSize()) > tier.targetFileSize() / 100) {
+                throw new TargetMismatchException("ducklake_target_file_size reads back as %s after setting it to %s"
                         .formatted(actual, value));
             }
         }
+    }
+
+    /** The session target did not take: the tier must not run, since its groups would be unbounded. */
+    static final class TargetMismatchException extends IllegalStateException {
+        TargetMismatchException(String message) {
+            super(message);
+        }
+    }
+
+    private static final java.util.regex.Pattern DUCKDB_SIZE =
+            java.util.regex.Pattern.compile("([0-9]+(?:\\.[0-9]+)?)\\s*([a-zA-Z]*)");
+
+    /**
+     * A size as DuckDB writes one: {@code 16000000 bytes}, {@code 16.0 MB} (1000-based) or
+     * {@code 15.2 MiB} (1024-based). -1 when it does not parse.
+     */
+    static long parseDuckDbSize(String value) {
+        java.util.regex.Matcher m = DUCKDB_SIZE.matcher(value.trim());
+        if (!m.matches()) {
+            return -1;
+        }
+        double n = Double.parseDouble(m.group(1));
+        double unit = switch (m.group(2).toLowerCase(java.util.Locale.ROOT)) {
+            case "", "b", "byte", "bytes" -> 1;
+            case "kb" -> 1e3;
+            case "mb" -> 1e6;
+            case "gb" -> 1e9;
+            case "tb" -> 1e12;
+            case "kib" -> 1024.0;
+            case "mib" -> 1024.0 * 1024;
+            case "gib" -> 1024.0 * 1024 * 1024;
+            case "tib" -> 1024.0 * 1024 * 1024 * 1024;
+            default -> -1;
+        };
+        return unit < 0 ? -1 : Math.round(n * unit);
     }
 
     /**
@@ -121,14 +198,18 @@ public class DuckDbTierCompactor implements TierCompactor {
      * file). Read from Postgres's {@code pg_settings} through {@code postgres_query} on the metadata
      * catalog, whose connection carries the ATTACH string's options, so an
      * {@code options=-cidle_in_transaction_session_timeout=...} there counts. ({@code SHOW} cannot be
-     * used: {@code postgres_query} wraps its query in a {@code COPY (SELECT ...)}.) When it cannot be
-     * read, a value set in the tier's connection_settings is used, else none.
+     * used: {@code postgres_query} wraps its query in a {@code COPY (SELECT ...)}.) A catalog attached
+     * through a secret shows its resolved {@code postgres:} path too.
+     *
+     * <p>When a Postgres catalog's value cannot be read, a value set in the tier's connection_settings
+     * is used; without one this throws, so the tier retries opening its connection rather than size
+     * calls as if there were no timeout.
      */
-    static long idleTxnTimeoutMs(Connection connection, String database, CompactionTier tier) {
+    static long idleTxnTimeoutMs(Connection connection, String database, CompactionTier tier) throws SQLException {
+        String path = null;
         try {
             // The metadata catalog itself is hidden from duckdb_databases(); the DuckLake catalog's
             // path names its backend, e.g. "postgres:host=... dbname=...".
-            String path = null;
             try (PreparedStatement statement = connection.prepareStatement(
                     "SELECT path FROM duckdb_databases() WHERE database_name = ? AND type = 'ducklake'")) {
                 statement.setString(1, database);
@@ -144,7 +225,7 @@ public class DuckDbTierCompactor implements TierCompactor {
             String query = "SELECT setting, unit FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'";
             try (Statement statement = connection.createStatement();
                  ResultSet rs = statement.executeQuery("SELECT * FROM postgres_query(%s, %s)"
-                         .formatted(literal(metadataCatalogName(database)), literal(query)))) {
+                         .formatted(Sql.literal(Sql.metadataCatalogName(database)), Sql.literal(query)))) {
                 if (rs.next()) {
                     String unit = rs.getString(2);
                     long ms = ResourceSampler.parseDurationMs(rs.getString(1).trim() + (unit == null ? "" : unit.trim()));
@@ -153,11 +234,17 @@ public class DuckDbTierCompactor implements TierCompactor {
                     }
                 }
             }
+            throw new SQLException("pg_settings returned no idle_in_transaction_session_timeout");
         } catch (Exception e) {
-            logger.warn("Could not read the idle-in-transaction timeout of {}'s catalog for tier '{}'",
-                    database, tier.name(), e);
+            long configured = ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings());
+            if (configured >= 0) {
+                logger.warn("Could not read the idle-in-transaction timeout of {}'s catalog for tier '{}'; using {} ms"
+                        + " from its connection_settings", database, tier.name(), configured, e);
+                return configured;
+            }
+            throw new SQLException(("Could not read the idle-in-transaction timeout of %s's Postgres catalog for tier"
+                    + " '%s'; the tier retries rather than size its calls without it").formatted(database, tier.name()), e);
         }
-        return Math.max(ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings()), 0);
     }
 
     @Override
@@ -199,7 +286,7 @@ public class DuckDbTierCompactor implements TierCompactor {
      * expired is at least as old as the oldest snapshot left, so that is its age.
      */
     static String discoverySql(String database, CompactionTier tier) {
-        String md = "\"" + metadataCatalogName(database).replace("\"", "\"\"") + "\"";
+        String md = Sql.metadataCatalog(database);
         String admitted = "g.files >= " + tier.minFiles();
         if (!tier.maxWait().isZero()) {
             admitted += " OR g.second_oldest <= now() - INTERVAL %d SECOND".formatted(tier.maxWait().toSeconds());
@@ -322,8 +409,8 @@ public class DuckDbTierCompactor implements TierCompactor {
      */
     static String mergeSql(String database, TableWork table, CompactionTier tier, int cap) {
         return ("CALL ducklake_merge_adjacent_files(%s, %s, schema := %s, min_file_size := %d, max_file_size := %d,"
-                + " max_compacted_files := %d)").formatted(literal(database), literal(table.table()),
-                literal(table.schema()), tier.minFileSize(), tier.maxFileSize(), cap);
+                + " max_compacted_files := %d)").formatted(Sql.literal(database), Sql.literal(table.table()),
+                Sql.literal(table.schema()), tier.minFileSize(), tier.maxFileSize(), cap);
     }
 
     @Override
@@ -362,13 +449,6 @@ public class DuckDbTierCompactor implements TierCompactor {
         return pair.connection();
     }
 
-    static String metadataCatalogName(String database) {
-        return "__ducklake_metadata_" + database;
-    }
-
-    private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
-    }
 
     private static String key(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;

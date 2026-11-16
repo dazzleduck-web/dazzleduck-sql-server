@@ -33,6 +33,7 @@ public class CompactionState {
     // Per tier: its loop's passes. An alert watches pass_age (DYNAMIC_COMPACTION_SPEC.md).
     private static final String PASSES_METRIC = "ducklake.compaction.passes";
     private static final String PASS_AGE_METRIC = "ducklake.compaction.pass_age";
+    private static final String TIER_SUCCESS_AGE_METRIC = "ducklake.compaction.tier_last_success_age";
     private static final String QUEUE_METRIC = "ducklake.compaction.queue";
     private static final String CARRY_OVER_METRIC = "ducklake.compaction.carry_over";
     private static final String BACKOFFS_METRIC = "ducklake.compaction.backoffs";
@@ -85,6 +86,7 @@ public class CompactionState {
         volatile long carryOver;
         volatile long backoffs;
         volatile Instant lastPass;
+        volatile Instant lastSuccess;
         final AtomicLong passes = new AtomicLong();
         final AtomicLong commits = new AtomicLong();
     }
@@ -111,7 +113,7 @@ public class CompactionState {
     private final ConcurrentHashMap<String, Map<String, AtomicLong>> tierFiles = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> totalFiles = new ConcurrentHashMap<>();
 
-    // Set only when a cycle completes without throwing
+    // Set when a table call of any tier completes without an error
     private final ConcurrentHashMap<String, AtomicReference<Instant>> lastSuccessTimes = new ConcurrentHashMap<>();
 
     // Set at the end of every pass of any tier, regardless of outcome.
@@ -155,6 +157,11 @@ public class CompactionState {
         Gauge.builder(PASS_AGE_METRIC, g, h -> Duration.between(h.lastPass != null ? h.lastPass : serviceStart,
                         Instant.now()).toSeconds())
                 .description("Seconds since this tier's loop last completed a pass")
+                .baseUnit("seconds")
+                .tag("database", db).tag("tier", tierName).register(registry);
+        Gauge.builder(TIER_SUCCESS_AGE_METRIC, g, h -> Duration.between(h.lastSuccess != null ? h.lastSuccess
+                        : serviceStart, Instant.now()).toSeconds())
+                .description("Seconds since one of this tier's table calls last completed without an error")
                 .baseUnit("seconds")
                 .tag("database", db).tag("tier", tierName).register(registry);
         Gauge.builder(QUEUE_METRIC, g, h -> h.queue)
@@ -380,6 +387,16 @@ public class CompactionState {
         g.carryOver = carryOver;
         g.backoffs = backoffs;
         g.passes.incrementAndGet();
+    }
+
+    /** A table call of the tier completed without an error. */
+    public void recordTierSuccess(String db, String tierName, Instant at) {
+        tierGauges(db, tierName).lastSuccess = at;
+    }
+
+    /** When one of the tier's calls last completed without an error, or null. */
+    public Instant getTierLastSuccess(String db, String tierName) {
+        return tierGauges(db, tierName).lastSuccess;
     }
 
     /** When the tier's loop last completed a pass, or null before its first. */

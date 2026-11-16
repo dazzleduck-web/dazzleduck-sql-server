@@ -56,6 +56,7 @@ public record CompactionStats(
      * @param backoffs         tables it is backing off after consecutive failures
      * @param starved          tables whose busy partitions want more slots than the cap allows
      * @param stale            tables whose oldest file with a partner has waited over 30 minutes
+     * @param oversized        tables skipped because one group cannot commit within the catalog's timeout
      * @param idleTxnTimeoutMs the catalog's idle-in-transaction timeout, 0 for none, -1 unknown
      * @param duckdbMemoryBytes {@code duckdb_memory()} of its instance at its latest pass, -1 unknown
      */
@@ -69,6 +70,7 @@ public record CompactionStats(
             List<String> backoffs,
             List<String> starved,
             List<String> stale,
+            List<String> oversized,
             long idleTxnTimeoutMs,
             int threads,
             long duckdbMemoryBytes) {

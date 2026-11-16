@@ -92,6 +92,17 @@ class CallSizingTest {
     }
 
     @Test
+    void anUnsortedTableWhoseOneGroupOutrunsTheTimeoutDoesNotFit() {
+        // Review on #542: 180 s passes the startup check (144 s sorted) but an unsorted group takes 288 s.
+        long timeout = Duration.ofSeconds(180).toMillis();
+        assertTrue(CallSizing.fullGroupFits(MINOR, timeout));
+        assertTrue(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, true), timeout));
+        assertFalse(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, false), timeout));
+        assertTrue(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, false), 0), "no timeout: it fits");
+        assertTrue(CallSizing.groupFits(MINOR, work(30, 2_000_000, 0, false), timeout), "8 files of 2 MB fit");
+    }
+
+    @Test
     void theStartupCheckRefusesATimeoutTooShortForOneFullGroup() {
         // a full minor group of 5 KB files is 3,200 files, 144 s sorted: it needs a timeout of 180 s
         assertEquals(144.0, CallSizing.fullGroupSeconds(MINOR), 1e-9);

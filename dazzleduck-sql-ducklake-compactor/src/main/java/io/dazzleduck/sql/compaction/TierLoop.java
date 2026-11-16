@@ -45,6 +45,11 @@ final class TierLoop {
     static final Duration BACKOFF = Duration.ofMinutes(15);
     /** A table whose oldest file with a partner waits longer than this is reported stale. */
     static final Duration STALE_AFTER = Duration.ofMinutes(30);
+    /**
+     * The least time between two refreshes, even right after a pass that merged: each refresh is one
+     * query over the whole catalog's file metadata, per tier and database.
+     */
+    static final Duration MIN_REFRESH_INTERVAL = Duration.ofSeconds(5);
 
     private final String database;
     private final CompactionTier tier;
@@ -60,6 +65,10 @@ final class TierLoop {
         int failures;
         Instant backoffUntil;
         boolean starved;
+        /** One group cannot commit within the catalog's timeout: skipped, not called. */
+        boolean oversized;
+        /** Halved after each call the catalog's timeout killed, lifted by a call that commits. */
+        int capLimit = Integer.MAX_VALUE;
         TableWork lastWork;
     }
 
@@ -69,6 +78,7 @@ final class TierLoop {
     private List<String> backoffs = List.of();
     private List<String> starved = List.of();
     private List<String> stale = List.of();
+    private List<String> oversized = List.of();
     private TierCompactor.Readiness readiness;
     private Instant lastCallEnded;
     private long passes;
@@ -103,7 +113,7 @@ final class TierLoop {
         this.runLog = runLog;
         this.clock = clock;
         this.status = new CompactionStats.TierStatus("STARTING", null, null, 0, 0, 0, List.of(), List.of(), List.of(),
-                -1, 0, -1);
+                List.of(), -1, 0, -1);
     }
 
     CompactionTier tier() {
@@ -147,23 +157,34 @@ final class TierLoop {
     }
 
     private void run() {
-        while (!stopping) {
-            PassResult result;
-            try {
-                result = runPass();
-            } catch (Throwable t) {
-                // runPass contains its failures; this is a bug, and must not end the loop
-                logger.error("Tier '{}' loop for {} failed unexpectedly; it continues", tier.name(), database, t);
-                result = new PassResult(false, -1, 0, 0, 0, 0);
+        boolean refused = false;
+        try {
+            while (!stopping) {
+                Instant passStart = clock.instant();
+                PassResult result;
+                try {
+                    result = runPass();
+                } catch (Throwable t) {
+                    // runPass contains its failures; this is a bug, and must not end the loop
+                    logger.error("Tier '{}' loop for {} failed unexpectedly; it continues", tier.name(), database, t);
+                    result = new PassResult(false, -1, 0, 0, 0, 0);
+                }
+                if (result.refused()) {
+                    refused = true;
+                    return;
+                }
+                Duration pause = result.progressed()
+                        ? MIN_REFRESH_INTERVAL.minus(Duration.between(passStart, clock.instant()))
+                        : tier.idleSleep();
+                if (!pause.isNegative() && !pause.isZero() && !sleep(pause)) {
+                    return;
+                }
             }
-            if (result.refused()) {
-                return;
-            }
-            if (!result.progressed() && !sleep(tier.idleSleep())) {
-                return;
+        } finally {
+            if (!refused) {
+                publish("STOPPED", null);
             }
         }
-        publish("STOPPED", null);
     }
 
     private boolean sleep(Duration duration) {
@@ -218,6 +239,10 @@ final class TierLoop {
             }
             TableWork work = order.get(i);
             String key = work.leaseKey(database);
+            if (!CallSizing.groupFits(tier, work, readiness.idleTxnTimeoutMs())) {
+                skipOversized(work);
+                continue;
+            }
             if (!leases.tryAcquire(key)) {
                 logger.debug("Tier '{}' skips {}.{} this pass: another job holds it", tier.name(), database, work.name());
                 continue;
@@ -247,9 +272,6 @@ final class TierLoop {
         reportTables(listed, end);
         state.recordPass(database, tier.name(), end, queue, carryOver.size(), backoffs.size());
         state.recordRunCompleted(database, end);
-        if (failed == 0 || merged > 0) {
-            state.recordSuccess(database);
-        }
         state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
         publish("RUNNING", null);
         if (called > 0) {
@@ -305,10 +327,25 @@ final class TierLoop {
 
     private enum CallResult { MERGED, EMPTY, FAILED, CONNECTION_LOST }
 
+    private void skipOversized(TableWork work) {
+        TableHealth health = tables.computeIfAbsent(work.name(), k -> new TableHealth());
+        if (!health.oversized) {
+            logger.warn(("Tier '{}' skips {}.{}: one group of its files ({} files of about {} bytes, {}) would not commit"
+                            + " within 80% of the catalog's idle-in-transaction timeout ({} ms). Add a sort key,"
+                            + " raise the timeout, or write larger files"),
+                    tier.name(), database, work.name(), work.filesWaiting(), work.averageFileSize(),
+                    work.sorted() ? "sorted" : "unsorted", readiness.idleTxnTimeoutMs());
+        }
+        health.oversized = true;
+    }
+
     private CallResult call(TableWork work) {
         TableHealth health = tables.computeIfAbsent(work.name(), k -> new TableHealth());
         long timeoutMs = readiness != null ? readiness.idleTxnTimeoutMs() : 0;
-        CallSizing.Cap cap = CallSizing.of(tier, work, timeoutMs);
+        health.oversized = false;
+        CallSizing.Cap sized = CallSizing.of(tier, work, timeoutMs);
+        CallSizing.Cap cap = sized.cap() <= health.capLimit ? sized
+                : new CallSizing.Cap(health.capLimit, sized.starved(), sized.filesPerGroup());
         if (cap.starved() && !health.starved) {
             logger.warn(("Tier '{}' may starve partitions of {}.{}: {} busy partition(s) + 1 is above its cap of {}"
                             + " (static cap {}, then the time limit), so its quieter partitions can wait behind them"),
@@ -330,7 +367,10 @@ final class TierLoop {
             result = mergedAny ? CallResult.MERGED : CallResult.EMPTY;
             health.failures = 0;
             health.backoffUntil = null;
+            health.capLimit = Integer.MAX_VALUE;
             state.incrementTier(database, tier.name());
+            state.recordSuccess(database);
+            state.recordTierSuccess(database, tier.name(), clock.instant());
             if (mergedAny && merge.filesCreated() != null) {
                 state.addFilesCompacted(database, merge.filesProcessed() - merge.filesCreated());
             }
@@ -345,6 +385,12 @@ final class TierLoop {
                     || failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT
                     || invalidatesInstance(e);
             result = connectionLost ? CallResult.CONNECTION_LOST : CallResult.FAILED;
+            if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT && cap.cap() > 1) {
+                // The rates behind the sizing were too fast for this table: half as many groups next time.
+                health.capLimit = Math.max(1, cap.cap() / 2);
+                logger.warn("Tier '{}' halves the cap of {}.{} to {} after the catalog's timeout killed its call",
+                        tier.name(), database, work.name(), health.capLimit);
+            }
             String conflictNote = failureClass == CompactionRun.FailureClass.TRANSACTION_CONFLICT
                     ? " (the compactor's own jobs hold the table's lease, so the other side is another writer)" : "";
             if (health.failures >= FAILURES_BEFORE_BACKOFF) {
@@ -425,6 +471,7 @@ final class TierLoop {
         List<String> backedOffNow = new ArrayList<>();
         List<String> starvedNow = new ArrayList<>();
         List<String> staleNow = new ArrayList<>();
+        List<String> oversizedNow = new ArrayList<>();
         var it = tables.entrySet().iterator();
         while (it.hasNext()) {
             var entry = it.next();
@@ -443,6 +490,9 @@ final class TierLoop {
                 if (age.compareTo(STALE_AFTER) > 0) {
                     staleNow.add(name);
                 }
+                if (health.oversized) {
+                    oversizedNow.add(name);
+                }
                 state.updateTable(database, tier.name(), name, work.filesWaiting(), Math.max(0, age.toSeconds()),
                         health.starved, backedOff);
             } else {
@@ -456,12 +506,13 @@ final class TierLoop {
         backoffs = List.copyOf(backedOffNow);
         starved = List.copyOf(starvedNow);
         stale = List.copyOf(staleNow);
+        oversized = List.copyOf(oversizedNow);
     }
 
     private void publish(String loopState, String refused) {
         long memory = readiness != null && !readiness.isRefused() ? compactor.memoryUsageBytes(database, tier) : -1;
         status = new CompactionStats.TierStatus(loopState, refused, state.getLastPass(database, tier.name()), passes,
-                queue, carryOver.size(), backoffs, starved, stale,
+                queue, carryOver.size(), backoffs, starved, stale, oversized,
                 readiness != null ? readiness.idleTxnTimeoutMs() : -1,
                 readiness != null ? readiness.threads() : 0, memory);
     }

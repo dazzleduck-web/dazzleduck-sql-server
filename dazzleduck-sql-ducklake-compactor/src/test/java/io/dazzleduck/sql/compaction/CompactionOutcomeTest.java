@@ -113,14 +113,17 @@ class CompactionOutcomeTest {
             assertEquals(1, successes("major"));
             assertEquals(0, state.getFailureCount(DB));
             assertNotNull(state.getLastSuccessTime(DB));
+            assertNotNull(state.getTierLastSuccess(DB, "major"));
+            assertNull(state.getTierLastSuccess(DB, "minor"), "success is per tier too");
             assertEquals(3.0, registry.get("ducklake.files.compacted").tag("database", DB).functionCounter().count(),
                     "4 files merged into 1 retire 3");
         }
     }
 
     @Test
-    void aPassThatFindsNoWorkCountsAsAPassAndASuccess() {
+    void aPassThatFindsNoWorkCountsAsAPassButNotASuccess() {
         // An idle tier must not look stuck: the no-completed-pass alert counts a pass with no work.
+        // A success is a call that completed, so another tier's idle passes cannot hide this one's failures.
         try (CompactionService service = service(compactor, housekeeper(false))) {
             TierLoop.PassResult result = service.runPass(DB, MINOR);
 
@@ -128,7 +131,8 @@ class CompactionOutcomeTest {
             assertEquals(1.0, registry.get("ducklake.compaction.passes").tag("database", DB).tag("tier", "minor")
                     .functionCounter().count());
             assertNotNull(state.getLastPass(DB, "minor"));
-            assertNotNull(state.getLastSuccessTime(DB));
+            assertNull(state.getLastSuccessTime(DB));
+            assertNull(state.getTierLastSuccess(DB, "minor"));
             assertTrue(compactor.calls.isEmpty());
         }
     }
@@ -165,6 +169,16 @@ class CompactionOutcomeTest {
             assertEquals(compactor.calls.get(0).cap(), latest.cap());
             assertEquals(40L, latest.filesWaiting());
             assertEquals(40_000L, latest.bytesWaiting());
+        }
+    }
+
+    @Test
+    void anotherTiersIdlePassesDoNotHideThisTiersFailures() {
+        try (CompactionService service = service(withWork(true), housekeeper(false))) {
+            service.runPass(DB, MINOR); // fails
+            compactor.work = List.of();
+            service.runPass(DB, MAJOR); // idle
+            assertNull(state.getLastSuccessTime(DB));
         }
     }
 

@@ -49,7 +49,7 @@ public class Main {
 
             List<String> tierNames = config.tiers().stream().map(CompactionTier::name).toList();
             CompactionState state = new CompactionState(telemetry.registry(), config.databases(), tierNames);
-            TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state);
+            TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state, config.databases().size());
             // One job per table at a time, across the tier loops, retention and the delete-file rewrite
             TableLeases leases = new TableLeases();
             Housekeeper housekeeper = new DuckLakeHousekeeper(

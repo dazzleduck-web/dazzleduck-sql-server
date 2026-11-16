@@ -34,7 +34,9 @@ Each enabled `(database, tier)` runs **one loop thread**. A pass:
    ```
 
 4. **Ends** when every table was called or `pass_time_limit` has passed; the rest carry over. After
-   a pass that found no work it sleeps `idle_sleep_max`, otherwise the next pass starts at once.
+   a pass that merged nothing it sleeps `idle_sleep_max`; after one that merged, the next refresh
+   starts once 5 seconds have passed since this one, so the catalog sees at most one refresh per tier
+   and database every 5 seconds.
 
 The session target bounds every merge group (so a call's peak memory and each output file) and
 overrides table and catalog options, so no table falls back to DuckLake's 512 MB default. It needs
@@ -42,7 +44,8 @@ DuckDB 1.5.4 or later; a tier whose `SET` fails does not start. The cap is sized
 above the tier's static cap (see [Call sizing](#call-sizing)).
 
 A failure costs one table's call: the table is retried on the next pass, and after 3 failures in a
-row it backs off for 15 minutes. A table runs at most one job at a time across tiers, data
+row it backs off for 15 minutes. A call the catalog's idle-in-transaction timeout killed is retried
+with half the cap, down to 1, until a call commits. A table runs at most one job at a time across tiers, data
 retention and the delete-file rewrite (a **table lease**): a loop skips a table another job holds,
 and retention and the rewrite wait for it.
 
@@ -57,7 +60,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `housekeeping_connection_settings` | `[]` | Raw SQL run on housekeeping's connection right after opening it — independent of any tier |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |
-| `rewrite_deletes_enabled` | `true` | Each housekeeping cycle first runs `ducklake_rewrite_data_files` on each table in turn, under the table's lease, rewriting data files with enough deleted rows so their delete files are dropped |
+| `rewrite_deletes_enabled` | `true` | Each housekeeping cycle first runs `ducklake_rewrite_data_files` on each table in turn, under the table's lease, rewriting data files with enough deleted rows so their delete files are dropped. A table another job holds is skipped until the next cycle, and waited for after 3 skips in a row |
 | `rewrite_delete_threshold` | unset | Fraction (0–1) of a file's rows that must be deleted before it is rewritten; unset uses the catalog's `rewrite_delete_threshold` option (DuckLake default 0.95) |
 | `data_retention` | off | Deletes expired rows of the tables listed in a policy table (see [Data retention](#data-retention)) |
 | `health_port` | `8080` | Port for the `GET /health` endpoint |
@@ -142,8 +145,8 @@ Per-tier fields:
 | `max_wait` | none | ... or once a group's second-oldest file has waited this long |
 | `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
 | `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
-| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) for this tier's DuckDB instance; its threads are 2 x its CPUs, at least 1. Shares add up to at most 1 |
-| `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it, e.g. to set `memory_limit` per tier. A `SET threads` here overrides the one `cpu_share` computes. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
+| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) and memory for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads (at least 1) and, unless `connection_settings` sets one, a `memory_limit` of 60% of the process's memory (the container's limit, else the machine's) x its share. Shares add up to at most 1 |
+| `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads` or `SET memory_limit` here overrides the one `cpu_share` computes. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
 `frequency`, the timer of earlier releases, is no longer used; a config that still sets it starts.
 
@@ -176,7 +179,10 @@ The catalog's `idle_in_transaction_session_timeout` is read from Postgres when a
 opens, so an `options=-cidle_in_transaction_session_timeout=600000` in the ATTACH string counts. A
 value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier does not
 start if one full group of its smallest files (3,200 files for minor, about 144 s) would not fit in
-80% of the timeout.
+80% of the timeout. An unsorted table is twice as slow per file, so a table whose single group still
+cannot fit is skipped and reported (`oversized`), rather than handed to the catalog to be killed
+call after call: give it a sort key, raise the timeout, or write larger files. If the timeout of a
+Postgres catalog cannot be read, the tier retries opening its connection rather than run without it.
 
 The images set `MALLOC_ARENA_MAX=2`: most compactor memory is native `malloc` memory outside
 DuckDB's `memory_limit`, kept by glibc's per-thread arenas.
@@ -371,7 +377,7 @@ catalog timeout it sizes calls by, its threads and `duckdb_memory()`.
 
 `alerts` lists the conditions that hold now: a tier with no completed pass in 15 minutes (a pass
 that finds no work counts), a tier that did not start, a table backed off after 3 failures, a
-starved table, a table whose oldest file with something to merge has waited over 30 minutes, a band
+starved table, a table skipped because one group cannot beat the catalog's timeout, a table whose oldest file with something to merge has waited over 30 minutes, a band
 whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
 RSS above 75% of the container's memory limit. The status is always `UP` while the process is
 running; watch `alerts` (or the metrics below) instead.
@@ -494,6 +500,7 @@ Micrometer metrics are emitted via the logging registry by default, and over OTL
 | `ducklake.compaction.failures_by_class` | `class`, `database` | Failures by cause, including `PLANNING` |
 | `ducklake.compaction.commits` | `tier`, `database` | Calls that committed a merge, one snapshot each; its rate is the commits per minute expiry must keep up with |
 | `ducklake.compaction.passes` / `pass_age` | `tier`, `database` | Completed passes, and seconds since the last one |
+| `ducklake.compaction.tier_last_success_age` | `tier`, `database` | Seconds since one of this tier's calls completed without an error (`last_success_age` is the same across the database's tiers) |
 | `ducklake.compaction.queue` / `carry_over` / `backoffs` | `tier`, `database` | Tables the latest pass listed, left for the next pass, and backed off |
 | `ducklake.compaction.max_compacted_files` / `cap` | `tier`, `database` | The static cap, and the cap the latest call was given |
 | `ducklake.compaction.table.files_waiting` / `oldest_wait` / `starved` / `backoff` | `tier`, `database`, `table` | One table's state in one tier |

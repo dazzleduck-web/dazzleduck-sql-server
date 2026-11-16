@@ -25,6 +25,10 @@ public class DuckLakeHousekeeper implements Housekeeper {
     private final CompactionState metrics;
     // null: rewrite without leases, for callers (tests) that run nothing beside it
     private final TableLeases leases;
+    /** A table the rewrite skipped this many times in a row, because another job held it, is waited for. */
+    static final int SKIPS_BEFORE_WAIT = 3;
+    // "db.schema.table" -> consecutive runs that skipped the table; touched only by the database's housekeeping
+    private final ConcurrentHashMap<String, Integer> skipped = new ConcurrentHashMap<>();
 
     // One real DuckDB instance per database — see RawConnections. Keyed by database, not shared:
     // CompactionService sizes its housekeeping thread pool so different databases' housekeeping runs
@@ -107,7 +111,9 @@ public class DuckLakeHousekeeper implements Housekeeper {
     /**
      * Rewrites each live table's data files with enough deleted rows, one table at a time under its
      * lease, so the rewrite never runs beside a merge or a retention DELETE on the same table. A table
-     * that fails is logged and the others still run.
+     * another job holds is skipped until the next run, so a long merge does not hold up the rest of
+     * housekeeping; after {@link #SKIPS_BEFORE_WAIT} skips in a row the rewrite waits for it, so a busy
+     * table is not passed over for good. A table that fails is logged and the others still run.
      *
      * @return data files rewritten
      */
@@ -115,13 +121,19 @@ public class DuckLakeHousekeeper implements Housekeeper {
         long rewritten = 0;
         for (String[] table : liveTables(connection, database)) {
             String key = TableLeases.key(database, table[0], table[1]);
-            try {
-                if (leases != null) {
-                    leases.acquire(key);
+            if (leases != null && !leases.tryAcquire(key)) {
+                int skips = skipped.merge(key, 1, Integer::sum);
+                if (skips < SKIPS_BEFORE_WAIT) {
+                    logger.debug("Delete-file rewrite skips {}.{}.{}: another job holds it", database, table[0], table[1]);
+                    continue;
                 }
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+                try {
+                    leases.acquire(key);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
             }
+            skipped.remove(key);
             try {
                 rewritten += sumFilesProcessed(connection,
                         rewriteDataFilesSql(database, table[0], table[1], rewriteDeleteThreshold));
@@ -139,7 +151,7 @@ public class DuckLakeHousekeeper implements Housekeeper {
 
     /** Each live table's schema and name. */
     private static List<String[]> liveTables(Connection connection, String database) {
-        String md = "\"__ducklake_metadata_" + database + "\"";
+        String md = Sql.metadataCatalog(database);
         String sql = ("SELECT s.schema_name, t.table_name FROM %1$s.ducklake_table t JOIN %1$s.ducklake_schema s"
                 + " ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL WHERE t.end_snapshot IS NULL"
                 + " ORDER BY 1, 2").formatted(md);
@@ -156,21 +168,18 @@ public class DuckLakeHousekeeper implements Housekeeper {
 
     private static long countSnapshots(Connection connection, String database) throws SQLException {
         try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("SELECT count(*) FROM \"__ducklake_metadata_%s\".ducklake_snapshot"
-                     .formatted(database))) {
+             ResultSet rs = statement.executeQuery("SELECT count(*) FROM %s.ducklake_snapshot"
+                     .formatted(Sql.metadataCatalog(database)))) {
             return rs.next() ? rs.getLong(1) : -1;
         }
     }
 
     static String rewriteDataFilesSql(String database, String schema, String table, Double deleteThreshold) {
         String sql = "CALL ducklake_rewrite_data_files(%s, %s, schema := %s".formatted(
-                literal(database), literal(table), literal(schema));
+                Sql.literal(database), Sql.literal(table), Sql.literal(schema));
         return deleteThreshold == null ? sql + ")" : sql + ", delete_threshold => " + deleteThreshold + ")";
     }
 
-    private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
-    }
 
     private Connection connectionFor(String database) throws SQLException {
         Connection existing = connections.get(database);

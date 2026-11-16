@@ -295,6 +295,60 @@ class TierLoopTest {
     }
 
     @Test
+    void anUnsortedTableWhoseGroupCannotBeatTheTimeoutIsSkippedAndReported() {
+        // 3,200 unsorted 5 KB files take 288 s; 80% of 180 s is 144 s
+        compactor.readiness = TierCompactor.Readiness.ready(Duration.ofSeconds(180).toMillis(), 2);
+        compactor.work = List.of(table("main.unsorted", 98_000, 98_000L * 5_000, T0, 0, false),
+                table("main.sorted", 98_000, 98_000L * 5_000, T0, 0, true));
+        TierLoop.PassResult result = loop.runPass();
+        assertEquals(List.of("main.sorted"), compactor.calledTables(), "never handed to the catalog to be killed");
+        assertEquals(0, result.failed());
+        assertEquals(List.of("main.unsorted"), loop.status().oversized());
+        assertEquals(List.of(), loop.status().backoffs());
+    }
+
+    @Test
+    void aCallTheCatalogTimeoutKilledIsRetriedWithHalfTheCapUntilOneCommits() {
+        compactor.work = List.of(table("main.slow", 500, 500L * 1_000_000, T0, 0, true)); // 16 files a group
+        compactor.failing.put("main.slow", "Failed to execute query \"ROLLBACK\": server closed the connection");
+        loop.runPass();
+        loop.runPass();
+        assertEquals(List.of(12, 6), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList(),
+                "the static cap, then half of it");
+
+        compactor.failing.clear();
+        loop.runPass();
+        loop.runPass();
+        assertEquals(List.of(12, 6, 3, 12), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList(),
+                "a commit lifts the limit");
+    }
+
+    @Test
+    void aConflictDoesNotChangeTheCap() {
+        compactor.work = List.of(table("main.busy", 500, 500L * 1_000_000, T0, 0, true));
+        compactor.failing.put("main.busy", "TransactionContext Error: Transaction conflict");
+        loop.runPass();
+        loop.runPass();
+        assertEquals(List.of(12, 12), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList());
+    }
+
+    @Test
+    void aStoppedLoopReportsStoppedEvenWhenStoppedInItsSleep() throws Exception {
+        compactor.work = List.of();
+        TierLoop running = new TierLoop(DB, MINOR.withIdleSleep(Duration.ofMinutes(10)), compactor, leases, state,
+                runLog, java.time.Clock.systemUTC());
+        running.start();
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (running.status().passes() == 0) {
+            assertTrue(System.nanoTime() < deadline);
+            Thread.sleep(5);
+        }
+        running.stop();
+        assertTrue(running.join(Duration.ofSeconds(5)));
+        assertEquals("STOPPED", running.status().state());
+    }
+
+    @Test
     void stopEndsTheLoopAfterItsRunningCall() throws Exception {
         compactor.work = List.of();
         TierLoop running = new TierLoop(DB, MINOR.withIdleSleep(Duration.ofMinutes(10)), compactor, leases, state,

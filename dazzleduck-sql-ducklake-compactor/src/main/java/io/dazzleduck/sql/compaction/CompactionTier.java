@@ -107,8 +107,12 @@ public record CompactionTier(
                 passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, callTimeLimit, value);
     }
 
-    /** DuckDB threads for this tier's instance: {@link #THREADS_PER_CPU} times its CPUs, at least 1. */
-    public int threads(int availableProcessors) {
-        return Math.max(1, (int) Math.round(THREADS_PER_CPU * cpuShare * availableProcessors));
+    /**
+     * DuckDB threads for one of this tier's instances: {@link #THREADS_PER_CPU} times its CPUs, at
+     * least 1. Every database runs its own instance of every tier, so the CPUs a tier's share gives it
+     * are divided among the databases: the shares budget the whole process.
+     */
+    public int threads(int availableProcessors, int databases) {
+        return Math.max(1, (int) Math.round(THREADS_PER_CPU * cpuShare * availableProcessors / Math.max(1, databases)));
     }
 }
