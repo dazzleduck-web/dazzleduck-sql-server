@@ -170,11 +170,26 @@ class PerQueueMaxDelayTest {
         assertTrue(e.getMessage().contains("max_delay_ms"), e.getMessage());
     }
 
+    /**
+     * Writes to the registry, retrying while it is locked: a handler under test polls the same file,
+     * and a write that lands during its read comes back "database is locked", a busy signal a real
+     * writer copes with too (as {@code DynamicQueueRepositoryTest} does).
+     */
     private static void writeToDb(String dbPath, String sql) throws Exception {
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
-            s.execute("LOAD sqlite");
-            s.execute("ATTACH '" + dbPath + "' AS " + DynamicQueueRepository.ATTACHMENT + " (TYPE sqlite)");
-            s.execute(sql);
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (true) {
+            try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
+                s.execute("LOAD sqlite");
+                s.execute("ATTACH '" + dbPath + "' AS " + DynamicQueueRepository.ATTACHMENT + " (TYPE sqlite)");
+                s.execute(sql);
+                return;
+            } catch (java.sql.SQLException e) {
+                boolean locked = e.getMessage() != null && e.getMessage().contains("database is locked");
+                if (!locked || System.nanoTime() > deadline) {
+                    throw e;
+                }
+                Thread.sleep(50);
+            }
         }
     }
 
