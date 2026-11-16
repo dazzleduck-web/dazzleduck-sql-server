@@ -63,6 +63,11 @@ public final class IngestionQueueCache {
         return true;
     }
 
+    /** Calls {@code action} with every cached queue and its ID. */
+    public void forEach(java.util.function.BiConsumer<String, ParquetIngestionQueue> action) {
+        queues.forEach(action);
+    }
+
     /** Stats of every cached queue. */
     public List<Stats> stats() {
         return queues.values().stream().map(ParquetIngestionQueue::getStats).toList();

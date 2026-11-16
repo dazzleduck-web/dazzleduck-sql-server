@@ -124,9 +124,18 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     private final long maxPendingWrite;
     private final String identifier;
     private final ScheduledExecutorService executorService;
-    private final Duration maxDelay;
+    /** The delay the queue was built with: the global {@code ingestion.max_delay_ms}. */
+    private final Duration defaultMaxDelay;
+    /** {@link #defaultMaxDelay}, or the queue's own (see {@link #setMaxDelayOverride}). */
+    private volatile Duration maxDelay;
     private final Clock clock;
-    private Instant lastWrite = Instant.EPOCH;
+    /**
+     * When the queue last wrote, or was created: the first bucket is written {@link #maxDelay} after
+     * creation, so a delay set right after creation (see {@link #setMaxDelayOverride}) holds for it too.
+     */
+    private Instant lastWrite;
+    /** The pending {@link #triggerWriteIfRequired} run, so a shorter delay can bring it forward. */
+    private ScheduledFuture<?> scheduledTrigger;
     private Bucket<T, R> currentBucket;
     private volatile boolean terminating;
     private volatile boolean draining;
@@ -189,8 +198,10 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         this.maxPendingWrite = maxPendingWrite;
         this.identifier = identifier;
         this.executorService = executorService;
+        this.defaultMaxDelay = maxDelay;
         this.maxDelay = maxDelay;
         this.clock = clock;
+        this.lastWrite = clock.instant();
         createNewBucket();
         this.writeThread = new Thread(this::processWriteQueue, "BulkIngestQueue-" + identifier + "-writer");
         this.writeThread.setDaemon(true);
@@ -327,6 +338,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
                 .pendingBuckets(getPendingBuckets())
                 .pendingBytes(pendingWrite())
                 .maxPendingWrite(maxPendingWrite)
+                .maxDelayMs(maxDelay.toMillis())
                 .failedWriteBytes(failedWriteBytes.get())
                 .failedWriteBatches(failedWriteBatches.get())
                 .failedWriteBuckets(failedWriteBuckets.get())
@@ -397,6 +409,48 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
 
     /** Epoch ms of the most recent completed bucket write, or 0 if none. */
     public long getLastWriteEpochMs() { return lastWriteEpochMs; }
+
+    /** The longest a batch currently waits before it is written. */
+    public Duration getMaxDelay() { return maxDelay; }
+
+    /**
+     * Sets the queue's own delay, overriding the one it was built with, or goes back to that one when
+     * {@code override} is {@code null}. Takes effect for the bucket being filled: a shorter delay
+     * brings the pending flush check forward; a longer one applies from that check on. When nothing
+     * changes it takes no lock, so it can be called on every request.
+     */
+    public void setMaxDelayOverride(Duration override) {
+        setMaxDelayOverride(override, true);
+    }
+
+    /** @param logChange whether to log a change (a partitioned queue logs once, not per partition) */
+    void setMaxDelayOverride(Duration override, boolean logChange) {
+        Duration target = override != null ? override : defaultMaxDelay;
+        if (target.equals(maxDelay)) {
+            return; // the common case: a volatile read, no lock on the request path
+        }
+        applyMaxDelay(target, logChange);
+    }
+
+    private synchronized void applyMaxDelay(Duration target, boolean logChange) {
+        Duration previous = maxDelay;
+        if (target.equals(previous)) {
+            return;
+        }
+        maxDelay = target;
+        if (logChange) {
+            logger.info("Queue '{}' max delay {} -> {}", identifier, previous, target);
+        }
+        if (terminating || draining || target.compareTo(previous) >= 0) {
+            return;
+        }
+        // Shorter: the pending check may be up to the old delay away. Replace it, unless it is
+        // already running (then it reschedules itself with the new delay).
+        if (triggerScheduled && scheduledTrigger != null && scheduledTrigger.cancel(false)) {
+            triggerScheduled = false;
+            scheduleNextTrigger(clock.instant());
+        }
+    }
 
     /** Epoch ms of the most recent accepted batch, or 0 if none. */
     public long getLastReceiveEpochMs() { return lastReceiveEpochMs; }
@@ -557,7 +611,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
         }
         triggerScheduled = true;
         try {
-            executorService.schedule(this::triggerWriteIfRequired, delayMillis, TimeUnit.MILLISECONDS);
+            scheduledTrigger = executorService.schedule(this::triggerWriteIfRequired, delayMillis, TimeUnit.MILLISECONDS);
         } catch (RuntimeException e) {
             // e.g. RejectedExecutionException from an externally shut-down executor. Leave the
             // flag clear so a later add()/flush can restart the chain; a stuck-true flag would

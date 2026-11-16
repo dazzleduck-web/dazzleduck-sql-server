@@ -101,10 +101,11 @@ public class BulkIngestQueueV2Test {
         var batch = queue.add(mockBatch("producer1", 0, DEFAULT_MIN_BATCH_SIZE + 1));
 
         service.tick(1, TimeUnit.MILLISECONDS);
-        Thread.sleep(5);
 
+        // The full bucket is written, and fails, on the writer thread: wait for it rather than for a
+        // fixed few milliseconds, which a loaded CI runner can outlast.
+        assertThrows(java.util.concurrent.ExecutionException.class, () -> batch.get(10, TimeUnit.SECONDS));
         assertTrue(batch.isDone());
-        assertThrows(Exception.class, batch::get);
 
         queue.close();
     }
