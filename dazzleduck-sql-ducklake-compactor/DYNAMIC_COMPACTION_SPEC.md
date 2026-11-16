@@ -153,6 +153,17 @@ Today each enabled tier runs on a fixed-rate timer per database (`CompactionServ
 | Failures | `CompactionRun.classify` yields `COMMIT_TIMEOUT`, `TRANSACTION_CONFLICT`, `OUT_OF_MEMORY`, `SPILL_EXCEEDED`, `CATALOG_UNAVAILABLE`, `OTHER` | Keep the classes for telemetry and add `PLANNING`; per-table consecutive-failure count and back-off |
 | Telemetry | `CompactionRun` per tier, plus two band-wide COUNTs around every call | Add table and cap; take files from the merge's result row and drop the COUNTs; add a table dimension to `CompactionRunLog`, `/ui` and the exported metrics |
 
+**Implementation notes (PR #542).** Where the code goes beyond or differs from the text above, after review:
+
+- **CPU and memory are a process budget.** Each database runs its own instance of every tier, so a tier's threads are 2 × `cpu_share` × CPUs ÷ databases. An instance without a `memory_limit` in its `connection_settings` gets 60% of the process's memory (the container's limit, else the machine's) × `cpu_share` ÷ databases.
+- **A timed-out call halves the table's cap**, down to 1, until a call commits. Other failures, conflicts included, keep the cap.
+- **Oversized tables are skipped.** The startup check uses the sorted rate. A table whose single group at its own rate (0.09 s per file unsorted) cannot commit within 80% of the timeout is skipped and reported, not called.
+- **The timeout must be readable.** If a Postgres catalog's timeout cannot be read and `connection_settings` sets none, the tier retries opening its connection rather than run without a limit.
+- **At most one refresh every 5 seconds** per tier and database, even after a pass that merged. After a pass that merged nothing (every table backed off, held, oversized or failing), the loop sleeps `idle_sleep_max`.
+- **A success is a call that completed**, recorded per database and per tier. Idle passes count toward the pass alert only.
+- **The delete-file rewrite skips a held table** and waits for it after 3 skipped runs in a row.
+- **Merged outputs can stay in their band.** With target = band max, a merged output can land just under it. It then merges with the next file in its group and leaves the band: a test sees this converge in 2 passes.
+
 **Gaps found in the current code.** `ResourceSampler.rssPeakBytes()` reads `VmHWM`, the process's lifetime high-water mark. It only rises, so it cannot measure one call; per-call memory needs DuckDB's query profiler or `duckdb_memory()` sampled during the call. It matters for Phase 2's reservations, not for Phase 1.
 
 ## Phase 2: parallel scheduling
