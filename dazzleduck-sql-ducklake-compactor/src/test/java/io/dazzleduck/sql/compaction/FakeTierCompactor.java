@@ -24,7 +24,7 @@ final class FakeTierCompactor implements TierCompactor {
     /** Runs inside each call, e.g. to advance a test clock. */
     volatile Consumer<TableWork> duringCall = work -> { };
 
-    record Call(String database, String tier, String table, int cap) {
+    record Call(String database, String tier, String table, int cap, long target) {
     }
 
     final List<Call> calls = new ArrayList<>();
@@ -51,8 +51,8 @@ final class FakeTierCompactor implements TierCompactor {
     }
 
     @Override
-    public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) {
-        calls.add(new Call(database, tier.name(), table.name(), cap));
+    public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long target) {
+        calls.add(new Call(database, tier.name(), table.name(), cap, target));
         duringCall.accept(table);
         String failure = failing.get(table.name());
         if (failure != null) {

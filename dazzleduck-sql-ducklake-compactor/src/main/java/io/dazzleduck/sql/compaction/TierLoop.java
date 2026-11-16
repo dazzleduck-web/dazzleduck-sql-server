@@ -65,10 +65,17 @@ final class TierLoop {
         int failures;
         Instant backoffUntil;
         boolean starved;
-        /** One group cannot commit within the catalog's timeout: skipped, not called. */
+        /** Not even two files fit in a group within the catalog's timeout and the memory: skipped. */
         boolean oversized;
-        /** Halved after each call the catalog's timeout killed, lifted by a call that commits. */
+        /** Its calls run with a lowered target so a group fits. */
+        boolean reducedTarget;
+        /**
+         * Halved after a call the catalog's timeout killed, doubled after each call that commits, but
+         * never back up to {@link #capCeiling}: the smallest cap the timeout has killed. Both last until
+         * the table leaves the discovery list.
+         */
         int capLimit = Integer.MAX_VALUE;
+        int capCeiling = Integer.MAX_VALUE;
         TableWork lastWork;
     }
 
@@ -239,7 +246,8 @@ final class TierLoop {
             }
             TableWork work = order.get(i);
             String key = work.leaseKey(database);
-            if (!CallSizing.groupFits(tier, work, readiness.idleTxnTimeoutMs())) {
+            CallSizing.Plan plan = CallSizing.plan(tier, work, readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes());
+            if (plan == null) {
                 skipOversized(work);
                 continue;
             }
@@ -249,7 +257,7 @@ final class TierLoop {
             }
             CallResult result;
             try {
-                result = call(work);
+                result = call(work, plan);
             } finally {
                 leases.release(key);
             }
@@ -330,20 +338,29 @@ final class TierLoop {
     private void skipOversized(TableWork work) {
         TableHealth health = tables.computeIfAbsent(work.name(), k -> new TableHealth());
         if (!health.oversized) {
-            logger.warn(("Tier '{}' skips {}.{}: one group of its files ({} files of about {} bytes, {}) would not commit"
-                            + " within 80% of the catalog's idle-in-transaction timeout ({} ms). Add a sort key,"
-                            + " raise the timeout, or write larger files"),
+            logger.warn(("Tier '{}' skips {}.{}: not even two of its files ({} files of about {} bytes, {}) fit in one"
+                            + " group within 80% of the catalog's idle-in-transaction timeout ({} ms) and of the"
+                            + " instance's memory_limit ({} bytes). Add a sort key, raise the timeout or the memory,"
+                            + " or write larger files"),
                     tier.name(), database, work.name(), work.filesWaiting(), work.averageFileSize(),
-                    work.sorted() ? "sorted" : "unsorted", readiness.idleTxnTimeoutMs());
+                    work.sorted() ? "sorted" : "unsorted", readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes());
         }
         health.oversized = true;
     }
 
-    private CallResult call(TableWork work) {
+    private CallResult call(TableWork work, CallSizing.Plan plan) {
         TableHealth health = tables.computeIfAbsent(work.name(), k -> new TableHealth());
         long timeoutMs = readiness != null ? readiness.idleTxnTimeoutMs() : 0;
         health.oversized = false;
-        CallSizing.Cap sized = CallSizing.of(tier, work, timeoutMs);
+        if (plan.reduced() && !health.reducedTarget) {
+            logger.warn(("Tier '{}' merges {}.{} with a target of {} bytes instead of {}: a full group of its files"
+                            + " ({} of about {} bytes, {}) would not fit in the catalog's timeout or the memory. Its"
+                            + " outputs stay in the band and are merged again later; a sort key avoids this"),
+                    tier.name(), database, work.name(), plan.target(), tier.targetFileSize(), work.filesWaiting(),
+                    work.averageFileSize(), work.sorted() ? "sorted" : "unsorted");
+        }
+        health.reducedTarget = plan.reduced();
+        CallSizing.Cap sized = plan.cap();
         CallSizing.Cap cap = sized.cap() <= health.capLimit ? sized
                 : new CallSizing.Cap(health.capLimit, sized.starved(), sized.filesPerGroup());
         if (cap.starved() && !health.starved) {
@@ -361,13 +378,16 @@ final class TierLoop {
         String error = null;
         CallResult result;
         try {
-            merge = compactor.compact(database, tier, work, cap.cap());
+            merge = compactor.compact(database, tier, work, cap.cap(), plan.target());
             boolean mergedAny = merge.filesProcessed() != null && merge.filesProcessed() > 0;
             outcome = mergedAny ? CompactionRun.Outcome.SUCCESS : CompactionRun.Outcome.EMPTY;
             result = mergedAny ? CallResult.MERGED : CallResult.EMPTY;
             health.failures = 0;
             health.backoffUntil = null;
-            health.capLimit = Integer.MAX_VALUE;
+            if (health.capLimit != Integer.MAX_VALUE) {
+                // probe back up, but never to a cap the catalog's timeout has killed
+                health.capLimit = (int) Math.max(1, Math.min(2L * health.capLimit, health.capCeiling - 1L));
+            }
             state.incrementTier(database, tier.name());
             state.recordSuccess(database);
             state.recordTierSuccess(database, tier.name(), clock.instant());
@@ -385,11 +405,13 @@ final class TierLoop {
                     || failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT
                     || invalidatesInstance(e);
             result = connectionLost ? CallResult.CONNECTION_LOST : CallResult.FAILED;
-            if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT && cap.cap() > 1) {
-                // The rates behind the sizing were too fast for this table: half as many groups next time.
+            if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT) {
+                // The rates behind the sizing were too fast for this table: half as many groups next time,
+                // and never again as many as the timeout killed.
+                health.capCeiling = Math.min(health.capCeiling, cap.cap());
                 health.capLimit = Math.max(1, cap.cap() / 2);
-                logger.warn("Tier '{}' halves the cap of {}.{} to {} after the catalog's timeout killed its call",
-                        tier.name(), database, work.name(), health.capLimit);
+                logger.warn("Tier '{}' halves the cap of {}.{} to {} after the catalog's timeout killed a call of {}",
+                        tier.name(), database, work.name(), health.capLimit, cap.cap());
             }
             String conflictNote = failureClass == CompactionRun.FailureClass.TRANSACTION_CONFLICT
                     ? " (the compactor's own jobs hold the table's lease, so the other side is another writer)" : "";

@@ -52,13 +52,20 @@ public class Main {
             TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state, config.databases().size());
             // One job per table at a time, across the tier loops, retention and the delete-file rewrite
             TableLeases leases = new TableLeases();
+            // Every DuckDB instance gets a slice of the process's memory (MemoryBudget)
+            long totalMemory = ResourceSampler.totalMemoryBytes();
+            int databases = config.databases().size();
             Housekeeper housekeeper = new DuckLakeHousekeeper(
-                    startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
+                    startupScript, config.snapshotRetention(),
+                    MemoryBudget.withDefaultLimit(config.housekeepingConnectionSettings(), MemoryBudget.HOUSEKEEPING,
+                            databases, totalMemory),
                     config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state, leases);
             DataRetentionConfig retention = config.dataRetention();
             DataRetention dataRetention = retention.enabled()
                     ? new DuckLakeDataRetention(startupScript, config.databases(), retention.policyTable(),
-                            retention.connectionSettings(), retention.maxFilesPerCycle(), state, leases)
+                            MemoryBudget.withDefaultLimit(retention.connectionSettings(), MemoryBudget.RETENTION,
+                                    databases, totalMemory),
+                            retention.maxFilesPerCycle(), state, leases)
                     : null;
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
             service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state,

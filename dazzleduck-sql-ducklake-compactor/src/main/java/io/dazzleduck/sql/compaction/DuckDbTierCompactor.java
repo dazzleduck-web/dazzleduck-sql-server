@@ -35,10 +35,9 @@ public class DuckDbTierCompactor implements TierCompactor {
     /**
      * Share of the process's memory (the container's limit, else physical memory) that the tiers'
      * DuckDB instances may use together, split by {@code cpu_share} and database, for an instance
-     * whose connection_settings set no {@code memory_limit}. The rest is headroom for what DuckDB
-     * allocates outside its {@code memory_limit} and for the JVM.
+     * whose connection_settings set no {@code memory_limit}. See {@link MemoryBudget} for the rest.
      */
-    static final double MEMORY_SHARE = 0.6;
+    static final double MEMORY_SHARE = 0.5;
 
     private record Open(Connection connection, Readiness readiness) {
     }
@@ -75,7 +74,7 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (totalMemoryBytes <= 0 || ResourceSampler.memoryLimitBytes(tier.connectionSettings()) >= 0) {
             return -1;
         }
-        return Math.max(64L << 20, (long) (MEMORY_SHARE * totalMemoryBytes * tier.cpuShare() / databases));
+        return MemoryBudget.limit(MEMORY_SHARE * tier.cpuShare(), databases, totalMemoryBytes);
     }
 
     @Override
@@ -98,7 +97,8 @@ public class DuckDbTierCompactor implements TierCompactor {
                 threads, memoryLimit > 0 ? memoryLimit + " bytes" : "from connection_settings or DuckDB's default");
         Connection connection = RawConnections.open(startupScript, settings);
         try {
-            Readiness readiness = check(connection, database, tier, threads);
+            long effectiveLimit = memoryLimit > 0 ? memoryLimit : ResourceSampler.memoryLimitBytes(tier.connectionSettings());
+            Readiness readiness = check(connection, database, tier, threads, effectiveLimit);
             if (readiness.isRefused()) {
                 connection.close();
             } else {
@@ -111,10 +111,10 @@ public class DuckDbTierCompactor implements TierCompactor {
         }
     }
 
-    private static Readiness check(Connection connection, String database, CompactionTier tier, int threads)
-            throws SQLException {
+    private static Readiness check(Connection connection, String database, CompactionTier tier, int threads,
+                                   long memoryLimitBytes) throws SQLException {
         try {
-            setTarget(connection, tier);
+            setTarget(connection, tier.targetFileSize());
         } catch (SQLException e) {
             String message = String.valueOf(e.getMessage());
             if (message.contains("unrecognized configuration parameter")) {
@@ -133,15 +133,15 @@ public class DuckDbTierCompactor implements TierCompactor {
                     .formatted(CallSizing.fullGroupSeconds(tier), CallSizing.SEC_PER_FILE_SORTED,
                             CallSizing.TIMEOUT_SHARE * 100, timeoutMs), timeoutMs, threads);
         }
-        return Readiness.ready(timeoutMs, threads);
+        return Readiness.ready(timeoutMs, threads, memoryLimitBytes);
     }
 
     /**
      * Sets the tier's target on the session and reads it back: a call never runs without it, since a
      * group would otherwise grow to the catalog's target (512 MB by default). The setting needs a unit.
      */
-    static void setTarget(Connection connection, CompactionTier tier) throws SQLException {
-        String value = tier.targetFileSize() + " bytes";
+    static void setTarget(Connection connection, long targetFileSize) throws SQLException {
+        String value = targetFileSize + " bytes";
         try (Statement statement = connection.createStatement()) {
             statement.execute("SET SESSION ducklake_target_file_size = '" + value + "'");
         }
@@ -150,7 +150,7 @@ public class DuckDbTierCompactor implements TierCompactor {
             String actual = rs.next() ? rs.getString(1) : null;
             long bytes = actual == null ? -1 : parseDuckDbSize(actual);
             // A display may round (e.g. "16.0 MB"); anything further off is not the target we set.
-            if (bytes < 0 || Math.abs(bytes - tier.targetFileSize()) > tier.targetFileSize() / 100) {
+            if (bytes < 0 || Math.abs(bytes - targetFileSize) > targetFileSize / 100) {
                 throw new TargetMismatchException("ducklake_target_file_size reads back as %s after setting it to %s"
                         .formatted(actual, value));
             }
@@ -206,22 +206,28 @@ public class DuckDbTierCompactor implements TierCompactor {
      * calls as if there were no timeout.
      */
     static long idleTxnTimeoutMs(Connection connection, String database, CompactionTier tier) throws SQLException {
+        long configured = ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings());
+        // The metadata catalog itself is hidden from duckdb_databases(); the DuckLake catalog's path
+        // names its backend, e.g. "postgres:host=... dbname=...".
         String path = null;
-        try {
-            // The metadata catalog itself is hidden from duckdb_databases(); the DuckLake catalog's
-            // path names its backend, e.g. "postgres:host=... dbname=...".
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT path FROM duckdb_databases() WHERE database_name = ? AND type = 'ducklake'")) {
-                statement.setString(1, database);
-                try (ResultSet rs = statement.executeQuery()) {
-                    if (rs.next()) {
-                        path = rs.getString(1);
-                    }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT path FROM duckdb_databases() WHERE database_name = ? AND type = 'ducklake'")) {
+            statement.setString(1, database);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) {
+                    path = rs.getString(1);
                 }
             }
-            if (path == null || !path.regionMatches(true, 0, "postgres:", 0, "postgres:".length())) {
-                return 0;
-            }
+        } catch (SQLException e) {
+            // The backend is unknown, so this is no reason to hold the tier back
+            logger.warn("Could not tell which backend {}'s catalog uses, for tier '{}'; {}", database, tier.name(),
+                    configured >= 0 ? "using the timeout in its connection_settings" : "no timeout limit", e);
+            return Math.max(configured, 0);
+        }
+        if (path == null || !path.regionMatches(true, 0, "postgres:", 0, "postgres:".length())) {
+            return Math.max(configured, 0);
+        }
+        try {
             String query = "SELECT setting, unit FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'";
             try (Statement statement = connection.createStatement();
                  ResultSet rs = statement.executeQuery("SELECT * FROM postgres_query(%s, %s)"
@@ -234,9 +240,8 @@ public class DuckDbTierCompactor implements TierCompactor {
                     }
                 }
             }
-            throw new SQLException("pg_settings returned no idle_in_transaction_session_timeout");
-        } catch (Exception e) {
-            long configured = ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings());
+            throw new SQLException("pg_settings returned no usable idle_in_transaction_session_timeout");
+        } catch (SQLException e) {
             if (configured >= 0) {
                 logger.warn("Could not read the idle-in-transaction timeout of {}'s catalog for tier '{}'; using {} ms"
                         + " from its connection_settings", database, tier.name(), configured, e);
@@ -368,9 +373,10 @@ public class DuckDbTierCompactor implements TierCompactor {
     }
 
     @Override
-    public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) throws Exception {
+    public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long targetFileSize)
+            throws Exception {
         Connection connection = connection(database, tier);
-        setTarget(connection, tier);
+        setTarget(connection, targetFileSize);
         String sql = mergeSql(database, table, tier, cap);
         Timer.Sample sample = metrics.startTimer();
         long start = System.nanoTime();

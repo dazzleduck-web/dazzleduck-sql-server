@@ -45,7 +45,8 @@ above the tier's static cap (see [Call sizing](#call-sizing)).
 
 A failure costs one table's call: the table is retried on the next pass, and after 3 failures in a
 row it backs off for 15 minutes. A call the catalog's idle-in-transaction timeout killed is retried
-with half the cap, down to 1, until a call commits. A table runs at most one job at a time across tiers, data
+with half the cap, down to 1; each commit doubles it again, but never back to a cap the timeout
+killed. A table runs at most one job at a time across tiers, data
 retention and the delete-file rewrite (a **table lease**): a loop skips a table another job holds,
 and retention and the rewrite wait for it.
 
@@ -145,7 +146,7 @@ Per-tier fields:
 | `max_wait` | none | ... or once a group's second-oldest file has waited this long |
 | `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
 | `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
-| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) and memory for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads (at least 1) and, unless `connection_settings` sets one, a `memory_limit` of 60% of the process's memory (the container's limit, else the machine's) x its share. Shares add up to at most 1 |
+| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) and memory for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads (at least 1) and, unless `connection_settings` sets one, a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1 |
 | `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads` or `SET memory_limit` here overrides the one `cpu_share` computes. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
 `frequency`, the timer of earlier releases, is no longer used; a config that still sets it starts.
@@ -179,9 +180,12 @@ The catalog's `idle_in_transaction_session_timeout` is read from Postgres when a
 opens, so an `options=-cidle_in_transaction_session_timeout=600000` in the ATTACH string counts. A
 value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier does not
 start if one full group of its smallest files (3,200 files for minor, about 144 s) would not fit in
-80% of the timeout. An unsorted table is twice as slow per file, so a table whose single group still
-cannot fit is skipped and reported (`oversized`), rather than handed to the catalog to be killed
-call after call: give it a sort key, raise the timeout, or write larger files. If the timeout of a
+80% of the timeout. An unsorted table is twice as slow per file and needs about 7 times the memory
+(0.85 MiB per file against 0.12 MiB), so its full group may not fit in 80% of the timeout or of the
+instance's `memory_limit`. Its calls then run with a lower target, so a group holds only the files
+that fit; the outputs stay in the band and are merged again later. A table of which not even two
+files fit is skipped and reported (`oversized`). A sort key, a longer timeout, more memory or larger
+files avoid both. If the timeout of a
 Postgres catalog cannot be read, the tier retries opening its connection rather than run without it.
 
 The images set `MALLOC_ARENA_MAX=2`: most compactor memory is native `malloc` memory outside
@@ -381,6 +385,11 @@ starved table, a table skipped because one group cannot beat the catalog's timeo
 whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
 RSS above 75% of the container's memory limit. The status is always `UP` while the process is
 running; watch `alerts` (or the metrics below) instead.
+
+When alerting on metrics, `last_success_age` alone is not enough: a success is a table call that
+completed, so it grows without bound while the catalog has nothing to merge. Alert on `pass_age`
+(the loops are alive), and on `tier_last_success_age` only while the tier's `queue` is above zero
+(it has work but no call completes).
 
 ## Build
 

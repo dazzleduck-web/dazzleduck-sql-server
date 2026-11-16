@@ -31,6 +31,11 @@ public final class CallSizing {
      * {@code target / TINY_FILE_BYTES} files (3,200 for a 16 MB target).
      */
     public static final long TINY_FILE_BYTES = 5_000;
+    /** Measured peak memory per input file of a group, 1,000 small files: with and without a sort key. */
+    public static final long PER_FILE_COST_SORTED = (long) (0.12 * 1024 * 1024);
+    public static final long PER_FILE_COST_UNSORTED = (long) (0.85 * 1024 * 1024);
+    /** Share of an instance's memory_limit one group is sized to use. */
+    public static final double MEMORY_LIMIT_SHARE = 0.8;
 
     private CallSizing() {
     }
@@ -60,18 +65,55 @@ public final class CallSizing {
     }
 
     /**
-     * Whether one group of the table, at its own per-file rate, commits within 80% of the catalog's
-     * idle-in-transaction timeout. DuckLake cannot cut a group by file count, so a table whose single
-     * group cannot (an unsorted table of tiny files under a short timeout) would only be killed by the
-     * catalog, call after call: it is skipped and reported instead. Always true without a timeout.
+     * What one call does: its cap and the session target it runs with.
+     *
+     * @param target  {@code ducklake_target_file_size} for this call: the tier's target, or a lower one
+     *                when a full group would not fit (see {@link #plan})
+     * @param reduced whether {@code target} is lowered
      */
-    public static boolean groupFits(CompactionTier tier, TableWork work, long idleTxnTimeoutMs) {
-        if (idleTxnTimeoutMs <= 0) {
-            return true;
+    public record Plan(Cap cap, long target, boolean reduced) {
+    }
+
+    /**
+     * The most files one group of the table may have and still commit within 80% of the catalog's
+     * idle-in-transaction timeout at the table's per-file rate, and fit in 80% of the instance's
+     * {@code memory_limit} at its per-file cost. {@link Long#MAX_VALUE} when neither is known.
+     */
+    public static long maxFilesPerGroup(TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
+        long max = Long.MAX_VALUE;
+        if (idleTxnTimeoutMs > 0) {
+            max = Math.min(max, (long) Math.floor(TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0 / secPerFile(work.sorted())));
         }
+        if (memoryLimitBytes > 0) {
+            long cost = work.sorted() ? PER_FILE_COST_SORTED : PER_FILE_COST_UNSORTED;
+            max = Math.min(max, (long) Math.floor(MEMORY_LIMIT_SHARE * memoryLimitBytes / cost));
+        }
+        return max;
+    }
+
+    /**
+     * The call for one table. DuckLake cannot cut a group by file count, so when a full group at the
+     * tier's target would outrun the catalog's timeout or the instance's memory (an unsorted table of
+     * tiny files: 3,200 files, 288 s and about 2.7 GiB), the call runs with a lower session target, the
+     * files that fit times the average file size. Its outputs are smaller and stay in the band, to be
+     * merged again later, but the table makes progress instead of being killed call after call.
+     *
+     * @return null when not even two files fit in a group: the table cannot be merged at all
+     */
+    public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
         long average = Math.max(1, work.averageFileSize());
-        long filesPerGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
-        return filesPerGroup * secPerFile(work.sorted()) <= TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0;
+        long fullGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
+        long maxFiles = maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes);
+        if (fullGroup <= maxFiles) {
+            return new Plan(of(tier, work, idleTxnTimeoutMs), tier.targetFileSize(), false);
+        }
+        if (maxFiles < 2) {
+            return null;
+        }
+        // a group adds files while its total is below the target: this many average files, no more
+        long target = maxFiles * average;
+        CompactionTier lowered = tier.withTargetFileSize(target);
+        return new Plan(of(lowered, work, idleTxnTimeoutMs), target, true);
     }
 
     public static double secPerFile(boolean sorted) {
@@ -89,8 +131,8 @@ public final class CallSizing {
 
     /**
      * The startup check: whether one full group of the tier's smallest files fits in 80% of the
-     * timeout at the sorted rate. Unsorted tables, twice as slow, are checked per table by
-     * {@link #groupFits}. A tier whose single group cannot commit before the catalog kills
+     * timeout at the sorted rate. Unsorted tables, twice as slow, are sized per table by
+     * {@link #plan}. A tier whose single group cannot commit before the catalog kills
      * the transaction would fail every call, so it does not start. Always true without a timeout.
      */
     public static boolean fullGroupFits(CompactionTier tier, long idleTxnTimeoutMs) {

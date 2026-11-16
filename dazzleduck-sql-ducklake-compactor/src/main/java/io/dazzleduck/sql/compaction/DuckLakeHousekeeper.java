@@ -119,7 +119,13 @@ public class DuckLakeHousekeeper implements Housekeeper {
      */
     private long rewriteDeletes(Connection connection, String database) {
         long rewritten = 0;
-        for (String[] table : liveTables(connection, database)) {
+        List<String[]> tables = liveTables(connection, database);
+        // forget the skip counts of tables that no longer exist
+        java.util.Set<String> live = new java.util.HashSet<>();
+        tables.forEach(t -> live.add(TableLeases.key(database, t[0], t[1])));
+        String prefix = TableLeases.key(database, "", "").replaceAll("\\.+$", "") + ".";
+        skipped.keySet().removeIf(key -> key.startsWith(prefix) && !live.contains(key));
+        for (String[] table : tables) {
             String key = TableLeases.key(database, table[0], table[1]);
             if (leases != null && !leases.tryAcquire(key)) {
                 int skips = skipped.merge(key, 1, Integer::sum);

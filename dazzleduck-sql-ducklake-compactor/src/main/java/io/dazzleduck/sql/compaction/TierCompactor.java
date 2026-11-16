@@ -24,10 +24,18 @@ public interface TierCompactor extends Closeable {
     List<TableWork> discover(String database, CompactionTier tier) throws Exception;
 
     /**
-     * One table call: sets the tier's target on the session, then merges at most {@code cap} groups
-     * of the table in one transaction and one commit.
+     * One table call: sets {@code targetFileSize} on the session, then merges at most {@code cap}
+     * groups of the table in one transaction and one commit.
+     *
+     * @param targetFileSize the tier's target, or a lower one for a table whose full group would not fit
      */
-    MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) throws Exception;
+    MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long targetFileSize)
+            throws Exception;
+
+    /** {@link #compact(String, CompactionTier, TableWork, int, long)} at the tier's own target. */
+    default MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) throws Exception {
+        return compact(database, tier, table, cap, tier.targetFileSize());
+    }
 
     /** Drops the pair's connection after a failure that may have broken it; prepare reopens it. */
     default void reset(String database, CompactionTier tier) {
@@ -42,10 +50,19 @@ public interface TierCompactor extends Closeable {
      * @param refused          why the tier must not start, or {@code null} when it is ready
      * @param idleTxnTimeoutMs the catalog's idle-in-transaction timeout; 0 for none
      * @param threads          the DuckDB threads of the pair's instance
+     * @param memoryLimitBytes the instance's {@code memory_limit}, or -1 when unknown
      */
-    record Readiness(String refused, long idleTxnTimeoutMs, int threads) {
+    record Readiness(String refused, long idleTxnTimeoutMs, int threads, long memoryLimitBytes) {
+        Readiness(String refused, long idleTxnTimeoutMs, int threads) {
+            this(refused, idleTxnTimeoutMs, threads, -1);
+        }
+
         static Readiness ready(long idleTxnTimeoutMs, int threads) {
-            return new Readiness(null, idleTxnTimeoutMs, threads);
+            return new Readiness(null, idleTxnTimeoutMs, threads, -1);
+        }
+
+        static Readiness ready(long idleTxnTimeoutMs, int threads, long memoryLimitBytes) {
+            return new Readiness(null, idleTxnTimeoutMs, threads, memoryLimitBytes);
         }
 
         boolean isRefused() {

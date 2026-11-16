@@ -212,7 +212,7 @@ class DuckDbTierCompactorTest {
             assertEquals(8, readiness.threads(), "2 x cpu_share 1.0 x 4 CPUs");
         }
         try (Connection c = RawConnections.open(startup, List.of())) {
-            DuckDbTierCompactor.setTarget(c, ALL);
+            DuckDbTierCompactor.setTarget(c, ALL.targetFileSize());
             try (Statement s = c.createStatement();
                  ResultSet rs = s.executeQuery("SELECT current_setting('ducklake_target_file_size')")) {
                 rs.next();
@@ -284,9 +284,9 @@ class DuckDbTierCompactorTest {
         assertEquals(1, minor.threads(1, 4), "at least one");
 
         DuckDbTierCompactor oneDb = new DuckDbTierCompactor(startup, state, 8, 1, 4_000_000_000L);
-        assertEquals(1_200_000_000L, oneDb.defaultMemoryLimitBytes(minor), "60% of 4 GB x 0.5");
+        assertEquals(1_000_000_000L, oneDb.defaultMemoryLimitBytes(minor), "50% of 4 GB x 0.5");
         DuckDbTierCompactor twoDbs = new DuckDbTierCompactor(startup, state, 8, 2, 4_000_000_000L);
-        assertEquals(600_000_000L, twoDbs.defaultMemoryLimitBytes(minor));
+        assertEquals(500_000_000L, twoDbs.defaultMemoryLimitBytes(minor));
         assertEquals(-1L, oneDb.defaultMemoryLimitBytes(minor.withConnectionSettings(List.of("SET memory_limit='2GB'"))),
                 "an explicit memory_limit wins");
         assertEquals(-1L, new DuckDbTierCompactor(startup, state, 8, 1, -1).defaultMemoryLimitBytes(minor),
@@ -294,10 +294,37 @@ class DuckDbTierCompactorTest {
     }
 
     @Test
+    void theOtherInstancesGetASliceOfTheMemoryToo() {
+        // Review on #542: housekeeping, retention and the file-count instance had DuckDB's default
+        assertEquals(List.of("SET memory_limit = '160000000 bytes'", "SET enable_external_file_cache = false"),
+                MemoryBudget.withDefaultLimit(List.of("SET enable_external_file_cache = false"),
+                        MemoryBudget.HOUSEKEEPING, 2, 4_000_000_000L), "8% of 4 GB over 2 databases");
+        assertEquals(List.of("SET memory_limit='1GB'"), MemoryBudget.withDefaultLimit(List.of("SET memory_limit='1GB'"),
+                MemoryBudget.RETENTION, 1, 4_000_000_000L), "an explicit limit wins");
+        assertEquals(List.of(), MemoryBudget.withDefaultLimit(List.of(), MemoryBudget.FILE_COUNTS, 1, -1),
+                "unknown memory: DuckDB's default");
+        assertEquals(MemoryBudget.MINIMUM_BYTES, MemoryBudget.limit(MemoryBudget.FILE_COUNTS, 8, 1_000_000_000L));
+        double all = DuckDbTierCompactor.MEMORY_SHARE + MemoryBudget.HOUSEKEEPING + MemoryBudget.RETENTION
+                + MemoryBudget.FILE_COUNTS;
+        assertTrue(all <= 0.7, "about a third stays for the JVM and memory outside memory_limit: " + all);
+    }
+
+    @Test
+    void aCatalogThatIsNotPostgresHasNoTimeoutEvenWhenItsBackendCannotBeRead() throws Exception {
+        // Review on #542: a failure before the backend is known must not make the tier retry forever
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:")) {
+            assertEquals(0, DuckDbTierCompactor.idleTxnTimeoutMs(c, "not_attached", ALL));
+            assertEquals(90_000, DuckDbTierCompactor.idleTxnTimeoutMs(c, "not_attached",
+                    ALL.withConnectionSettings(List.of("SET idle_in_transaction_session_timeout = '90s'"))));
+        }
+    }
+
+    @Test
     void theInstanceGetsItsMemoryLimitAndThreads() throws Exception {
         try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 2, 4_000_000_000L)) {
             TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
             assertEquals(4, readiness.threads(), "2 x 1.0 x 4 CPUs / 2 databases");
+            assertEquals(1_000_000_000L, readiness.memoryLimitBytes(), "50% of 4 GB x 1.0 / 2 databases");
         }
     }
 

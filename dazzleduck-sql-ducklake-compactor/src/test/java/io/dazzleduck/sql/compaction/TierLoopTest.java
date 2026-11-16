@@ -80,8 +80,8 @@ class TierLoopTest {
             }
 
             @Override
-            public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) {
-                return compactor.compact(database, tier, table, cap);
+            public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long target) {
+                return compactor.compact(database, tier, table, cap, target);
             }
         };
         TierLoop slow = new TierLoop(DB, MINOR, slowRefresh, leases, state, runLog, clock);
@@ -295,20 +295,32 @@ class TierLoopTest {
     }
 
     @Test
-    void anUnsortedTableWhoseGroupCannotBeatTheTimeoutIsSkippedAndReported() {
-        // 3,200 unsorted 5 KB files take 288 s; 80% of 180 s is 144 s
+    void anUnsortedTableWhoseFullGroupCannotBeatTheTimeoutRunsWithALowerTarget() {
+        // 3,200 unsorted 5 KB files take 288 s; 80% of 180 s is 144 s, so 1,600 files fit in a group
         compactor.readiness = TierCompactor.Readiness.ready(Duration.ofSeconds(180).toMillis(), 2);
         compactor.work = List.of(table("main.unsorted", 98_000, 98_000L * 5_000, T0, 0, false),
                 table("main.sorted", 98_000, 98_000L * 5_000, T0, 0, true));
+        loop.runPass();
+        assertEquals(List.of("main.unsorted", "main.sorted"), compactor.calledTables(), "both make progress");
+        assertEquals(1_600L * 5_000, compactor.calls.get(0).target(), "the files that fit x the average file");
+        assertEquals(16_000_000L, compactor.calls.get(1).target(), "a sorted group fits at the tier's own target");
+        assertEquals(List.of(), loop.status().oversized());
+    }
+
+    @Test
+    void aTableOfWhichNotTwoFilesFitIsSkippedAndReported() {
+        // 0.85 MiB per unsorted file against 80% of a 1 MiB memory_limit: not even one file
+        compactor.readiness = TierCompactor.Readiness.ready(0, 2, 1L << 20);
+        compactor.work = List.of(table("main.unsorted", 98_000, 98_000L * 5_000, T0, 0, false));
         TierLoop.PassResult result = loop.runPass();
-        assertEquals(List.of("main.sorted"), compactor.calledTables(), "never handed to the catalog to be killed");
+        assertTrue(compactor.calls.isEmpty(), "never handed to DuckLake to fail");
         assertEquals(0, result.failed());
         assertEquals(List.of("main.unsorted"), loop.status().oversized());
         assertEquals(List.of(), loop.status().backoffs());
     }
 
     @Test
-    void aCallTheCatalogTimeoutKilledIsRetriedWithHalfTheCapUntilOneCommits() {
+    void aCallTheCatalogTimeoutKilledIsRetriedWithHalfTheCapAndNeverAsLargeAgain() {
         compactor.work = List.of(table("main.slow", 500, 500L * 1_000_000, T0, 0, true)); // 16 files a group
         compactor.failing.put("main.slow", "Failed to execute query \"ROLLBACK\": server closed the connection");
         loop.runPass();
@@ -319,8 +331,15 @@ class TierLoopTest {
         compactor.failing.clear();
         loop.runPass();
         loop.runPass();
-        assertEquals(List.of(12, 6, 3, 12), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList(),
-                "a commit lifts the limit");
+        loop.runPass();
+        assertEquals(List.of(12, 6, 3, 5, 5), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList(),
+                "commits double the limit, but only up to below the smallest cap the timeout killed (6)");
+
+        compactor.work = List.of(); // caught up: the table leaves the list, and its limit with it
+        loop.runPass();
+        compactor.work = List.of(table("main.slow", 500, 500L * 1_000_000, T0, 0, true));
+        loop.runPass();
+        assertEquals(12, compactor.calls.get(compactor.calls.size() - 1).cap());
     }
 
     @Test

@@ -268,7 +268,8 @@ public class CompactionService implements Closeable {
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, List.of());
+            Connection opened = RawConnections.open(startupScript, MemoryBudget.withDefaultLimit(List.of(),
+                    MemoryBudget.FILE_COUNTS, config.databases().size(), ResourceSampler.totalMemoryBytes()));
             countingConnections.put(database, opened);
             return opened;
         }

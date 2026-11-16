@@ -92,14 +92,39 @@ class CallSizingTest {
     }
 
     @Test
-    void anUnsortedTableWhoseOneGroupOutrunsTheTimeoutDoesNotFit() {
+    void anUnsortedTableWhoseFullGroupOutrunsTheTimeoutGetsALowerTarget() {
         // Review on #542: 180 s passes the startup check (144 s sorted) but an unsorted group takes 288 s.
         long timeout = Duration.ofSeconds(180).toMillis();
         assertTrue(CallSizing.fullGroupFits(MINOR, timeout));
-        assertTrue(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, true), timeout));
-        assertFalse(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, false), timeout));
-        assertTrue(CallSizing.groupFits(MINOR, work(98_000, 5_000, 0, false), 0), "no timeout: it fits");
-        assertTrue(CallSizing.groupFits(MINOR, work(30, 2_000_000, 0, false), timeout), "8 files of 2 MB fit");
+        CallSizing.Plan sorted = CallSizing.plan(MINOR, work(98_000, 5_000, 0, true), timeout, -1);
+        assertFalse(sorted.reduced());
+        assertEquals(16_000_000L, sorted.target());
+
+        CallSizing.Plan unsorted = CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), timeout, -1);
+        assertTrue(unsorted.reduced());
+        assertEquals(1_600L * 5_000, unsorted.target(), "144 s / 0.09 s = 1,600 files of 5 KB");
+        assertEquals(1_600, unsorted.cap().filesPerGroup());
+        assertEquals(1, unsorted.cap().cap(), "1,600 files at 0.09 s fill the 144 s");
+
+        assertFalse(CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), 0, -1).reduced(), "no timeout: it fits");
+        assertFalse(CallSizing.plan(MINOR, work(30, 2_000_000, 0, false), timeout, -1).reduced(), "8 files of 2 MB fit");
+    }
+
+    @Test
+    void theInstancesMemoryBoundsAGroupToo() {
+        // Review on #542: a full unsorted group of 5 KB files needs 3,200 x 0.85 MiB = about 2.7 GiB
+        long limit = 1L << 30; // 1 GiB: 80% of it holds 963 unsorted files, 6,826 sorted
+        CallSizing.Plan unsorted = CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), 0, limit);
+        assertTrue(unsorted.reduced());
+        assertEquals(963L * 5_000, unsorted.target());
+        assertFalse(CallSizing.plan(MINOR, work(98_000, 5_000, 0, true), 0, limit).reduced(),
+                "3,200 sorted files need about 384 MiB");
+    }
+
+    @Test
+    void notEvenTwoFilesFitMeansNoPlan() {
+        assertNull(CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), 0, 1L << 20));
+        assertNull(CallSizing.plan(MINOR, work(98_000, 5_000, 0, false), 100, -1), "80 ms is under one file");
     }
 
     @Test
