@@ -13,10 +13,25 @@ import java.util.Map;
 public record CompactionStats(
         Instant serviceStart,
         Map<String, DatabaseStats> databases,
-        List<String> alerts) {
+        List<String> alerts,
+        SpillStatus spill) {
 
     public CompactionStats(Instant serviceStart, Map<String, DatabaseStats> databases) {
-        this(serviceStart, databases, List.of());
+        this(serviceStart, databases, List.of(), null);
+    }
+
+    public CompactionStats(Instant serviceStart, Map<String, DatabaseStats> databases, List<String> alerts) {
+        this(serviceStart, databases, alerts, null);
+    }
+
+    /**
+     * Where the DuckDB instances spill (see {@code SpillBudget}).
+     *
+     * @param budgetBytes what {@code max_temp_directory_size} is split from, -1 unknown
+     * @param usedBytes   bytes spilled under the directory now, -1 unknown
+     * @param freeBytes   free space under it, -1 unknown
+     */
+    public record SpillStatus(String directory, long budgetBytes, long usedBytes, long freeBytes) {
     }
 
     /**

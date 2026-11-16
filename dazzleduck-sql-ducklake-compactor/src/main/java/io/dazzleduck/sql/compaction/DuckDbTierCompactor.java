@@ -31,10 +31,11 @@ public class DuckDbTierCompactor implements TierCompactor {
     private final int availableProcessors;
     private final int databases;
     private final long totalMemoryBytes;
+    private final SpillBudget spill;
 
     /**
      * Share of the process's memory (the container's limit, else physical memory) that the tiers'
-     * DuckDB instances may use together, split by {@code cpu_share} and database, for an instance
+     * DuckDB instances may use together, split by {@code memory_share} and database, for an instance
      * whose connection_settings set no {@code memory_limit}. See {@link MemoryBudget} for the rest.
      */
     static final double MEMORY_SHARE = 0.5;
@@ -50,8 +51,12 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     /** @param databases the configured databases: each runs its own instance of every tier */
     public DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases) {
+        this(startupScript, metrics, databases, SpillBudget.NONE);
+    }
+
+    DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases, SpillBudget spill) {
         this(startupScript, metrics, Runtime.getRuntime().availableProcessors(), databases,
-                ResourceSampler.totalMemoryBytes());
+                ResourceSampler.totalMemoryBytes(), spill);
     }
 
     /**
@@ -62,6 +67,13 @@ public class DuckDbTierCompactor implements TierCompactor {
      */
     public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
                                long totalMemoryBytes) {
+        this(startupScript, metrics, availableProcessors, databases, totalMemoryBytes, SpillBudget.NONE);
+    }
+
+    /** @param spill where the instances spill: one directory per database and tier */
+    DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
+                        long totalMemoryBytes, SpillBudget spill) {
+        this.spill = spill;
         this.startupScript = startupScript;
         this.metrics = metrics;
         this.availableProcessors = availableProcessors;
@@ -74,7 +86,7 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (totalMemoryBytes <= 0 || ResourceSampler.memoryLimitBytes(tier.connectionSettings()) >= 0) {
             return -1;
         }
-        return MemoryBudget.limit(MEMORY_SHARE * tier.cpuShare(), databases, totalMemoryBytes);
+        return MemoryBudget.limit(MEMORY_SHARE * tier.memoryShare(), databases, totalMemoryBytes);
     }
 
     @Override
@@ -93,6 +105,13 @@ public class DuckDbTierCompactor implements TierCompactor {
             settings.add("SET memory_limit = '" + memoryLimit + " bytes'");
         }
         settings.addAll(tier.connectionSettings());
+        try {
+            settings = spill.apply(database, "tier-" + tier.name(), MEMORY_SHARE * tier.memoryShare(), databases,
+                    settings);
+        } catch (SQLException e) {
+            // Without it the first merge that spills fails, late and on every call
+            return new Readiness(e.getMessage(), -1, threads, memoryLimit);
+        }
         logger.info("Tier '{}' opens its DuckDB instance for {}: {} thread(s), memory_limit {}", tier.name(), database,
                 threads, memoryLimit > 0 ? memoryLimit + " bytes" : "from connection_settings or DuckDB's default");
         Connection connection = RawConnections.open(startupScript, settings);

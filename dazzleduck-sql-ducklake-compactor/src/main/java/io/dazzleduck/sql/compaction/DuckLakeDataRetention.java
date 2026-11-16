@@ -86,6 +86,13 @@ public class DuckLakeDataRetention implements DataRetention {
     private final int maxFilesPerCycle;
     // null: no leases, for callers (tests) that run no merge beside it
     private final TableLeases leases;
+    // Where its instances spill, per database; set by useSpill before first use
+    private volatile SpillBudget.Slot spill = SpillBudget.Slot.NONE;
+
+    /** Where its instances spill: one directory per database. Call before first use. */
+    void useSpill(SpillBudget.Slot value) {
+        this.spill = value;
+    }
     /** Tables already warned about for files without statistics; those stay so until rewritten. */
     private final Set<String> warnedNoStatistics = ConcurrentHashMap.newKeySet();
     /** The connection of each database's running cycle, so {@link #close} can abort it. */
@@ -137,7 +144,7 @@ public class DuckLakeDataRetention implements DataRetention {
         }
         // A new connection each cycle, closed at its end: it runs at most hourly by default, so
         // there is no stale connection to detect or replace, and nothing to keep between cycles.
-        try (Connection connection = RawConnections.open(startupScript, connectionSettings)) {
+        try (Connection connection = RawConnections.open(startupScript, spill.apply(database, connectionSettings))) {
             running.put(database, connection);
             try {
                 return enforce(connection, database);

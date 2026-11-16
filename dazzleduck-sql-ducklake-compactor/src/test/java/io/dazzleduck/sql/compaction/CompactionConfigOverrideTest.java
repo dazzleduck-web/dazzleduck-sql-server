@@ -536,8 +536,10 @@ class CompactionConfigOverrideTest {
     void theSpecsTierSettingsParseAndTheRestDefault() throws Exception {
         CompactionTier minor = tier(resolve(oneTier("""
                 target_file_size = 16MB, max_compacted_files = 12, min_files = 4, max_wait = 5 minutes,
-                cpu_share = 0.5, max_files_per_call = 3000, pass_time_limit = 1 minute, idle_sleep_max = 5 seconds,
-                call_time_limit = 8 minutes""")), "minor");
+                cpu_share = 0.5, memory_share = 0.4, min_threads = 6, max_files_per_call = 3000,
+                pass_time_limit = 1 minute, idle_sleep_max = 5 seconds, call_time_limit = 8 minutes""")), "minor");
+        assertEquals(0.4, minor.memoryShare());
+        assertEquals(6, minor.minThreads());
         assertEquals(16_000_000L, minor.targetFileSize());
         assertEquals(12L, minor.maxCompactedFiles());
         assertEquals(4, minor.minFiles());
@@ -556,6 +558,12 @@ class CompactionConfigOverrideTest {
         assertEquals(CompactionTier.DEFAULT_IDLE_SLEEP, defaults.idleSleep());
         assertEquals(CompactionTier.DEFAULT_CALL_TIME_LIMIT, defaults.callTimeLimit());
         assertEquals(1.0, defaults.cpuShare(), "the only enabled tier gets every CPU");
+        assertEquals(1.0, defaults.memoryShare(), "and all the tiers' memory");
+        assertEquals(CompactionTier.DEFAULT_MIN_THREADS, defaults.minThreads());
+
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12, min_threads = 0")));
+        assertTrue(e.getMessage().contains("min_threads"), e.getMessage());
     }
 
     @Test
@@ -594,6 +602,41 @@ class CompactionConfigOverrideTest {
         assertEquals(0.25, tier(config, "major").cpuShare(), 1e-9);
         assertEquals(0.25, tier(config, "mega").cpuShare(), 1e-9);
         assertEquals(0.0, tier(config, "off").cpuShare(), "a disabled tier gets no CPUs");
+    }
+
+    @Test
+    void memorySharesAreSplitAndCheckedLikeCpuShares() throws Exception {
+        String tiers = """
+                databases = ["mylake"]
+                compaction_tiers {
+                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.5, memory_share = %s }
+                  major { enabled = true, min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 16 }
+                  mega  { enabled = true, min_file_size = 64MB, max_file_size = 256MB, target_file_size = 256MB, max_compacted_files = 5 }
+                }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """;
+        CompactionConfig config = resolve(ConfigFactory.parseString(tiers.formatted("0.4")));
+        assertEquals(0.3, tier(config, "major").memoryShare(), 1e-9, "an equal part of what minor leaves");
+        assertEquals(0.25, tier(config, "major").cpuShare(), 1e-9, "independently of the CPU split");
+
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(ConfigFactory.parseString(tiers.formatted("1.5"))));
+        assertTrue(e.getMessage().contains("memory_share"), e.getMessage());
+    }
+
+    @Test
+    void theSpillDirectoryDefaultsAndCanBeTurnedOff() throws Exception {
+        CompactionConfig defaults = resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12"));
+        assertEquals(SpillBudget.DEFAULT_DIRECTORY, defaults.spillDirectory());
+        assertEquals(-1L, defaults.spillMaxSize());
+
+        CompactionConfig set = resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12")
+                .withFallback(ConfigFactory.parseString("spill_directory = \"\", spill_max_size = 20GB")));
+        assertEquals("", set.spillDirectory());
+        assertEquals(20_000_000_000L, set.spillMaxSize());
+        assertSame(SpillBudget.NONE, SpillBudget.create(set.spillDirectory(), set.spillMaxSize()));
     }
 
     @Test

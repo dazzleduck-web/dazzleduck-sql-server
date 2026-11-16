@@ -25,6 +25,13 @@ public class DuckLakeHousekeeper implements Housekeeper {
     private final CompactionState metrics;
     // null: rewrite without leases, for callers (tests) that run nothing beside it
     private final TableLeases leases;
+    // Where its instances spill, per database; set by useSpill before first use
+    private volatile SpillBudget.Slot spill = SpillBudget.Slot.NONE;
+
+    /** Where its instances spill: one directory per database. Call before first use. */
+    void useSpill(SpillBudget.Slot value) {
+        this.spill = value;
+    }
     /** A table the rewrite skipped this many times in a row, because another job held it, is waited for. */
     static final int SKIPS_BEFORE_WAIT = 3;
     // "db.schema.table" -> consecutive runs that skipped the table; touched only by the database's housekeeping
@@ -197,7 +204,7 @@ public class DuckLakeHousekeeper implements Housekeeper {
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, connectionSettings);
+            Connection opened = RawConnections.open(startupScript, spill.apply(database, connectionSettings));
             connections.put(database, opened);
             return opened;
         }

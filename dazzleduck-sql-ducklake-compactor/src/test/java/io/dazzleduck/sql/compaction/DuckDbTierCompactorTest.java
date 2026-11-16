@@ -204,6 +204,23 @@ class DuckDbTierCompactorTest {
     }
 
     @Test
+    void aTierWhoseSpillDirectoryIsNotWritableDoesNotStart(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        java.nio.file.Path file = java.nio.file.Files.createFile(dir.resolve("file"));
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1,
+                new SpillBudget(file, 10_000_000_000L))) {
+            TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
+            assertTrue(readiness.isRefused());
+            assertTrue(readiness.refused().contains("not writable"), readiness.refused());
+        }
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1,
+                new SpillBudget(dir.resolve("spill"), 10_000_000_000L))) {
+            assertFalse(compactor.prepare("lake", ALL).isRefused());
+            assertTrue(java.nio.file.Files.isDirectory(dir.resolve("spill").resolve("lake").resolve("tier-" + ALL.name())));
+        }
+    }
+
+    @Test
     void theSessionTargetIsSetAndReadBack() throws Exception {
         try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 1, -1)) {
             TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
@@ -278,15 +295,22 @@ class DuckDbTierCompactorTest {
 
     @Test
     void threadsAndMemoryAreAProcessBudgetSplitAcrossDatabases() {
-        CompactionTier minor = CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12).withCpuShare(0.5);
+        CompactionTier minor = CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12).withCpuShare(0.5)
+                .withMemoryShare(0.5);
         assertEquals(8, minor.threads(8, 1), "2 x 0.5 x 8 CPUs");
-        assertEquals(3, minor.threads(8, 3), "three databases each run a minor instance");
-        assertEquals(1, minor.threads(1, 4), "at least one");
+        assertEquals(4, minor.threads(8, 3), "three databases each run a minor instance: 3 from the CPUs, floor 4");
+        assertEquals(2, minor.withMinThreads(2).threads(1, 4),
+                "min_threads, whatever the CPUs");
+        // Review on #542: 2 threads on a 1.5-CPU container kept too few object-store requests in flight
+        assertEquals(4, minor.threads(2, 1), "2 x 0.5 x 1.5 rounds to 2: the floor keeps 4");
+        assertEquals(1, minor.withMinThreads(1).threads(1, 4), "at least one");
 
         DuckDbTierCompactor oneDb = new DuckDbTierCompactor(startup, state, 8, 1, 4_000_000_000L);
         assertEquals(1_000_000_000L, oneDb.defaultMemoryLimitBytes(minor), "50% of 4 GB x 0.5");
         DuckDbTierCompactor twoDbs = new DuckDbTierCompactor(startup, state, 8, 2, 4_000_000_000L);
         assertEquals(500_000_000L, twoDbs.defaultMemoryLimitBytes(minor));
+        assertEquals(600_000_000L, oneDb.defaultMemoryLimitBytes(minor.withCpuShare(0.25).withMemoryShare(0.3)),
+                "memory follows memory_share, not cpu_share");
         assertEquals(-1L, oneDb.defaultMemoryLimitBytes(minor.withConnectionSettings(List.of("SET memory_limit='2GB'"))),
                 "an explicit memory_limit wins");
         assertEquals(-1L, new DuckDbTierCompactor(startup, state, 8, 1, -1).defaultMemoryLimitBytes(minor),

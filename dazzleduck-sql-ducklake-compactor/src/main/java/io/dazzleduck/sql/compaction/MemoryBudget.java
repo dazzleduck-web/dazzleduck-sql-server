@@ -11,7 +11,7 @@ import java.util.List;
  * outside its {@code memory_limit} (glibc arenas, see MALLOC_ARENA_MAX).
  *
  * <ul>
- *   <li>Tier instances: {@link DuckDbTierCompactor#MEMORY_SHARE} (50%), split by {@code cpu_share}</li>
+ *   <li>Tier instances: {@link DuckDbTierCompactor#MEMORY_SHARE} (50%), split by {@code memory_share}</li>
  *   <li>Housekeeping (delete-file rewrite, expiry, cleanup): {@link #HOUSEKEEPING} (8%)</li>
  *   <li>Data retention: {@link #RETENTION} (8%)</li>
  *   <li>The file-count gauges: {@link #FILE_COUNTS} (2%)</li>

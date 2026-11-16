@@ -44,6 +44,8 @@ public class CompactionService implements Closeable {
     // null when data retention is off
     private final DataRetention dataRetention;
     private final CompactionState state;
+    // Where its file-count instances spill, and what /health reports; set by useSpill before start
+    private volatile SpillBudget spill = SpillBudget.NONE;
     private final CompactionRunLog runLog;
     private final TableLeases leases;
     private final Clock clock;
@@ -171,6 +173,11 @@ public class CompactionService implements Closeable {
         return loop.runPass();
     }
 
+    /** Where the file-count instances spill, and the spill /health reports. Call before {@link #start()}. */
+    public void useSpill(SpillBudget value) {
+        this.spill = value;
+    }
+
     public CompactionStats getStats() {
         Instant now = clock.instant();
         CompactionStats base = state.getSnapshot(config.databases());
@@ -200,7 +207,9 @@ public class CompactionService implements Closeable {
             alerts.add("RSS %d bytes is above %.0f%% of the container's memory limit %d bytes"
                     .formatted(rss, RSS_ALERT_SHARE * 100, limit));
         }
-        return new CompactionStats(base.serviceStart(), dbStats, List.copyOf(alerts));
+        CompactionStats.SpillStatus spillStatus = spill.status();
+        alerts.addAll(SpillBudget.alerts(spillStatus));
+        return new CompactionStats(base.serviceStart(), dbStats, List.copyOf(alerts), spillStatus);
     }
 
     private List<String> tierAlerts(String db, CompactionTier tier, TierLoop loop, CompactionStats.TierStatus status,
@@ -269,8 +278,10 @@ public class CompactionService implements Closeable {
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, MemoryBudget.withDefaultLimit(List.of(),
-                    MemoryBudget.FILE_COUNTS, config.databases().size(), ResourceSampler.totalMemoryBytes()));
+            int databases = config.databases().size();
+            Connection opened = RawConnections.open(startupScript, spill.apply(database, "file-counts",
+                    MemoryBudget.FILE_COUNTS, databases, MemoryBudget.withDefaultLimit(List.of(),
+                            MemoryBudget.FILE_COUNTS, databases, ResourceSampler.totalMemoryBytes())));
             countingConnections.put(database, opened);
             return opened;
         }

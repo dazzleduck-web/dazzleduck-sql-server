@@ -85,6 +85,7 @@ compaction_tiers {
     min_files = 4
     max_wait = 5 minutes
     cpu_share = 0.5
+    memory_share = 0.4
     connection_settings = ["SET enable_external_file_cache = false"]
   }
   major {
@@ -94,6 +95,7 @@ compaction_tiers {
     target_file_size = 64MB
     max_compacted_files = 16
     cpu_share = 0.25
+    memory_share = 0.3
     connection_settings = ["SET enable_external_file_cache = false"]
   }
   mega {
@@ -103,6 +105,7 @@ compaction_tiers {
     target_file_size = 256MB
     max_compacted_files = 5
     cpu_share = 0.25
+    memory_share = 0.3
     connection_settings = ["SET enable_external_file_cache = false"]
   }
 }
@@ -148,8 +151,10 @@ Per-tier fields:
 | `max_wait` | none | ... or once a group's second-oldest file has waited this long |
 | `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
 | `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
-| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) and memory for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads (at least 1) and, unless `connection_settings` sets one, a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1 |
-| `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads` or `SET memory_limit` here overrides the one `cpu_share` computes. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
+| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads, and at least `min_threads`. Shares add up to at most 1 |
+| `memory_share` | an equal part of what the other tiers leave | Share of the tiers' memory for this tier: unless `connection_settings` sets one, each instance gets a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share, divided among the databases. Separate from `cpu_share` because minor merges many tiny files and needs threads, while major and mega merge few large files and need memory. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1 |
+| `min_threads` | `4` | The fewest DuckDB threads an instance gets, whatever its CPUs. Merging small files from an object store waits on round trips, not CPU: with 2 threads on a 1.5-CPU container and about 25 ms per request, a load test used 8% to 77% of its CPUs |
+| `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads`, `SET memory_limit` or `SET temp_directory` here overrides the computed one. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
 `frequency`, the timer of earlier releases, is no longer used; a config that still sets it starts.
 
@@ -310,6 +315,40 @@ on the same table commits fails with a transaction conflict and is reported to t
 failed, which must resend it. Registration takes milliseconds and retention commits once per table
 per cycle, so this is rare but not impossible.
 
+### Spill directory
+
+DuckDB's default `temp_directory` for an in-memory database is `.tmp` in the working directory, and
+DuckDB creates only the last level of a configured one. Both fail late, only when a merge needs to
+spill (usually a sorted group): a read-only root filesystem, or a missing parent directory. So every
+DuckDB instance of the compactor spills to its own directory under one root, `spill_directory`
+(default `/tmp/ducklake-compactor`). Each tier, housekeeping, retention and the file-count gauges get
+a directory per database, for example `/tmp/ducklake-compactor/lake/tier-minor`. Each directory is
+created and probed (a file written and deleted) when its instance opens, and a tier whose directory
+is not writable does not start, with the reason in `/health`. Instances never share a directory,
+since DuckDB cleans up its temp directory when an instance closes.
+
+Each instance's `max_temp_directory_size` is split like its `memory_limit`, from a budget of the
+free space under the root at startup, or `spill_max_size` when that is smaller. Set `spill_max_size`
+on Kubernetes, where an `emptyDir` volume's `sizeLimit` is not visible as free space. No instance
+gets less than 256 MiB. An instance whose `connection_settings` set `temp_directory` keeps it. Set
+`spill_directory = ""` to leave DuckDB's defaults.
+
+```hocon
+spill_directory = "/tmp/ducklake-compactor"
+spill_max_size = 20GB
+```
+
+`/health` reports the root, its budget, the bytes spilled under it now and the free space, and
+alerts when spill uses more than 80% of the budget or the free space falls below 10% of it.
+
+### Many small files and ephemeral ports
+
+Merging tiny files from an object store opens many short HTTP connections, each of which holds a
+local port in `TIME_WAIT` for a while after it closes. In a load test, 4 DuckDB threads exhausted
+the ephemeral port range of a container, and httpfs failed with `Could not connect to server`. If
+that happens, widen `net.ipv4.ip_local_port_range` and enable `net.ipv4.tcp_tw_reuse` for the
+container (on Kubernetes, as pod `sysctls`), or lower the tier's threads.
+
 ### Connections
 
 Each tier, plus housekeeping, gets its own **real, independent DuckDB connection** — not
@@ -407,7 +446,8 @@ that finds no work counts), a tier that did not start, a table backed off after 
 starved table, a table skipped because not even two of its files fit in one group within the
 catalog's timeout and the instance's memory, a table whose oldest file with something to merge has waited over 30 minutes, a band
 whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
-RSS above 75% of the container's memory limit. The status is always `UP` while the process is
+RSS above 75% of the container's memory limit, and spill above 80% of its budget or free space
+under the spill directory below 10% of it. The status is always `UP` while the process is
 running; watch `alerts` (or the metrics below) instead.
 
 When alerting on metrics, `last_success_age` alone is not enough: a success is a table call that
