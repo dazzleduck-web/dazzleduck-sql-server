@@ -154,6 +154,8 @@ public class HealthServer implements Closeable {
                 + ", \"backoffs\": " + stringArray(t.backoffs())
                 + ", \"starved\": " + stringArray(t.starved())
                 + ", \"stale\": " + stringArray(t.stale())
+                + ", \"oversized\": " + stringArray(t.oversized())
+                + ", \"reduced\": " + stringArray(t.reduced())
                 + ", \"idleTxnTimeoutMs\": " + t.idleTxnTimeoutMs()
                 + ", \"threads\": " + t.threads()
                 + ", \"duckdbMemoryBytes\": " + t.duckdbMemoryBytes()

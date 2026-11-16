@@ -308,6 +308,11 @@ class TierLoopTest {
         assertEquals(16_000_000L, compactor.calls.get(1).target(), "a sorted group fits at the tier's own target");
         assertEquals(8_000_000L, compactor.calls.get(1).maxFileSize(), "the band's own maximum");
         assertEquals(List.of(), loop.status().oversized());
+        assertEquals(List.of("main.unsorted"), loop.status().reduced(), "reported in /health");
+
+        compactor.work = List.of(table("main.unsorted", 30, 30L * 2_000_000, T0, 0, false)); // now 2 MB files
+        loop.runPass();
+        assertEquals(List.of(), loop.status().reduced(), "a full group fits again");
     }
 
     @Test

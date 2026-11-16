@@ -27,7 +27,7 @@ class HealthServerTest {
     // the recorded run and attaches its telemetry.
     private static CompactionStats statsWithTier() {
         var loop = new CompactionStats.TierStatus("RUNNING", null, Instant.now(), 7, 2, 1, List.of("main.bad"),
-                List.of(), List.of(), List.of(), 600_000, 4, 1024);
+                List.of(), List.of(), List.of("main.huge"), List.of("main.tiny"), 600_000, 4, 1024);
         var ds = new CompactionStats.DatabaseStats(
                 Map.of("tier", 1L), 0, 5, 2, Instant.now(), Map.of("tier", loop), Map.of("tier", 3L), 3, 42);
         return new CompactionStats(Instant.now(), Map.of("db", ds), List.of("db tier 'tier' backs off \"main.bad\""));
@@ -61,6 +61,8 @@ class HealthServerTest {
         assertTrue(health.contains("\"carryOver\": 1"));
         assertTrue(health.contains("\"backoffs\": [\"main.bad\"]"));
         assertTrue(health.contains("\"duckdbMemoryBytes\": 1024"));
+        assertTrue(health.contains("\"oversized\": [\"main.huge\"]"));
+        assertTrue(health.contains("\"reduced\": [\"main.tiny\"]"), "tables merged with a lowered target");
         assertTrue(health.contains("\"unexpiredSnapshots\": 42"));
         assertTrue(health.contains("\"alerts\": [\"db tier 'tier' backs off \\\"main.bad\\\"\"]"),
                 "alerts are listed, with quotes escaped: " + health);

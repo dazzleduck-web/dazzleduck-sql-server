@@ -110,6 +110,7 @@ final class TierLoop {
     private List<String> starved = List.of();
     private List<String> stale = List.of();
     private List<String> oversized = List.of();
+    private List<String> reduced = List.of();
     private TierCompactor.Readiness readiness;
     private Instant lastCallEnded;
     private long passes;
@@ -144,7 +145,7 @@ final class TierLoop {
         this.runLog = runLog;
         this.clock = clock;
         this.status = new CompactionStats.TierStatus("STARTING", null, null, 0, 0, 0, List.of(), List.of(), List.of(),
-                List.of(), -1, 0, -1);
+                List.of(), List.of(), -1, 0, -1);
     }
 
     CompactionTier tier() {
@@ -539,6 +540,7 @@ final class TierLoop {
         List<String> starvedNow = new ArrayList<>();
         List<String> staleNow = new ArrayList<>();
         List<String> oversizedNow = new ArrayList<>();
+        List<String> reducedNow = new ArrayList<>();
         var it = tables.entrySet().iterator();
         while (it.hasNext()) {
             var entry = it.next();
@@ -559,11 +561,14 @@ final class TierLoop {
                 }
                 if (health.oversized) {
                     oversizedNow.add(name);
+                } else if (health.reducedTarget) {
+                    reducedNow.add(name);
                 }
                 state.updateTable(database, tier.name(), name, work.filesWaiting(), Math.max(0, age.toSeconds()),
                         health.starved, backedOff);
             } else {
                 health.starved = false;
+                health.reducedTarget = false;
                 state.updateTable(database, tier.name(), name, 0, 0, false, backedOff);
                 if (!backedOff) {
                     it.remove();
@@ -574,12 +579,13 @@ final class TierLoop {
         starved = List.copyOf(starvedNow);
         stale = List.copyOf(staleNow);
         oversized = List.copyOf(oversizedNow);
+        reduced = List.copyOf(reducedNow);
     }
 
     private void publish(String loopState, String refused) {
         long memory = readiness != null && !readiness.isRefused() ? compactor.memoryUsageBytes(database, tier) : -1;
         status = new CompactionStats.TierStatus(loopState, refused, state.getLastPass(database, tier.name()), passes,
-                queue, carryOver.size(), backoffs, starved, stale, oversized,
+                queue, carryOver.size(), backoffs, starved, stale, oversized, reduced,
                 readiness != null ? readiness.idleTxnTimeoutMs() : -1,
                 readiness != null ? readiness.threads() : 0, memory);
     }

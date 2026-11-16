@@ -386,7 +386,8 @@ stats: one nested object per configured tier (`totalCompactions`, `currentFiles`
 `totalFilesCompacted`, `totalFilesRewritten`, `lastSuccessTime`, `currentTotalFiles`,
 `unexpiredSnapshots`). A tier's `loop` shows its `state` (`STARTING`, `RUNNING`, `REFUSED` with the
 reason, `STOPPED`), its last pass, queue, carry-over, back-offs, starved and stale tables, the
-catalog timeout it sizes calls by, its threads and `duckdb_memory()`.
+tables it skips as `oversized` and those it merges with a lowered target (`reduced`), the catalog
+timeout it sizes calls by, its threads and `duckdb_memory()`.
 
 `alerts` lists the conditions that hold now: a tier with no completed pass in 15 minutes (a pass
 that finds no work counts), a tier that did not start, a table backed off after 3 failures, a
