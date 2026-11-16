@@ -186,6 +186,17 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
             queueCache.evict(id);
             return true;
         });
+        applyMaxDelays();
+    }
+
+    /**
+     * Applies each running queue's {@code max_delay_ms} as the mappings now read. Called after a
+     * reload, so a changed delay reaches a queue at once rather than with its next batch: a batch
+     * already waiting under a long delay is otherwise held for all of it when no further batch
+     * arrives. Each cached queue's ID is resolved as a request's is, path-suffix fallback included.
+     */
+    private void applyMaxDelays() {
+        queueCache.forEach((queueId, queue) -> queue.setMaxDelayOverride(getMaxDelay(queueId)));
     }
 
     private static boolean sameTransformation(QueueIdToTableMapping a, QueueIdToTableMapping b) {
@@ -345,8 +356,8 @@ public class DuckLakeIngestionHandler implements IngestionHandler {
         // Created exactly once per ID; a gone path evicts and closes the cached queue.
         ParquetIngestionQueue queue = queueCache.getOrCreate(queueId, path, creator, listener);
         if (queue != null) {
-            // The queue's own max_delay_ms, or back to the global one: a registry change applies to
-            // the running queue on its next batch, with nothing recreated or dropped.
+            // The queue's own max_delay_ms, or back to the global one. A reload also applies it at
+            // once (see applyMaxDelays); this covers a queue just created.
             queue.setMaxDelayOverride(getMaxDelay(queueId));
         }
         return queue;

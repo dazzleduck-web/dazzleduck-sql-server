@@ -55,8 +55,9 @@ public interface IngestionHandler {
     /**
      * The longest a batch of {@code queueId} waits before it is written, when the queue sets its own;
      * {@code null} to use the global {@code ingestion.max_delay_ms} the queue was built with. Applied
-     * to the running queue on every {@link #getOrCreateQueue}, so a change in a dynamic registry takes
-     * effect without recreating it (see {@link BulkIngestQueue#setMaxDelayOverride}).
+     * to the running queue on every {@link #getOrCreateQueue} and, by a handler that reloads its
+     * mappings, on every reload, so a change in a dynamic registry takes effect without recreating
+     * the queue (see {@link BulkIngestQueue#setMaxDelayOverride}).
      */
     default java.time.Duration getMaxDelay(String queueId) { return null; }
 

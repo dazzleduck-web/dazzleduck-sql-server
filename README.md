@@ -558,9 +558,9 @@ Every queue flushes a bucket once it reaches `ingestion.min_bucket_size` or has 
 uses the global value; a value that is not positive is logged and ignored). A latency-sensitive
 queue can flush every few hundred milliseconds while a bulk queue waits longer for larger files.
 
-The value is applied to the running queue each time a batch arrives, so a change to a registry row
-takes effect without recreating the queue or dropping what it holds. A shorter delay brings the
-pending flush forward; a longer one applies from the next flush check. A partitioned queue applies
+A change to a registry row is applied to the running queue on the reload that reads it, without
+recreating the queue or dropping what it holds, so a batch already waiting under the old delay is
+flushed on the new one. A shorter delay brings the pending flush forward; a longer one applies from the next flush check. A partitioned queue applies
 it to every partition. Each queue's current delay is in its stats and in the "Max delay ms" column
 of the ingestion dashboard. `min_bucket_size` is not per queue.
 

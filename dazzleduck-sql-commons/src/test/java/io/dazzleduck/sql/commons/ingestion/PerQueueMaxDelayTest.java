@@ -260,6 +260,41 @@ class PerQueueMaxDelayTest {
     }
 
     @Test
+    void aReloadAppliesTheDelayToAnIdleQueueWithoutWaitingForABatch() throws Exception {
+        // A batch waiting under a long delay must not wait all of it when the registry shortens the
+        // delay and no further batch arrives: the reload itself applies the new value.
+        createCatalog();
+        String dbPath = tempDir.resolve("idle.db").toString();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        try (DynamicQueueRepository repo = new DynamicQueueRepository(dbPath)) {
+            repo.init();
+            writeToDb(dbPath, "INSERT INTO " + QUEUES + " (ingestion_queue, catalog, schema_name, table_name, max_delay_ms)"
+                    + " VALUES ('q', '" + CATALOG + "', 'main', 'events', 60000)");
+            writeToDb(dbPath, "UPDATE " + DynamicQueueRepository.ATTACHMENT + ".schema_version SET version = version + 1");
+            Connection readConn = repo.openReadOnlyConnection();
+            var handler = new DynamicIngestionHandler(dbPath, readConn, DynamicQueueRepository.loadAll(readConn),
+                    Duration.ofMillis(50));
+            try {
+                ParquetIngestionQueue queue = handler.getOrCreateQueue("q", creator(handler, scheduler,
+                        Duration.ofSeconds(10)), NO_EVENTS);
+                assertEquals(Duration.ofSeconds(60), queue.getMaxDelay());
+
+                writeToDb(dbPath, "UPDATE " + QUEUES + " SET max_delay_ms = 200 WHERE ingestion_queue = 'q'");
+                writeToDb(dbPath, "UPDATE " + DynamicQueueRepository.ATTACHMENT + ".schema_version SET version = version + 1");
+                long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+                while (!Duration.ofMillis(200).equals(queue.getMaxDelay()) && System.nanoTime() < deadline) {
+                    Thread.sleep(20); // no getOrCreateQueue, no batch: only the reload can change it
+                }
+                assertEquals(Duration.ofMillis(200), queue.getMaxDelay());
+            } finally {
+                handler.closeQueues();
+            }
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
     void aRegistryChangeAppliesToTheRunningQueueWithoutRecreatingIt() throws Exception {
         createCatalog();
         String dbPath = tempDir.resolve("live.db").toString();

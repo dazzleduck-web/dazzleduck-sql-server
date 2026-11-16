@@ -246,7 +246,7 @@ public class DynamicQueueRepository implements AutoCloseable {
      * {@code input_schema}, the latter used only by {@code manageTables} to derive the table columns);
      * the {@code partition_by} and {@code min_bucket_size} columns are reserved for future use and
      * not read here. {@code max_delay_ms}, when set, overrides the global {@code ingestion.max_delay_ms}
-     * for the queue, and a change applies to its running queue on its next batch. The
+     * for the queue, and a change applies to its running queue on the reload that reads it. The
      * {@code num_partitions}/{@code partition_expression} columns split a queue into hash-routed
      * sub-queues (see {@link PartitionedIngestionQueue}). The {@code variables_*} columns name a
      * key/value relation holding the queue's session variables (see {@link IngestionVariables}).
