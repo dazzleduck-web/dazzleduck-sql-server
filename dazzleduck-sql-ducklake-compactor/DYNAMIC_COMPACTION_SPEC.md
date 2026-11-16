@@ -19,7 +19,7 @@ Minor compaction must never get stuck: every unit of work should be small, bound
 
 The unit of work is one table call: one `ducklake_merge_adjacent_files` call on one table, in one transaction, with one commit. Two limits bound every call, and the compactor never breaks either of them:
 
-1. **`ducklake_target_file_size`** is set with `SET SESSION` on the connection before every call, to the tier's target. It bounds each group, so it bounds the call's peak memory and each output file. The session setting overrides table and catalog options, so no table can fall back to DuckLake's 512 MB default. The compactor refuses to start a tier without a target, and refuses a call if the setting is not in place. The setting needs a recent DuckLake build (the DuckLake extension for DuckDB 1.5.2 does not have it), so a tier whose `SET` fails at startup does not start.
+1. **`ducklake_target_file_size`** is set with `SET SESSION` on the connection before every call, to the tier's target. It bounds each group, so it bounds the call's peak memory and each output file. The session setting overrides table and catalog options, so no table can fall back to DuckLake's 512 MB default. The compactor refuses to start a tier without a target, and refuses a call if the setting is not in place. The setting needs DuckDB 1.5.4 or later (DuckLake commit `961c9799`; verified on 1.5.6.0, which this repo ships, and on 2.0.0.1), so a tier whose `SET` fails at startup does not start.
 2. **Groups per table per call** (the tier's static cap) is the most `max_compacted_files` a call is ever given. It bounds how many groups one call may merge. Every rule below can only lower the cap for a call, never raise it.
 
 Together they bound a call's input: at most static cap × target bytes, one group in memory at a time. The rest of this spec sizes calls inside those limits and schedules them.
@@ -42,7 +42,7 @@ These caps keep each call at about 1 GB of input or less (minor 12 × 16 MB, maj
 
 **At most one leftover file per band.** Every in-band file is below the target, so a group's second file is always added: any two files in the same band, partition and schema version merge (7.9 + 7.9 MB → 15.8 MB). Once caught up, each partition holds at most one file per band per schema version, plus final files. This assumes no delete files: DuckLake skips files that carry them, so a workload with row-level deletes keeps more leftovers until they are rewritten.
 
-**Minor admission threshold.** Because any two files merge, a slow table would merge one new tiny file into its leftover on almost every pass, rewriting the leftover and committing a snapshot every few seconds until it reaches 8 MB. So minor admits a table when one of its groups has at least `MINOR_MIN_FILES` (4) eligible files, or the second-oldest file in one of its groups reaches `MINOR_MAX_WAIT` (5 min). The oldest file in a group is usually the leftover from the last merge: timing it would admit the table as soon as one new file arrived and rewrite the leftover every pass. Timed on the second-oldest file, a new small file waits about 5 min at most once another file joins it. Both stay low because every small file waiting is one more file each query on that partition has to open. Major and mega keep the 2-file trigger: their inputs arrive slowly and are already large.
+**Minor admission threshold.** Because any two files merge, a slow table would merge one new tiny file into its leftover on almost every pass, rewriting the leftover and committing a snapshot every few seconds until it reaches 8 MB. So minor admits a table when one of its groups has at least `MINOR_MIN_FILES` (4) eligible files, or the second-oldest file in one of its groups reaches `MINOR_MAX_WAIT` (5 min). The oldest file in a group is usually the leftover from the last merge: timing it would admit the table as soon as one new file arrived and rewrite the leftover every pass. Timed on the second-oldest file, a new small file waits about 5 min at most once another file joins it. Both stay low because every small file waiting is one more file each query on that partition has to open. Major and mega keep the 2-file trigger: their inputs arrive slowly and are already large. Admission is per table, not per partition: DuckLake has no partition filter, so once a table is admitted, every partition holding a leftover plus one new file is merged too. Tables with many partitions still rewrite some leftovers early, a known limitation until DuckLake gains a partition filter.
 
 ## Call sizing
 
@@ -67,15 +67,18 @@ call_time ≈ groups × (files_per_group × sec_per_file + bytes_per_group ÷ th
 ```text
 files_per_group = min(ceil(target ÷ average_file_size), files_waiting)
 file_cap        = max(1, floor(MAX_FILES_PER_CALL ÷ files_per_group))
-timeout_cap     = max(1, floor(0.8 × IDLE_TXN_TIMEOUT ÷ (files_per_group × sec_per_file)))
-cap             = min(static_cap, timeout_cap, max(file_cap, busy_partitions + 1))
+time_limit      = min(CALL_TIME_LIMIT, 0.8 × IDLE_TXN_TIMEOUT)   -- CALL_TIME_LIMIT alone when there is no timeout
+time_cap        = max(1, floor(time_limit ÷ (files_per_group × sec_per_file)))
+cap             = min(static_cap, time_cap, max(file_cap, busy_partitions + 1))
 ```
 
 - In steady state groups are a few files and the cap is the static cap (12 for minor).
 - During a minor backlog of 5 KB files the file cap is 1 or 2, so a call merges one or two full groups and commits in minutes.
 - The cap is never above the static cap, so `ducklake_target_file_size` and groups per call always hold.
 
-**Busy partitions and starvation.** DuckLake v1.5 walks partitions in hash-map order, which ignores file age and changes only as partitions come and go, and a busy partition always has work, so a cap at or below the number of busy partitions can give every slot to the same partitions on every call: the table's other partitions never compact. So, within the static cap, the cap is at least busy partitions + 1, even when that goes past the file limit, but never past the timeout cap: what fits in 80% of the catalog's idle-in-transaction timeout at the table's per-file rate. When busy partitions + 1 is above the static cap or the timeout cap, those still win and the table raises a starvation alert. With a 30-minute timeout and full groups of tiny files, the timeout cap is 10 groups for a sorted table (about 24 minutes at 144 s each) and 5 for an unsorted one at the guessed 0.09 s per file, so it, not the static cap of 12, bounds the worst case. The real fix is upstream: a partition filter or oldest-first groups in DuckLake.
+**Busy partitions and starvation.** DuckLake v1.5 walks partitions in hash-map order, which ignores file age and changes only as partitions come and go, and a busy partition always has work, so a cap at or below the number of busy partitions can give every slot to the same partitions on every call: the table's other partitions never compact. So, within the static cap, the cap is at least busy partitions + 1, even when that goes past the file limit, but never past the time cap: what fits in `CALL_TIME_LIMIT` (10 min), or in 80% of the catalog's idle-in-transaction timeout if that is shorter, at the table's per-file rate. When busy partitions + 1 is above the static cap or the time cap, those still win and the table raises a starvation alert. With full groups of tiny files the time cap is 4 groups for a sorted table (about 10 minutes at 144 s each) and 2 for an unsorted one at the guessed 0.09 s per file, so no call is sized past 10 minutes and a tier's loop is never held longer than that.
+
+The floor is only a partial guard. It assumes one group per busy partition, but during a backlog a busy partition yields several full groups and can still take every slot. The safety net is the alert on a table's oldest small file older than 30 min; the real fix is upstream: a partition filter or oldest-first groups in DuckLake.
 
 **Memory.** A call's peak memory is one group: files per group × a per-file cost. That cost is 0.12 MiB for a table with a sort key and 0.85 MiB without one (measured, 1,000 small files), so a full minor group of tiny files needs about 385 MiB sorted but about 2.7 GiB unsorted. DuckLake cannot limit files per group, so unsorted tables with tiny files need a sort key or a larger `memory_limit`; the discovery query flags tables without a sort key.
 
@@ -104,7 +107,7 @@ Phase 1 replaces the catalog-wide call with per-table calls run one at a time pe
 1. **Refresh.** One discovery query lists the tables with work (below).
 2. **Rank** by outstanding files, most first; ties go to the older oldest file. Tables carried over from the previous pass go first.
 3. **Call** each table in turn: take the table's lease, `SET SESSION ducklake_target_file_size`, compute the cap (Call sizing), run `CALL ducklake_merge_adjacent_files(catalog, table, schema := …, min_file_size := …, max_file_size := …, max_compacted_files := cap)`, commit, release the lease, and record the outcome. A table whose lease is held elsewhere is skipped this pass.
-4. **End the pass** when every listed table has been called or `PASS_TIME_LIMIT` (2 min) has passed. A running call finishes; tables not yet called carry over. If the refresh found no work, sleep up to 10 s, since writers may commit new files every few seconds.
+4. **End the pass** when every listed table has been called or `PASS_TIME_LIMIT` (2 min) has passed. A running call finishes; tables not yet called carry over. If the refresh found no work, sleep `idle_sleep_max` (10 s) before the next refresh; otherwise the next pass starts at once. A table below the minor admission threshold becomes due within `MINOR_MAX_WAIT`, so a fixed 10 s sleep is precise enough.
 
 The pass limit keeps one slow table from holding up the rest: three tables with several minutes of work each would otherwise make small busy tables wait for all of them.
 
@@ -120,14 +123,14 @@ The pass limit keeps one slow table from holding up the rest: three tables with 
 
 **Catalog options load once.** `set_option` changes (`target_file_size`, `auto_compact`) are read only at attach, so they need a restart. The session target does not depend on them.
 
-**Telemetry and alerts.** Each call records table, tier, cap, duration, files in and out (from the merge's result row, which has no byte counts), bytes waiting before the call (from the discovery query) and the outcome. `/health` shows each tier's pass, queue, carry-over and back-offs, and `duckdb_memory()`. Alerts: no completed pass for a tier in 15 min (a pass that finds no work counts, so an idle tier does not alert); 3 consecutive failures for a table; starvation for a table; small-file count rising for 30 min; a table's oldest small file older than 30 min; unexpired snapshots growing across housekeeping runs; RSS above 75% of the container limit.
+**Telemetry and alerts.** Each call records table, tier, cap, duration, files in and out (from the merge's result row, which has no byte counts), bytes waiting before the call (from the discovery query) and the outcome. `/health` shows each tier's pass, queue, carry-over and back-offs, and `duckdb_memory()`. Alerts: no completed pass for a tier in 15 min, which is above the longest pass, `PASS_TIME_LIMIT` plus one call sized to at most `CALL_TIME_LIMIT` (a pass that finds no work counts, so an idle tier does not alert); 3 consecutive failures for a table; starvation for a table; small-file count rising for 30 min; a table's oldest small file older than 30 min; unexpired snapshots growing across housekeeping runs; RSS above 75% of the container limit.
 
 **Phase 1 checklist**
 
 - [ ] Tier config: `target_file_size` (required), static cap, `cpu_share`, `pass_time_limit`, `idle_sleep_max`, minor's `min_files` and `max_wait`, `max_files_per_call`
-- [ ] Startup checks: bands do not overlap, every tier has a target at least its band max, CPU shares add up to at most 1, and the catalog's idle-in-transaction timeout is read and fits at least one full group per tier
+- [ ] Startup checks: bands do not overlap, every tier has a target at least its band max, CPU shares add up to at most 1, and the catalog's idle-in-transaction timeout is read and, when set, fits at least one full group per tier
 - [ ] Threads per tier from `cpu_share` and `Runtime.availableProcessors()`; `MALLOC_ARENA_MAX=2`
-- [ ] Per-table call with `SET SESSION ducklake_target_file_size` before every call, and the cap from Call sizing (static, file and timeout caps with the busy-partition floor)
+- [ ] Per-table call with `SET SESSION ducklake_target_file_size` before every call, and the cap from Call sizing (static, file and time caps with the busy-partition floor)
 - [ ] Discovery query with the minor admission threshold, busy partitions and sort-key flag
 - [ ] Loop per tier: refresh → rank → call in turn, pass time limit with carry-over, idle sleep
 - [ ] Table leases shared by merges, retention and the delete-file rewrite
@@ -141,7 +144,7 @@ Today each enabled tier runs on a fixed-rate timer per database (`CompactionServ
 | Item | Today | Change |
 | --- | --- | --- |
 | Configuration | Per-tier `connection_settings` (including `threads`), `max_compacted_files`, `frequency` | Add a required `target_file_size`, `cpu_share`, `pass_time_limit`, `idle_sleep_max`, `max_files_per_call`, and minor's `min_files` and `max_wait`; `max_compacted_files` becomes the static cap; set `threads` from `cpu_share`; `frequency` stops being a timer |
-| Startup checks | Band overlap is checked in `CompactionConfig` | Also require `target_file_size` of at least `max_file_size` on every tier, CPU shares adding up to at most 1, and the catalog's idle-in-transaction timeout read at startup (replacing the 120 s fallback in `ResourceSampler.idleInTransactionTimeoutMs`) |
+| Startup checks | Band overlap is checked in `CompactionConfig` | Also require `target_file_size` of at least `max_file_size` on every tier, CPU shares adding up to at most 1, and the catalog's idle-in-transaction timeout read at startup (replacing the 120 s fallback in `ResourceSampler.idleInTransactionTimeoutMs`; 0 or no such setting means no timeout limit) |
 | Per-table call | Catalog-wide call | `compact(database, tier, schema, table, cap)`: `SET SESSION ducklake_target_file_size`, then `CALL ducklake_merge_adjacent_files(db, table, schema := …, min_file_size := …, max_file_size := …, max_compacted_files := cap)`; DuckLake still honors `auto_compact = false` on a per-table call |
 | Discovery query | `queryActiveFiles`: one band-wide COUNT and SUM, nothing per table | New query on the catalog metadata |
 | Loop | Fixed-rate timer per (database, tier) | One loop thread per (database, tier) on the existing connection |
@@ -165,15 +168,16 @@ Phase 2 uses more cores through concurrent calls on different tables. The two li
 
 ## Phase 3 (optional): learned time-based caps
 
-If the file limit proves too blunt, replace it with a time-based cap, still never above the static cap: `cap = min(static_cap, max(floor(CALL_TIME_LIMIT ÷ group_time), busy_partitions + 1))`, with `group_time` learned per table and adjusted on time failures. Two starting values for that model are guesses: `sec_per_file` for unsorted tables (0.09 s, 2× sorted) and throughput for major and mega (50 MB/s).
+If the fixed per-file rates prove too blunt, learn `group_time` per table, adjusted on time failures, and use it in the time cap in place of the constant `sec_per_file` and of `MAX_FILES_PER_CALL`. The cap is still never above the static cap. Two starting values for that model are guesses: `sec_per_file` for unsorted tables (0.09 s, 2× sorted) and throughput for major and mega (50 MB/s).
 
 ## Constants
 
 | Constant | Value | Source |
 | --- | --- | --- |
-| Static caps (minor, major, mega) | 12, 16, 5 | About 1 GB of input per call at most; the timeout cap may lower them further |
-| sec_per_file, sorted / unsorted | 0.045 / 0.09 s | Sorted measured (~22 files/s, 4 threads); unsorted a guess at 2× sorted. Phase 1 uses these in the timeout cap; Phase 2 learns them per table |
-| IDLE_TXN_TIMEOUT | read at startup | The catalog database's idle-in-transaction timeout. Today's code falls back to 120 s when a tier does not set it, far below a backlog call, so Phase 1 reads the real value and refuses a tier whose single full group would not fit in it |
+| Static caps (minor, major, mega) | 12, 16, 5 | About 1 GB of input per call at most; the time cap may lower them further |
+| sec_per_file, sorted / unsorted | 0.045 / 0.09 s | Sorted measured (~22 files/s, 4 threads); unsorted a guess at 2× sorted. Phase 1 uses these in the time cap; Phase 2 learns them per table |
+| IDLE_TXN_TIMEOUT | read at startup | The catalog database's idle-in-transaction timeout. Today's code falls back to 120 s when a tier does not set it, far below a backlog call, so Phase 1 reads the real value and refuses a tier whose single full group would not fit in it. A value of 0 (Postgres's default, disabled) or a catalog without the setting (SQLite, a DuckDB file) means no timeout limit: `CALL_TIME_LIMIT` and the static and file caps still apply |
+| CALL_TIME_LIMIT | 10 min | The longest a call is sized to run, so one call never holds a tier's loop longer; below the 15-min pass alert |
 | MAX_FILES_PER_CALL | 6,000 | About 4.5 min at the measured sorted rate (0.045 s per file, 4 threads); about 9 min if unsorted tables take twice as long (a guess) |
 | MINOR_MIN_FILES | 4 | Proposed; each waiting small file is one more file a query opens |
 | MINOR_MAX_WAIT | 5 min | Proposed; the longest a small file waits before it is merged |
