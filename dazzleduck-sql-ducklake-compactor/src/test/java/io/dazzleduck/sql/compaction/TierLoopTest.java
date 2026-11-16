@@ -343,6 +343,23 @@ class TierLoopTest {
     }
 
     @Test
+    void aTimeoutAtACapOfOneHalvesTheFilesPerGroup() {
+        // One group of 3,200 tiny files already outruns the timeout: only a smaller group can commit
+        compactor.work = List.of(table("main.tiny", 98_000, 98_000L * 5_000, T0, 0, true));
+        compactor.failing.put("main.tiny", "Failed to execute query \"ROLLBACK\": server closed the connection");
+        loop.runPass();
+        loop.runPass();
+        compactor.failing.clear();
+        loop.runPass();
+        // 1 group of 3,200 is killed: groups of 1,600, of which 3 fit in 6,000 files. 3 groups are
+        // killed: 1 group of 1,600, which commits.
+        assertEquals(List.of(16_000_000L, 1_600L * 5_000, 1_600L * 5_000),
+                compactor.calls.stream().map(FakeTierCompactor.Call::target).toList());
+        assertEquals(List.of(1, 3, 1), compactor.calls.stream().map(FakeTierCompactor.Call::cap).toList());
+        assertEquals(List.of(), loop.status().backoffs(), "it commits before a third failure");
+    }
+
+    @Test
     void aConflictDoesNotChangeTheCap() {
         compactor.work = List.of(table("main.busy", 500, 500L * 1_000_000, T0, 0, true));
         compactor.failing.put("main.busy", "TransactionContext Error: Transaction conflict");

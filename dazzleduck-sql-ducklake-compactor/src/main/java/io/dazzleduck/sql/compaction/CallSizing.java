@@ -98,12 +98,15 @@ public final class CallSizing {
      * files that fit times the average file size. Its outputs are smaller and stay in the band, to be
      * merged again later, but the table makes progress instead of being killed call after call.
      *
+     * @param groupFilesLimit the most files per group this table has shown it can commit (see
+     *                        {@code TierLoop}), or {@link Long#MAX_VALUE}
      * @return null when not even two files fit in a group: the table cannot be merged at all
      */
-    public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
+    public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes,
+                            long groupFilesLimit) {
         long average = Math.max(1, work.averageFileSize());
         long fullGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
-        long maxFiles = maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes);
+        long maxFiles = Math.min(maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes), groupFilesLimit);
         if (fullGroup <= maxFiles) {
             return new Plan(of(tier, work, idleTxnTimeoutMs), tier.targetFileSize(), false);
         }
@@ -114,6 +117,11 @@ public final class CallSizing {
         long target = maxFiles * average;
         CompactionTier lowered = tier.withTargetFileSize(target);
         return new Plan(of(lowered, work, idleTxnTimeoutMs), target, true);
+    }
+
+    /** {@link #plan(CompactionTier, TableWork, long, long, long)} with no limit learnt for the table. */
+    public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
+        return plan(tier, work, idleTxnTimeoutMs, memoryLimitBytes, Long.MAX_VALUE);
     }
 
     public static double secPerFile(boolean sorted) {

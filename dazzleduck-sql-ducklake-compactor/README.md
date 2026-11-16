@@ -46,7 +46,7 @@ above the tier's static cap (see [Call sizing](#call-sizing)).
 A failure costs one table's call: the table is retried on the next pass, and after 3 failures in a
 row it backs off for 15 minutes. A call the catalog's idle-in-transaction timeout killed is retried
 with half the cap, down to 1; each commit doubles it again, but never back to a cap the timeout
-killed. A table runs at most one job at a time across tiers, data
+killed. A killed call of a single group halves the table's files per group instead. A table runs at most one job at a time across tiers, data
 retention and the delete-file rewrite (a **table lease**): a loop skips a table another job holds,
 and retention and the rewrite wait for it.
 

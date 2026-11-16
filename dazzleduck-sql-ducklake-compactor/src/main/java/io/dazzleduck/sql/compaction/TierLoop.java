@@ -76,6 +76,12 @@ final class TierLoop {
          */
         int capLimit = Integer.MAX_VALUE;
         int capCeiling = Integer.MAX_VALUE;
+        /**
+         * Halved when the timeout kills a call of a single group: then one group is too slow for the
+         * catalog's timeout at this table's real rate, and only a lower target can help. Lasts until the
+         * table leaves the discovery list.
+         */
+        long groupFilesLimit = Long.MAX_VALUE;
         TableWork lastWork;
     }
 
@@ -246,7 +252,9 @@ final class TierLoop {
             }
             TableWork work = order.get(i);
             String key = work.leaseKey(database);
-            CallSizing.Plan plan = CallSizing.plan(tier, work, readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes());
+            TableHealth known = tables.get(work.name());
+            CallSizing.Plan plan = CallSizing.plan(tier, work, readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes(),
+                    known != null ? known.groupFilesLimit : Long.MAX_VALUE);
             if (plan == null) {
                 skipOversized(work);
                 continue;
@@ -408,10 +416,17 @@ final class TierLoop {
             if (failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT) {
                 // The rates behind the sizing were too fast for this table: half as many groups next time,
                 // and never again as many as the timeout killed.
-                health.capCeiling = Math.min(health.capCeiling, cap.cap());
-                health.capLimit = Math.max(1, cap.cap() / 2);
-                logger.warn("Tier '{}' halves the cap of {}.{} to {} after the catalog's timeout killed a call of {}",
-                        tier.name(), database, work.name(), health.capLimit, cap.cap());
+                if (cap.cap() > 1) {
+                    health.capCeiling = Math.min(health.capCeiling, cap.cap());
+                    health.capLimit = Math.max(1, cap.cap() / 2);
+                    logger.warn("Tier '{}' halves the cap of {}.{} to {} after the catalog's timeout killed a call of {}",
+                            tier.name(), database, work.name(), health.capLimit, cap.cap());
+                } else if (cap.filesPerGroup() > 2) {
+                    // One group was too slow: fewer files per group, through a lower target
+                    health.groupFilesLimit = Math.max(2, cap.filesPerGroup() / 2);
+                    logger.warn("Tier '{}' halves the files per group of {}.{} to {} after the catalog's timeout killed"
+                            + " a call of one group", tier.name(), database, work.name(), health.groupFilesLimit);
+                }
             }
             String conflictNote = failureClass == CompactionRun.FailureClass.TRANSACTION_CONFLICT
                     ? " (the compactor's own jobs hold the table's lease, so the other side is another writer)" : "";
