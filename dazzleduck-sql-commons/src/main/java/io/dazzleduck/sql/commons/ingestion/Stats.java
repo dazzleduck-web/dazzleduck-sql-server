@@ -18,6 +18,8 @@ import java.util.List;
  *                               (partitioned queues only)
  * @param pendingBytes           bytes accepted but not yet written (current)
  * @param maxPendingWrite        backpressure limit in bytes (for a "% full" reading)
+ * @param maxDelayMs             the queue's current flush delay: its own {@code max_delay_ms}, or the
+ *                               global one
  * @param dataPhaseMillis        cumulative ms in the COPY-to-Parquet phase
  * @param postIngestMillis       cumulative ms in the post-ingestion (e.g. catalog commit) phase
  * @param lastWriteEpochMs       instant the most recent bucket finished writing (0 = never)
@@ -50,6 +52,7 @@ public record Stats(String identifier,
                     long rowsWritten,
                     long pendingBytes,
                     long maxPendingWrite,
+                    long maxDelayMs,
                     long dataPhaseMillis,
                     long postIngestMillis,
                     long rejected429,
@@ -79,7 +82,7 @@ public record Stats(String identifier,
     public Stats withIdentifier(String newIdentifier) {
         return new Stats(newIdentifier, totalWriteBytes, totalWriteBatches, totalWriteBuckets,
                 timeSpentWriting, pendingBatches, pendingBuckets, failedWriteBytes, failedWriteBatches,
-                failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite,
+                failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite, maxDelayMs,
                 dataPhaseMillis, postIngestMillis, rejected429, rejectedOutOfSequence, rejectedMultiPartition,
                 lastWriteEpochMs, lastReceiveEpochMs, lastErrorEpochMs, lastError,
                 rowsWrittenPerMinute, batchesReceivedPerMinute, catalogRetries, catalogRetryFailures,
@@ -94,7 +97,7 @@ public record Stats(String identifier,
     public static final class Builder {
         private final String identifier;
         private long totalWriteBytes, totalWriteBatches, totalWriteBuckets, timeSpentWriting;
-        private long pendingBatches, pendingBuckets, pendingBytes, maxPendingWrite;
+        private long pendingBatches, pendingBuckets, pendingBytes, maxPendingWrite, maxDelayMs;
         private long failedWriteBytes, failedWriteBatches, failedWriteBuckets, producerIdEvictions;
         private long rowsWritten, dataPhaseMillis, postIngestMillis;
         private long rejected429, rejectedOutOfSequence, rejectedMultiPartition;
@@ -115,6 +118,7 @@ public record Stats(String identifier,
         public Builder pendingBuckets(long v)       { this.pendingBuckets = v; return this; }
         public Builder pendingBytes(long v)         { this.pendingBytes = v; return this; }
         public Builder maxPendingWrite(long v)      { this.maxPendingWrite = v; return this; }
+        public Builder maxDelayMs(long v)           { this.maxDelayMs = v; return this; }
         public Builder failedWriteBytes(long v)     { this.failedWriteBytes = v; return this; }
         public Builder failedWriteBatches(long v)   { this.failedWriteBatches = v; return this; }
         public Builder failedWriteBuckets(long v)   { this.failedWriteBuckets = v; return this; }
@@ -140,7 +144,7 @@ public record Stats(String identifier,
         public Stats build() {
             return new Stats(identifier, totalWriteBytes, totalWriteBatches, totalWriteBuckets,
                     timeSpentWriting, pendingBatches, pendingBuckets, failedWriteBytes, failedWriteBatches,
-                    failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite,
+                    failedWriteBuckets, producerIdEvictions, rowsWritten, pendingBytes, maxPendingWrite, maxDelayMs,
                     dataPhaseMillis, postIngestMillis, rejected429, rejectedOutOfSequence, rejectedMultiPartition,
                     lastWriteEpochMs, lastReceiveEpochMs, lastErrorEpochMs, lastError,
                     rowsWrittenPerMinute, batchesReceivedPerMinute, catalogRetries, catalogRetryFailures,

@@ -175,12 +175,15 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
     }
 
     // -----------------------------------------------------------------------
-    /** Applies to every partition: each is a queue of its own with its own flush loop. */
+    /**
+     * Applies to every partition: each is a queue of its own with its own flush loop. Logged once,
+     * here, not per partition.
+     */
     @Override
-    public synchronized void setMaxDelayOverride(Duration override) {
+    public void setMaxDelayOverride(Duration override) {
         super.setMaxDelayOverride(override);
         for (ParquetIngestionQueue child : children) {
-            child.setMaxDelayOverride(override);
+            child.setMaxDelayOverride(override, false);
         }
     }
 
@@ -243,7 +246,8 @@ public class PartitionedIngestionQueue extends ParquetIngestionQueue {
         }
         return agg.totalWriteBytes(bytes).totalWriteBatches(batches).totalWriteBuckets(buckets)
                 .timeSpentWriting(timeW).pendingBatches(pBatches).pendingBuckets(pBuckets)
-                .pendingBytes(pBytes).maxPendingWrite(maxPend).failedWriteBytes(fBytes)
+                .pendingBytes(pBytes).maxPendingWrite(maxPend).maxDelayMs(getMaxDelay().toMillis())
+                .failedWriteBytes(fBytes)
                 .failedWriteBatches(fBatches).failedWriteBuckets(fBuckets).producerIdEvictions(evict)
                 .rowsWritten(rows).dataPhaseMillis(dataMs).postIngestMillis(postMs)
                 .rejected429(r429).rejectedOutOfSequence(rOos).rejectedMultiPartition(rejectedMultiPartition.get())

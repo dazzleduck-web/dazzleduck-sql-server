@@ -338,6 +338,7 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
                 .pendingBuckets(getPendingBuckets())
                 .pendingBytes(pendingWrite())
                 .maxPendingWrite(maxPendingWrite)
+                .maxDelayMs(maxDelay.toMillis())
                 .failedWriteBytes(failedWriteBytes.get())
                 .failedWriteBatches(failedWriteBatches.get())
                 .failedWriteBuckets(failedWriteBuckets.get())
@@ -415,17 +416,31 @@ public abstract class BulkIngestQueue<T, R> implements BulkIngestQueueInterface<
     /**
      * Sets the queue's own delay, overriding the one it was built with, or goes back to that one when
      * {@code override} is {@code null}. Takes effect for the bucket being filled: a shorter delay
-     * brings the pending flush check forward; a longer one applies from that check on. Cheap when
-     * nothing changes, so it can be called on every request.
+     * brings the pending flush check forward; a longer one applies from that check on. When nothing
+     * changes it takes no lock, so it can be called on every request.
      */
-    public synchronized void setMaxDelayOverride(Duration override) {
+    public void setMaxDelayOverride(Duration override) {
+        setMaxDelayOverride(override, true);
+    }
+
+    /** @param logChange whether to log a change (a partitioned queue logs once, not per partition) */
+    void setMaxDelayOverride(Duration override, boolean logChange) {
         Duration target = override != null ? override : defaultMaxDelay;
         if (target.equals(maxDelay)) {
+            return; // the common case: a volatile read, no lock on the request path
+        }
+        applyMaxDelay(target, logChange);
+    }
+
+    private synchronized void applyMaxDelay(Duration target, boolean logChange) {
+        Duration previous = maxDelay;
+        if (target.equals(previous)) {
             return;
         }
-        Duration previous = maxDelay;
         maxDelay = target;
-        logger.info("Queue '{}' max delay {} -> {}", identifier, previous, target);
+        if (logChange) {
+            logger.info("Queue '{}' max delay {} -> {}", identifier, previous, target);
+        }
         if (terminating || draining || target.compareTo(previous) >= 0) {
             return;
         }

@@ -131,6 +131,8 @@ class PerQueueMaxDelayTest {
             queue.setMaxDelayOverride(Duration.ofMillis(250));
             assertEquals(Duration.ofMillis(250), queue.getMaxDelay());
             queue.children().forEach(child -> assertEquals(Duration.ofMillis(250), child.getMaxDelay()));
+            assertEquals(250, queue.getStats().maxDelayMs());
+            assertTrue(queue.getStats().partitions().stream().allMatch(p -> p.maxDelayMs() == 250));
             queue.setMaxDelayOverride(null);
             queue.children().forEach(child -> assertEquals(Duration.ofSeconds(2), child.getMaxDelay()));
         } finally {
@@ -247,7 +249,9 @@ class PerQueueMaxDelayTest {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         try {
             var create = creator(handler, scheduler, Duration.ofSeconds(10));
-            assertEquals(Duration.ofMillis(250), handler.getOrCreateQueue("fast", create, NO_EVENTS).getMaxDelay());
+            var fast = handler.getOrCreateQueue("fast", create, NO_EVENTS);
+            assertEquals(Duration.ofMillis(250), fast.getMaxDelay());
+            assertEquals(250, fast.getStats().maxDelayMs(), "the dashboard shows the queue's own delay");
             assertEquals(Duration.ofSeconds(10), handler.getOrCreateQueue("global", create, NO_EVENTS).getMaxDelay());
         } finally {
             handler.closeQueues();

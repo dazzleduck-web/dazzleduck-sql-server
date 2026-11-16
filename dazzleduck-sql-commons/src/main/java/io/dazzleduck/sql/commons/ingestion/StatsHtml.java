@@ -16,7 +16,7 @@ public final class StatsHtml {
 
     private static final String[] HEADERS = {
             "Queue", "Rows", "Bytes", "Batches", "Buckets",
-            "Pending (b/bk)", "Pending bytes (% max)", "Avg write ms/bucket", "Data ms", "Post ms",
+            "Pending (b/bk)", "Pending bytes (% max)", "Max delay ms", "Avg write ms/bucket", "Data ms", "Post ms",
             "Failed (b/bytes)", "Rej 429", "Rej out-of-seq", "Rej multi-part", "Evictions",
             "Catalog retries (ok/failed)", "Orphan files (deleted/left)",
             "Rows/min (15m)", "Arrivals/min (15m)",
@@ -99,6 +99,7 @@ public final class StatsHtml {
         cell(sb, Long.toString(s.totalWriteBuckets()), false);
         cell(sb, s.pendingBatches() + " / " + s.pendingBuckets(), false);
         cell(sb, formatBytes(s.pendingBytes()) + pctSuffix(s.pendingBytes(), s.maxPendingWrite()), false);
+        cell(sb, Long.toString(s.maxDelayMs()), false);
         cell(sb, s.totalWriteBuckets() > 0 ? Long.toString(s.timeSpentWriting() / s.totalWriteBuckets()) : "-", false);
         cell(sb, Long.toString(s.dataPhaseMillis()), false);
         cell(sb, Long.toString(s.postIngestMillis()), false);

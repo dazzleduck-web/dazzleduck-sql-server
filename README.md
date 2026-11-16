@@ -561,7 +561,8 @@ queue can flush every few hundred milliseconds while a bulk queue waits longer f
 The value is applied to the running queue each time a batch arrives, so a change to a registry row
 takes effect without recreating the queue or dropping what it holds. A shorter delay brings the
 pending flush forward; a longer one applies from the next flush check. A partitioned queue applies
-it to every partition. `min_bucket_size` is not per queue.
+it to every partition. Each queue's current delay is in its stats and in the "Max delay ms" column
+of the ingestion dashboard. `min_bucket_size` is not per queue.
 
 ### Transformation
 
