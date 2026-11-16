@@ -121,7 +121,7 @@ public final class CompactionRunLog {
      * Consumer-computed quantities over a window of calls — not stored on the record.
      * {@code rssGrowthBytesPerFile} is the process RSS the calls left behind per input file merged:
      * memory held after the commit, outside {@code memory_limit}, to calibrate the per-file costs of
-     * Call sizing against.
+     * Call sizing against. RSS is process-wide, so calls of other tiers running at the same time add to it.
      */
     public record DerivedAggregates(
             int windowSize,

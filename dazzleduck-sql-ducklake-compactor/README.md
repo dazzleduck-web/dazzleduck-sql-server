@@ -197,7 +197,8 @@ DuckDB's `memory_limit`, kept by glibc's per-thread arenas. Every DuckDB instanc
 `allocator_background_threads = true` and `allocator_flush_threshold = '64MB'`, so DuckDB's own
 allocator returns memory a merge freed instead of keeping it across calls; an instance's own
 settings can override them. Each call records RSS before and after; `rss_growth_per_file` is what a
-tier's recent calls left behind per input file merged.
+tier's recent calls left behind per input file merged. RSS is the whole process's, so tiers merging
+at the same time add to each other's figure.
 
 ### Data retention
 
