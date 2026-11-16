@@ -98,9 +98,9 @@ existing workflow. The steps are in
 
 **Bump DazzleDuck.**
 
-- `duckdb.version` to `2.0.0.x` and the three `ducklake.*` pins in
-  `dazzleduck-sql-ducklake-compactor/pom.xml` (`ducklake.extension.cache.version`
-  becomes `v2.0.0`).
+- `duckdb.version` to `2.0.0.x` and the three `ducklake.*` pins beside it in the
+  parent `pom.xml` (`ducklake.extension.cache.version` becomes `v2.0.0`). The
+  runtime, otel-collector and compactor images all bake in that release.
 - Native images: check both `jni-config.json` files, in
   `dazzleduck-sql-ducklake-compactor` and `dazzleduck-sql-otel-collector`, for JNI
   lookups added in the 2.0 driver; 1.5.6 needed one in each.
