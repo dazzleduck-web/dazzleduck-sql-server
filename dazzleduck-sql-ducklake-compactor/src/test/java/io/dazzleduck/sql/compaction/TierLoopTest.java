@@ -198,6 +198,33 @@ class TierLoopTest {
     }
 
     @Test
+    void anInternalErrorReopensTheInstance() {
+        compactor.work = List.of(work("main.a", 40, T0), work("main.b", 30, T0));
+        compactor.failing.put("main.a", "INTERNAL Error: Attempted to access index 3 within vector of size 3");
+        TierLoop.PassResult result = loop.runPass();
+        assertEquals(List.of("main.a"), compactor.calledTables(), "the rest wait for a new instance");
+        assertEquals(1, compactor.resets);
+        assertEquals(1, result.carriedOver());
+        assertTrue(TierLoop.invalidatesInstance(new RuntimeException("wrapped",
+                new RuntimeException("FATAL Error: database has been invalidated"))));
+        assertFalse(TierLoop.invalidatesInstance(new RuntimeException("Binder Error: no such column")));
+    }
+
+    @Test
+    void aFailingTableThatIsNoLongerListedIsForgotten() {
+        compactor.work = List.of(work("main.dropped", 40, T0));
+        compactor.failing.put("main.dropped", "Catalog Error: Table with name dropped does not exist");
+        loop.runPass();
+        loop.runPass();
+        compactor.work = List.of();
+        loop.runPass();
+        compactor.work = List.of(work("main.dropped", 40, T0)); // recreated under the same name
+        loop.runPass();
+        assertEquals(List.of(), loop.status().backoffs(),
+                "the failures before it left the list do not count towards a back-off");
+    }
+
+    @Test
     void aFailedRefreshResetsTheConnectionAndCountsAsAFailure() {
         compactor.discoverFailure = new IllegalStateException("IO Error: could not connect to server");
         TierLoop.PassResult result = loop.runPass();

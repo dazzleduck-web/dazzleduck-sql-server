@@ -54,7 +54,7 @@ final class TierLoop {
     private final CompactionRunLog runLog;
     private final Clock clock;
     private final AtomicLong runIds = new AtomicLong();
-    private final Instant created;
+    private volatile Instant started;
 
     private static final class TableHealth {
         int failures;
@@ -102,7 +102,6 @@ final class TierLoop {
         this.state = state;
         this.runLog = runLog;
         this.clock = clock;
-        this.created = clock.instant();
         this.status = new CompactionStats.TierStatus("STARTING", null, null, 0, 0, 0, List.of(), List.of(), List.of(),
                 -1, 0, -1);
     }
@@ -111,9 +110,9 @@ final class TierLoop {
         return tier;
     }
 
-    /** When the loop was created, which stands in for its last pass before its first. */
-    Instant created() {
-        return created;
+    /** When {@link #start()} started the loop, or null; it stands in for the last pass before the first. */
+    Instant started() {
+        return started;
     }
 
     CompactionStats.TierStatus status() {
@@ -121,6 +120,7 @@ final class TierLoop {
     }
 
     void start() {
+        started = clock.instant();
         Thread t = new Thread(this::run, "compaction-" + tier.name() + "-" + database);
         t.setDaemon(false);
         thread = t;
@@ -339,7 +339,8 @@ final class TierLoop {
             state.recordFailure(database, tier.name());
             state.recordFailureClass(database, failureClass);
             boolean connectionLost = failureClass == CompactionRun.FailureClass.CATALOG_UNAVAILABLE
-                    || failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT;
+                    || failureClass == CompactionRun.FailureClass.COMMIT_TIMEOUT
+                    || invalidatesInstance(e);
             result = connectionLost ? CallResult.CONNECTION_LOST : CallResult.FAILED;
             String conflictNote = failureClass == CompactionRun.FailureClass.TRANSACTION_CONFLICT
                     ? " (the compactor's own jobs hold the table's lease, so the other side is another writer)" : "";
@@ -361,6 +362,23 @@ final class TierLoop {
         lastCallEnded = endedAt;
         record(work, cap, startedAt, endedAt, gapMs, merge, outcome, failureClass, error, timeoutMs);
         return result;
+    }
+
+    /**
+     * An INTERNAL or FATAL error invalidates the DuckDB instance: every later statement on it fails,
+     * so the tier must reopen it rather than fail table after table.
+     */
+    static boolean invalidatesInstance(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String m = c.getMessage();
+            if (m != null) {
+                String lower = m.toLowerCase(java.util.Locale.ROOT);
+                if (lower.contains("internal error") || lower.contains("fatal error") || lower.contains("invalidated")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private void record(TableWork work, CallSizing.Cap cap, Instant startedAt, Instant endedAt, long gapMs,
@@ -394,8 +412,9 @@ final class TierLoop {
 
     /**
      * Updates every known table's gauges: what the pass listed, and nothing waiting for a table it
-     * no longer lists. Forgets a table that is neither listed nor failing. Collects the back-offs, and
-     * the starved and stale tables among those listed.
+     * no longer lists. Forgets a table that is neither listed nor backed off, with its failure count:
+     * it has nothing to merge now (or no longer exists), so a later failure starts a new count.
+     * Collects the back-offs, and the starved and stale tables among those listed.
      */
     private void reportTables(List<TableWork> listed, Instant now) {
         Set<String> seen = new HashSet<>();
@@ -426,7 +445,7 @@ final class TierLoop {
             } else {
                 health.starved = false;
                 state.updateTable(database, tier.name(), name, 0, 0, false, backedOff);
-                if (!backedOff && health.failures == 0) {
+                if (!backedOff) {
                     it.remove();
                 }
             }

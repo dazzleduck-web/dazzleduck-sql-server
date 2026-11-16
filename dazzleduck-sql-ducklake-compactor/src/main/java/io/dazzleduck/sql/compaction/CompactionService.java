@@ -211,8 +211,8 @@ public class CompactionService implements Closeable {
             alerts.add(prefix + " did not start: " + status.refused());
             return alerts;
         }
-        Instant lastPass = status.lastPass() != null ? status.lastPass() : loop.created();
-        if (started && Duration.between(lastPass, now).compareTo(PASS_ALERT_AFTER) > 0) {
+        Instant lastPass = status.lastPass() != null ? status.lastPass() : loop.started();
+        if (lastPass != null && Duration.between(lastPass, now).compareTo(PASS_ALERT_AFTER) > 0) {
             alerts.add(prefix + " has not completed a pass since " + lastPass);
         }
         status.backoffs().forEach(t -> alerts.add("%s backs off %s after %d consecutive failures"
