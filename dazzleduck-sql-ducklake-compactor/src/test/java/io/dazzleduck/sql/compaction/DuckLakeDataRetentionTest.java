@@ -424,6 +424,47 @@ class DuckLakeDataRetentionTest {
     }
 
     @Test
+    void aTablesDeleteWaitsForTheMergeHoldingItsLease() throws Exception {
+        Path catalog = tmp.resolve("catalog.ducklake");
+        Path data = Files.createDirectories(tmp.resolve("data"));
+        run(catalog, data,
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+                "CREATE TABLE lake.main.events (id INTEGER, ts TIMESTAMP)",
+                "INSERT INTO lake.main.events VALUES (1, TIMESTAMP '2026-10-02 12:00:00')",
+                "CREATE TABLE lake.main.retention_policy (table_name VARCHAR, time_column VARCHAR, retention VARCHAR)",
+                "INSERT INTO lake.main.retention_policy VALUES ('lake.main.events', 'ts', '30 days')");
+
+        TableLeases leases = new TableLeases();
+        String key = TableLeases.key("LAKE", "main", "Events");
+        assertTrue(leases.tryAcquire(key), "a tier loop is merging the table");
+        CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
+        java.util.concurrent.atomic.AtomicReference<DataRetention.Outcome> outcome = new java.util.concurrent.atomic.AtomicReference<>();
+        try (DuckLakeDataRetention retention = new DuckLakeDataRetention(startupScript(catalog, data), List.of(DB),
+                "lake.main.retention_policy", List.of(), 0, state, Clock.fixed(NOW, ZoneOffset.UTC), leases)) {
+            Thread cycle = new Thread(() -> {
+                try {
+                    outcome.set(retention.enforce(DB));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            cycle.start();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            while (!leases.hasWaiter(key)) {
+                assertTrue(System.nanoTime() < deadline, "retention should wait for the lease");
+                Thread.sleep(5);
+            }
+            assertFalse(leases.tryAcquire(key), "while retention waits, the loops skip the table");
+            assertNull(outcome.get(), "the DELETE has not run");
+
+            leases.release(key); // the merge ends
+            cycle.join(10_000);
+            assertEquals(1, outcome.get().rowsDeleted());
+            assertFalse(leases.isBusy(key), "retention released the lease");
+        }
+    }
+
+    @Test
     void theServiceCountsAFailedTableOrCycleAsARetentionFailure() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         CompactionState state = new CompactionState(registry, List.of(DB), List.of());
@@ -432,7 +473,7 @@ class DuckLakeDataRetentionTest {
                 new DataRetentionConfig(true, Duration.ofHours(1), "lake.main.retention_policy", List.of()));
         DataRetention[] next = {database -> new DataRetention.Outcome(2, 10, 0)};
         DataRetention delegating = database -> next[0].enforce(database);
-        try (CompactionService service = new CompactionService(config, null, (db, tier) -> null,
+        try (CompactionService service = new CompactionService(config, null, new FakeTierCompactor(),
                 database -> { }, delegating, state, new CompactionRunLog(10))) {
             service.runRetention(DB);
             assertEquals(0, retentionFailures(registry));
@@ -454,7 +495,7 @@ class DuckLakeDataRetentionTest {
         CompactionConfig disabled = new CompactionConfig(List.of(DB), List.of(), Duration.ofMinutes(5),
                 Duration.ofMinutes(5), List.of(), 0, 10);
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), List.of(DB), List.of());
-        assertThrows(IllegalArgumentException.class, () -> new CompactionService(disabled, null, (db, tier) -> null,
+        assertThrows(IllegalArgumentException.class, () -> new CompactionService(disabled, null, new FakeTierCompactor(),
                 database -> { }, database -> new DataRetention.Outcome(0, 0, 0), state, new CompactionRunLog(10)));
     }
 

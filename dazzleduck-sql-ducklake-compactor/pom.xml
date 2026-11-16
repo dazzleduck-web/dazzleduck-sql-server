@@ -209,6 +209,12 @@
                     </to>
                     <container>
                         <mainClass>${exec.mainClass}</mainClass>
+                        <!-- Most compactor memory is native malloc memory outside DuckDB's
+                             memory_limit, kept by glibc's per-thread arenas (926 MiB of a 1.25 GiB
+                             process in 28 arenas). Two arenas bound it (DYNAMIC_COMPACTION_SPEC.md). -->
+                        <environment>
+                            <MALLOC_ARENA_MAX>2</MALLOC_ARENA_MAX>
+                        </environment>
                         <jvmFlags>
                             <jvmFlag>--add-opens=java.base/java.nio=ALL-UNNAMED</jvmFlag>
                             <jvmFlag>--add-opens=java.base/sun.nio.ch=ALL-UNNAMED</jvmFlag>

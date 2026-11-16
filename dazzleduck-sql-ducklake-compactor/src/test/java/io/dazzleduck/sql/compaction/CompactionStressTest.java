@@ -94,10 +94,8 @@ class CompactionStressTest {
     static final Duration ORPHAN_AGE = Duration.ofSeconds(20);
 
     // Small bands so files move through both tiers within a one-minute run.
-    static final CompactionTier MINOR = new CompactionTier(
-            "minor", true, Duration.ofSeconds(1), 0, 32 * 1024L, 0, List.of());
-    static final CompactionTier MAJOR = new CompactionTier(
-            "major", true, Duration.ofSeconds(1), 32 * 1024L, 4 * 1024 * 1024L, 0, List.of());
+    static final CompactionTier MINOR = CompactionTier.of("minor", 0, 32 * 1024L, 64 * 1024L, 12);
+    static final CompactionTier MAJOR = CompactionTier.of("major", 32 * 1024L, 4 * 1024 * 1024L, 4 * 1024 * 1024L, 16);
 
     /** Housekeeping's delete-file rewrite threshold; the post-run check uses the same rule. */
     static final double REWRITE_DELETE_THRESHOLD = 0.3;
@@ -157,22 +155,23 @@ class CompactionStressTest {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         state = new CompactionState(registry, config.databases(), List.of("minor", "major"));
         runLog = new CompactionRunLog(config.runHistorySize());
+        TableLeases leases = new TableLeases();
         housekeeper = new DuckLakeHousekeeper(startupScript, config.snapshotRetention(), List.of(),
-                config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
-        service = new CompactionService(config, startupScript,
-                new DuckDbTierCompactor(startupScript, state), housekeeper, state, runLog);
+                config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state, leases);
+        service = new CompactionService(config, startupScript, new DuckDbTierCompactor(startupScript, state),
+                housekeeper, null, state, runLog, leases, java.time.Clock.systemUTC());
 
         // The service and housekeeper log failures instead of throwing, so capture them here.
         errorLog = new ListAppender<>();
         errorLog.start();
-        for (Class<?> source : List.of(CompactionService.class, DuckLakeHousekeeper.class)) {
+        for (Class<?> source : List.of(CompactionService.class, TierLoop.class, DuckLakeHousekeeper.class)) {
             ((Logger) LoggerFactory.getLogger(source)).addAppender(errorLog);
         }
     }
 
     @AfterAll
     static void tearDown() {
-        for (Class<?> source : List.of(CompactionService.class, DuckLakeHousekeeper.class)) {
+        for (Class<?> source : List.of(CompactionService.class, TierLoop.class, DuckLakeHousekeeper.class)) {
             ((Logger) LoggerFactory.getLogger(source)).detachAppender(errorLog);
         }
         if (service != null) service.close();
@@ -196,11 +195,11 @@ class CompactionStressTest {
             threads.add(worker("reader-" + r, deadline, reader::step));
         }
         threads.add(worker("tier-minor", deadline, () -> {
-            service.runTier(CATALOG, MINOR);
+            service.runPass(CATALOG, MINOR);
             pause(200);
         }));
         threads.add(worker("tier-major", deadline, () -> {
-            service.runTier(CATALOG, MAJOR);
+            service.runPass(CATALOG, MAJOR);
             pause(1_000);
         }));
         threads.add(worker("housekeeping", deadline, () -> {
@@ -221,8 +220,8 @@ class CompactionStressTest {
 
         // Quiesce: with no writers left, compaction and housekeeping can finish without conflicts.
         for (int i = 0; i < 3; i++) {
-            service.runTier(CATALOG, MINOR);
-            service.runTier(CATALOG, MAJOR);
+            service.runPass(CATALOG, MINOR);
+            service.runPass(CATALOG, MAJOR);
             service.runHousekeeping(CATALOG);
         }
 
@@ -555,10 +554,15 @@ class CompactionStressTest {
         }
     }
 
-    /** Sorts captured ERROR logs into expected conflicts and failures. */
+    /**
+     * Sorts captured ERROR logs into expected conflicts and failures. A tier loop logs a table's
+     * first failures at WARN (it retries them), so those count too.
+     */
     private static void classifyLoggedErrors() {
         for (ILoggingEvent event : errorLog.list) {
-            if (event.getLevel() != Level.ERROR) {
+            boolean loopFailure = event.getLevel() == Level.WARN && event.getLoggerName().equals(TierLoop.class.getName())
+                    && event.getThrowableProxy() != null;
+            if (event.getLevel() != Level.ERROR && !loopFailure) {
                 continue;
             }
             String messages = causeMessages(event.getThrowableProxy());

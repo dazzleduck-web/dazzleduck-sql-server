@@ -64,7 +64,7 @@ public record CompactionConfig(
     }
 
     static CompactionConfig from(Config c) {
-        List<CompactionTier> tiers = parseTiers(c);
+        List<CompactionTier> tiers = resolveCpuShares(parseTiers(c));
         validateTiers(tiers);
 
         return new CompactionConfig(
@@ -161,9 +161,9 @@ public record CompactionConfig(
                 // bare "No configuration setting found for key 'enabled'" pointing at nothing.
                 throw new IllegalArgumentException(
                         ("Compaction tier '%s' is incomplete: %s. A tier must declare enabled,"
-                                + " frequency, min_file_size, max_file_size and max_compacted_files."
+                                + " min_file_size, max_file_size, target_file_size and max_compacted_files."
                                 + " If %s is still a LIST in your config, an override such as"
-                                + " %s.%s.frequency replaces the whole list rather than merging into"
+                                + " %s.%s.max_compacted_files replaces the whole list rather than merging into"
                                 + " it — key the tiers by name first.")
                                 .formatted(name, e.getMessage(), TIERS_KEY, TIERS_KEY, name), e);
             }
@@ -183,16 +183,115 @@ public record CompactionConfig(
      * {@code connection_settings} defaults to empty rather than being required: it is the tier's
      * only list-valued field, and a key/value {@code config_provider} table can supply every
      * scalar but not a list. Optional, a tier can be declared entirely from such a table.
+     *
+     * <p>{@code target_file_size} is read as optional here and required of an enabled tier by
+     * {@link #validateTiers}, so a disabled tier can leave it out. {@code frequency}, the timer of
+     * releases before per-table scheduling, is no longer read: a config that still sets it starts.
+     * An unset {@code cpu_share} is {@code NaN} until {@link #resolveCpuShares} fills it in.
      */
     private static CompactionTier toTier(String name, Config t) {
         return new CompactionTier(
                 name,
                 t.getBoolean("enabled"),
-                t.getDuration("frequency"),
                 t.getBytes("min_file_size"),
                 t.getBytes("max_file_size"),
+                t.hasPath("target_file_size") ? t.getBytes("target_file_size") : 0,
                 t.getLong("max_compacted_files"),
+                t.hasPath("cpu_share") ? t.getDouble("cpu_share") : Double.NaN,
+                t.hasPath("pass_time_limit") ? t.getDuration("pass_time_limit") : CompactionTier.DEFAULT_PASS_TIME_LIMIT,
+                t.hasPath("idle_sleep_max") ? t.getDuration("idle_sleep_max") : CompactionTier.DEFAULT_IDLE_SLEEP,
+                t.hasPath("max_files_per_call") ? t.getLong("max_files_per_call") : CompactionTier.DEFAULT_MAX_FILES_PER_CALL,
+                t.hasPath("min_files") ? t.getInt("min_files") : CompactionTier.DEFAULT_MIN_FILES,
+                t.hasPath("max_wait") ? t.getDuration("max_wait") : Duration.ZERO,
+                t.hasPath("call_time_limit") ? t.getDuration("call_time_limit") : CompactionTier.DEFAULT_CALL_TIME_LIMIT,
                 t.hasPath("connection_settings") ? t.getStringList("connection_settings") : List.of());
+    }
+
+    /**
+     * Each enabled tier without a {@code cpu_share} gets an equal part of what the others leave, so
+     * the shares always add up to at most 1 (spec: Threads and cores). Disabled tiers get none.
+     */
+    static List<CompactionTier> resolveCpuShares(List<CompactionTier> tiers) {
+        double set = 0;
+        int unset = 0;
+        for (CompactionTier tier : tiers) {
+            if (!tier.enabled()) {
+                continue;
+            }
+            if (Double.isNaN(tier.cpuShare())) {
+                unset++;
+            } else {
+                set += tier.cpuShare();
+            }
+        }
+        double each = unset == 0 ? 0 : (1.0 - set) / unset;
+        List<CompactionTier> resolved = new ArrayList<>(tiers.size());
+        for (CompactionTier tier : tiers) {
+            if (!tier.enabled()) {
+                resolved.add(Double.isNaN(tier.cpuShare()) ? tier.withCpuShare(0) : tier);
+            } else if (Double.isNaN(tier.cpuShare())) {
+                if (each <= 0) {
+                    throw new IllegalArgumentException(("Compaction tier '%s' has no cpu_share, and the other"
+                            + " enabled tiers' shares already add up to %s").formatted(tier.name(), set));
+                }
+                resolved.add(tier.withCpuShare(each));
+            } else {
+                resolved.add(tier);
+            }
+        }
+        return List.copyOf(resolved);
+    }
+
+    /**
+     * The startup checks of DYNAMIC_COMPACTION_SPEC.md for one enabled tier. A target below the band's
+     * maximum would never merge the in-band files at or above it: DuckLake skips a file at least as
+     * large as the target.
+     */
+    private static void validateEnabledTier(CompactionTier tier) {
+        String name = tier.name();
+        if (tier.maxFileSize() <= tier.minFileSize()) {
+            throw new IllegalArgumentException(
+                    "Compaction tier '%s': max_file_size (%d) must be greater than min_file_size (%d)"
+                            .formatted(name, tier.maxFileSize(), tier.minFileSize()));
+        }
+        if (tier.targetFileSize() <= 0) {
+            throw new IllegalArgumentException(("Compaction tier '%s' has no target_file_size: without it a merge"
+                    + " group grows to the catalog's target (DuckLake defaults to 512 MB)").formatted(name));
+        }
+        if (tier.targetFileSize() < tier.maxFileSize()) {
+            throw new IllegalArgumentException(("Compaction tier '%s': target_file_size (%d) must be at least"
+                    + " max_file_size (%d), or the files between them never merge")
+                    .formatted(name, tier.targetFileSize(), tier.maxFileSize()));
+        }
+        if (tier.maxCompactedFiles() <= 0) {
+            throw new IllegalArgumentException(("Compaction tier '%s': max_compacted_files is the most groups one"
+                    + " call merges and must be positive, got %d").formatted(name, tier.maxCompactedFiles()));
+        }
+        if (tier.maxFilesPerCall() <= 0) {
+            throw new IllegalArgumentException("Compaction tier '%s': max_files_per_call must be positive, got %d"
+                    .formatted(name, tier.maxFilesPerCall()));
+        }
+        if (tier.minFiles() < 2) {
+            throw new IllegalArgumentException(("Compaction tier '%s': min_files must be at least 2, since a"
+                    + " merge needs two files, got %d").formatted(name, tier.minFiles()));
+        }
+        if (!(tier.cpuShare() > 0 && tier.cpuShare() <= 1)) {
+            throw new IllegalArgumentException("Compaction tier '%s': cpu_share must be in (0, 1], got %s"
+                    .formatted(name, tier.cpuShare()));
+        }
+        requirePositive(name, "pass_time_limit", tier.passTimeLimit());
+        requirePositive(name, "idle_sleep_max", tier.idleSleep());
+        requirePositive(name, "call_time_limit", tier.callTimeLimit());
+        if (tier.maxWait().isNegative()) {
+            throw new IllegalArgumentException("Compaction tier '%s': max_wait must not be negative".formatted(name));
+        }
+    }
+
+    private static void requirePositive(String tier, String key, Duration value) {
+        if (value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(
+                    "Compaction tier '%s': %s must be positive, got %s".formatted(tier, key, value));
+        }
     }
 
     /**
@@ -211,11 +310,15 @@ public record CompactionConfig(
                     || tier.name().equalsIgnoreCase(CompactionState.RETENTION_KIND)) {
                 throw new IllegalArgumentException("Compaction tier name '%s' is reserved".formatted(tier.name()));
             }
-            if (tier.enabled() && tier.maxFileSize() <= tier.minFileSize()) {
-                throw new IllegalArgumentException(
-                        "Compaction tier '%s': max_file_size (%d) must be greater than min_file_size (%d)"
-                                .formatted(tier.name(), tier.maxFileSize(), tier.minFileSize()));
+            if (tier.enabled()) {
+                validateEnabledTier(tier);
             }
+        }
+        double shares = tiers.stream().filter(CompactionTier::enabled).mapToDouble(CompactionTier::cpuShare).sum();
+        if (shares > 1 + 1e-9) {
+            // Each tier has its own DuckDB instance, so their threads add up.
+            throw new IllegalArgumentException(
+                    "The enabled compaction tiers' cpu_share values add up to %s, more than 1".formatted(shares));
         }
 
         List<CompactionTier> enabledSorted = tiers.stream()

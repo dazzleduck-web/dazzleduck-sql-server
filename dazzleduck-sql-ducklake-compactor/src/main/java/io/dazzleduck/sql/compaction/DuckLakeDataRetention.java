@@ -84,6 +84,8 @@ public class DuckLakeDataRetention implements DataRetention {
     private final String startupScript;
     private final List<String> connectionSettings;
     private final int maxFilesPerCycle;
+    // null: no leases, for callers (tests) that run no merge beside it
+    private final TableLeases leases;
     /** Tables already warned about for files without statistics; those stay so until rewritten. */
     private final Set<String> warnedNoStatistics = ConcurrentHashMap.newKeySet();
     /** The connection of each database's running cycle, so {@link #close} can abort it. */
@@ -95,12 +97,30 @@ public class DuckLakeDataRetention implements DataRetention {
      */
     public DuckLakeDataRetention(String startupScript, List<String> databases, String policyTable,
                                  List<String> connectionSettings, int maxFilesPerCycle, CompactionState metrics) {
-        this(startupScript, databases, policyTable, connectionSettings, maxFilesPerCycle, metrics, Clock.systemUTC());
+        this(startupScript, databases, policyTable, connectionSettings, maxFilesPerCycle, metrics, (TableLeases) null);
+    }
+
+    /**
+     * @param leases the leases the tier loops take: each table's DELETE waits for a merge running on
+     *               it, and runs under the table's lease (DYNAMIC_COMPACTION_SPEC.md, "Table leases")
+     */
+    public DuckLakeDataRetention(String startupScript, List<String> databases, String policyTable,
+                                 List<String> connectionSettings, int maxFilesPerCycle, CompactionState metrics,
+                                 TableLeases leases) {
+        this(startupScript, databases, policyTable, connectionSettings, maxFilesPerCycle, metrics, Clock.systemUTC(),
+                leases);
     }
 
     /** @param maxFilesPerCycle the most data files one table's DELETE drops in a cycle; 0 for no cap */
     DuckLakeDataRetention(String startupScript, List<String> databases, String policyTable,
                           List<String> connectionSettings, int maxFilesPerCycle, CompactionState metrics, Clock clock) {
+        this(startupScript, databases, policyTable, connectionSettings, maxFilesPerCycle, metrics, clock, null);
+    }
+
+    DuckLakeDataRetention(String startupScript, List<String> databases, String policyTable,
+                          List<String> connectionSettings, int maxFilesPerCycle, CompactionState metrics, Clock clock,
+                          TableLeases leases) {
+        this.leases = leases;
         this.maxFilesPerCycle = maxFilesPerCycle;
         this.databases = List.copyOf(databases);
         this.policyTable = policyTable;
@@ -139,6 +159,16 @@ public class DuckLakeDataRetention implements DataRetention {
             }
             tables++;
             String table = policy.name().toLowerCase(Locale.ROOT); // one series per table however it is spelled
+            String lease = TableLeases.key(policy.catalog(), policy.schema(), policy.table());
+            if (leases != null) {
+                try {
+                    leases.acquire(lease);
+                } catch (InterruptedException e) {
+                    // shutting down: the remaining tables wait for the next cycle
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
             Timer.Sample sample = metrics.startTimer();
             try {
                 Deletion deletion = deleteExpired(connection, policy, now.minus(policy.retention()), maxFilesPerCycle);
@@ -162,6 +192,9 @@ public class DuckLakeDataRetention implements DataRetention {
                 logger.error("Retention failed for {}, the other tables still run", policy.name(), e);
             } finally {
                 metrics.stopTimer(sample, "retention", "delete", database);
+                if (leases != null) {
+                    leases.release(lease);
+                }
             }
         }
         return new Outcome(tables, rowsDeleted, failed);

@@ -5,9 +5,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -21,6 +23,8 @@ public class DuckLakeHousekeeper implements Housekeeper {
     private final boolean rewriteDeletesEnabled;
     private final Double rewriteDeleteThreshold;
     private final CompactionState metrics;
+    // null: rewrite without leases, for callers (tests) that run nothing beside it
+    private final TableLeases leases;
 
     // One real DuckDB instance per database — see RawConnections. Keyed by database, not shared:
     // CompactionService sizes its housekeeping thread pool so different databases' housekeeping runs
@@ -40,6 +44,18 @@ public class DuckLakeHousekeeper implements Housekeeper {
      */
     public DuckLakeHousekeeper(String startupScript, Duration snapshotRetention, List<String> connectionSettings,
                                boolean rewriteDeletesEnabled, Double rewriteDeleteThreshold, CompactionState metrics) {
+        this(startupScript, snapshotRetention, connectionSettings, rewriteDeletesEnabled, rewriteDeleteThreshold,
+                metrics, null);
+    }
+
+    /**
+     * @param leases the leases the tier loops and data retention take: the delete-file rewrite runs
+     *               per table under its lease, never beside a merge on the same table
+     */
+    public DuckLakeHousekeeper(String startupScript, Duration snapshotRetention, List<String> connectionSettings,
+                               boolean rewriteDeletesEnabled, Double rewriteDeleteThreshold, CompactionState metrics,
+                               TableLeases leases) {
+        this.leases = leases;
         this.startupScript = startupScript;
         this.snapshotRetention = snapshotRetention;
         this.connectionSettings = connectionSettings;
@@ -59,11 +75,15 @@ public class DuckLakeHousekeeper implements Housekeeper {
         if (rewriteDeletesEnabled) {
             try {
                 time("housekeeping", "rewrite_deletes", database, () -> {
-                    long rewritten = sumFilesProcessed(connection, rewriteDataFilesSql(database, rewriteDeleteThreshold));
+                    long rewritten = rewriteDeletes(connection, database);
                     metrics.addFilesRewritten(database, rewritten);
                     logger.debug("Delete-file rewrite for {} rewrote {} data file(s)", database, rewritten);
                 });
             } catch (Exception e) {
+                if (e.getCause() instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
                 logger.error("Delete-file rewrite failed for {}, expiry and cleanup will still run", database, e);
             }
         }
@@ -74,16 +94,82 @@ public class DuckLakeHousekeeper implements Housekeeper {
         } catch (Exception e) {
             logger.error("Snapshot expiry failed for {}, cleanup will still run", database, e);
         }
+        try {
+            metrics.updateUnexpiredSnapshots(database, countSnapshots(connection, database));
+        } catch (Exception e) {
+            logger.warn("Could not count the unexpired snapshots of {}", database, e);
+        }
         time("housekeeping", "cleanup", database, () -> execute(connection,
                 "CALL ducklake_cleanup_old_files('%s', older_than => now() - INTERVAL '%d seconds')"
                         .formatted(database, retentionSeconds)));
     }
 
-    static String rewriteDataFilesSql(String database, Double deleteThreshold) {
-        if (deleteThreshold == null) {
-            return "CALL ducklake_rewrite_data_files('%s')".formatted(database);
+    /**
+     * Rewrites each live table's data files with enough deleted rows, one table at a time under its
+     * lease, so the rewrite never runs beside a merge or a retention DELETE on the same table. A table
+     * that fails is logged and the others still run.
+     *
+     * @return data files rewritten
+     */
+    private long rewriteDeletes(Connection connection, String database) {
+        long rewritten = 0;
+        for (String[] table : liveTables(connection, database)) {
+            String key = TableLeases.key(database, table[0], table[1]);
+            try {
+                if (leases != null) {
+                    leases.acquire(key);
+                }
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            try {
+                rewritten += sumFilesProcessed(connection,
+                        rewriteDataFilesSql(database, table[0], table[1], rewriteDeleteThreshold));
+            } catch (RuntimeException e) {
+                logger.error("Delete-file rewrite failed for {}.{}.{}, the other tables still run",
+                        database, table[0], table[1], e);
+            } finally {
+                if (leases != null) {
+                    leases.release(key);
+                }
+            }
         }
-        return "CALL ducklake_rewrite_data_files('%s', delete_threshold => %s)".formatted(database, deleteThreshold);
+        return rewritten;
+    }
+
+    /** Each live table's schema and name. */
+    private static List<String[]> liveTables(Connection connection, String database) {
+        String md = "\"__ducklake_metadata_" + database + "\"";
+        String sql = ("SELECT s.schema_name, t.table_name FROM %1$s.ducklake_table t JOIN %1$s.ducklake_schema s"
+                + " ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL WHERE t.end_snapshot IS NULL"
+                + " ORDER BY 1, 2").formatted(md);
+        List<String[]> tables = new ArrayList<>();
+        try (Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
+            while (rs.next()) {
+                tables.add(new String[]{rs.getString(1), rs.getString(2)});
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        return tables;
+    }
+
+    private static long countSnapshots(Connection connection, String database) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT count(*) FROM \"__ducklake_metadata_%s\".ducklake_snapshot"
+                     .formatted(database))) {
+            return rs.next() ? rs.getLong(1) : -1;
+        }
+    }
+
+    static String rewriteDataFilesSql(String database, String schema, String table, Double deleteThreshold) {
+        String sql = "CALL ducklake_rewrite_data_files(%s, %s, schema := %s".formatted(
+                literal(database), literal(table), literal(schema));
+        return deleteThreshold == null ? sql + ")" : sql + ", delete_threshold => " + deleteThreshold + ")";
+    }
+
+    private static String literal(String value) {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     private Connection connectionFor(String database) throws SQLException {

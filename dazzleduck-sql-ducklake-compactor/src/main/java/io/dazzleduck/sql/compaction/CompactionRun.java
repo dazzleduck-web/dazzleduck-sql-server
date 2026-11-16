@@ -3,38 +3,40 @@ package io.dazzleduck.sql.compaction;
 import java.time.Instant;
 
 /**
- * One per-cycle telemetry record for a {@code (database, tier)} compaction run — the unit defined by
- * COMPACTION_TELEMETRY_SPEC.md. Capture only: assembling one adds no catalog round-trips beyond the
- * counts the compactor already ran (the active-file query now returns {@code SUM(file_size_bytes)}
- * alongside the {@code COUNT} it already issued).
+ * One telemetry record per table call (DYNAMIC_COMPACTION_SPEC.md, "Telemetry and alerts"): the
+ * table, the cap it was given, what the discovery query saw waiting, and what the merge's result row
+ * reported. Capture only: it costs no catalog round trip, since the band-wide counts the compactor
+ * used to run around every cycle are gone and files come from the merge's own result row (which has
+ * no byte counts).
  *
- * <p>Nullable ({@link Long}) fields are values that can be genuinely unknown for a cycle — a metadata
- * count that failed to read, or a merge result the engine did not surface — and must stay distinct
- * from a real zero. {@code -1} on the {@code long} resource fields means "not measurable here"
- * (e.g. {@code /proc} is Linux-only; a tier with no {@code memory_limit} set).
+ * <p>Nullable ({@link Long}) fields are values that can be genuinely unknown — a merge that returned
+ * no row — and must stay distinct from a real zero. {@code -1} on the {@code long} resource fields
+ * means "not measurable here" (e.g. {@code /proc} is Linux-only; a tier with no {@code memory_limit}).
  *
- * <p><b>Deviation from the spec, by design.</b> The spec's duration split (merge vs commit) is not
- * captured: the compactor runs {@code CALL ducklake_merge_adjacent_files(...)} as a single autocommit
- * statement, so DuckLake performs the merge and the catalog commit inside one call with no separate
- * JDBC commit to time. {@code durationMergeMs} is therefore the whole {@code execute()} (merge + its
- * internal commit); there is no {@code durationCommitMs} field because it could never be captured
- * (splitting would require manual commit — a behaviour change the "capture only" scope forbids).
+ * <p>DuckLake merges and commits inside the one {@code CALL}, so {@code durationMergeMs} is the whole
+ * call; there is no separate commit time to capture.
+ *
+ * @param actualGapMs     ms since the tier's previous call ended, or -1 for its first
+ * @param filesWaiting    the table's eligible files when the pass listed it
+ * @param bytesWaiting    their total size
+ * @param cap             the {@code max_compacted_files} the call was given
+ * @param staticCap       the tier's static cap, the most any call is given
+ * @param busyPartitions  the table's groups with a file committed in the last 10 minutes
+ * @param commitTimeoutMs the catalog's idle-in-transaction timeout, or 0 for none
  */
 public record CompactionRun(
         long runId,
         String database,
         String tierName,
-        Instant scheduledAt,
+        String tableName,
         Instant startedAt,
         Instant endedAt,
-        long intendedDelayMs,
         long actualGapMs,
-        Long activeFilesBefore,
-        Long activeFilesAfter,
-        Long filesRetired,
-        Long activeBytesBefore,
-        Long activeBytesAfter,
-        long maxCompactedFiles,
+        Long filesWaiting,
+        Long bytesWaiting,
+        int cap,
+        long staticCap,
+        int busyPartitions,
         Long filesProcessed,
         Long filesCreated,
         long durationTotalMs,
@@ -47,18 +49,15 @@ public record CompactionRun(
         long memoryLimitBytes,
         long commitTimeoutMs) {
 
-    /** Postgres server default for {@code idle_in_transaction_session_timeout} (spec Q3). */
-    public static final long DEFAULT_COMMIT_TIMEOUT_MS = 120_000;
-
     public enum Outcome { SUCCESS, EMPTY, FAILED }
 
     /**
-     * Failure classes from the spec's taxonomy. Different classes demand opposite controller
-     * responses (shrink the batch for OUT_OF_MEMORY / SPILL_EXCEEDED / COMMIT_TIMEOUT; do NOT shrink
-     * for TRANSACTION_CONFLICT — retry; back off for CATALOG_UNAVAILABLE), so they are never collapsed.
-     * {@link #NONE} is the non-failure sentinel.
+     * Failure classes from the telemetry spec's taxonomy, plus {@link #PLANNING}: an error binding or
+     * planning the merge itself (a table that cannot be read, a bad path), which isolating failures per
+     * table is meant to contain. Kept apart because they call for different responses. {@link #NONE}
+     * is the non-failure sentinel.
      */
-    public enum FailureClass { NONE, COMMIT_TIMEOUT, TRANSACTION_CONFLICT, OUT_OF_MEMORY, SPILL_EXCEEDED, CATALOG_UNAVAILABLE, OTHER }
+    public enum FailureClass { NONE, COMMIT_TIMEOUT, TRANSACTION_CONFLICT, OUT_OF_MEMORY, SPILL_EXCEEDED, CATALOG_UNAVAILABLE, PLANNING, OTHER }
 
     private static final int MAX_ERROR_LEN = 200;
 
@@ -89,6 +88,10 @@ public record CompactionRun(
                     || lower.contains("could not connect") || lower.contains("network")) {
                 return FailureClass.CATALOG_UNAVAILABLE;
             }
+            if (lower.contains("binder error") || lower.contains("catalog error")
+                    || lower.contains("failed to get compaction file list") || lower.contains("internal error")) {
+                return FailureClass.PLANNING;
+            }
         }
         return FailureClass.OTHER;
     }
@@ -103,9 +106,8 @@ public record CompactionRun(
         return m.length() > MAX_ERROR_LEN ? m.substring(0, MAX_ERROR_LEN) + "…" : m;
     }
 
-    /** Bytes retired = before - after, only when both active-byte reads succeeded; else null. */
-    public Long bytesRetired() {
-        return (activeBytesBefore != null && activeBytesAfter != null)
-                ? activeBytesBefore - activeBytesAfter : null;
+    /** Files the call retired net of what it wrote, or null when the merge returned no row. */
+    public Long filesRetired() {
+        return (filesProcessed != null && filesCreated != null) ? filesProcessed - filesCreated : null;
     }
 }

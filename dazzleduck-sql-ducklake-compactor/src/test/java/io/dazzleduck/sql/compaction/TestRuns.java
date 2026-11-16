@@ -6,18 +6,17 @@ import java.time.Instant;
 final class TestRuns {
     private TestRuns() {}
 
-    static CompactionRun run(long id, long startSec, long endSec, long gapMs,
-                             Long filesBefore, Long filesAfter, Long bytesBefore, Long bytesAfter,
+    static final long TIMEOUT_MS = 600_000;
+
+    static CompactionRun run(long id, long startSec, long endSec, long gapMs, Long processed, Long created,
                              CompactionRun.Outcome outcome, CompactionRun.FailureClass failureClass) {
-        Long retired = (filesBefore != null && filesAfter != null) ? filesBefore - filesAfter : null;
         return new CompactionRun(
-                id, "db", "tier",
-                Instant.ofEpochSecond(startSec), Instant.ofEpochSecond(startSec), Instant.ofEpochSecond(endSec),
-                60_000, gapMs,
-                filesBefore, filesAfter, retired, bytesBefore, bytesAfter,
-                10, null, null,
+                id, "db", "tier", "main.events",
+                Instant.ofEpochSecond(startSec), Instant.ofEpochSecond(endSec), gapMs,
+                100L, 1_000L, 4, 12, 1,
+                processed, created,
                 (endSec - startSec) * 1000, (endSec - startSec) * 1000,
                 outcome, failureClass, failureClass == CompactionRun.FailureClass.NONE ? null : "err",
-                -1, -1, -1, CompactionRun.DEFAULT_COMMIT_TIMEOUT_MS);
+                -1, -1, -1, TIMEOUT_MS);
     }
 }

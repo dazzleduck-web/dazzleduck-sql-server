@@ -25,6 +25,12 @@ final class ResourceSampler {
 
     private static final Path PROC_SELF_STATUS = Path.of("/proc/self/status");
     private static final Pattern VM_HWM = Pattern.compile("^VmHWM:\\s+(\\d+)\\s+kB", Pattern.MULTILINE);
+    private static final Pattern VM_RSS = Pattern.compile("^VmRSS:\\s+(\\d+)\\s+kB", Pattern.MULTILINE);
+    /** cgroup v2, then v1. */
+    private static final List<Path> CGROUP_MEMORY_LIMITS = List.of(
+            Path.of("/sys/fs/cgroup/memory.max"), Path.of("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+    /** cgroup v1 reports "no limit" as a huge number rather than "max". */
+    private static final long NO_CGROUP_LIMIT = 1L << 60;
     // e.g. SET memory_limit='2GB';  SET GLOBAL temp_directory = '/tmp/spill'
     private static final Pattern MEMORY_LIMIT =
             Pattern.compile("memory_limit\\s*(?::=|=)?\\s*'?([0-9.]+\\s*[a-zA-Z]*)'?", Pattern.CASE_INSENSITIVE);
@@ -43,6 +49,40 @@ final class ResourceSampler {
             logger.debug("Could not read VmHWM", e);
             return -1;
         }
+    }
+
+    /** Process resident set size now, in bytes from {@code /proc/self/status} VmRSS, or -1. */
+    static long rssBytes() {
+        try {
+            if (!Files.exists(PROC_SELF_STATUS)) {
+                return -1;
+            }
+            Matcher m = VM_RSS.matcher(Files.readString(PROC_SELF_STATUS));
+            return m.find() ? Long.parseLong(m.group(1)) * 1024 : -1;
+        } catch (Exception e) {
+            logger.debug("Could not read VmRSS", e);
+            return -1;
+        }
+    }
+
+    /** The container's memory limit in bytes from the cgroup, or -1 without one. */
+    static long containerMemoryLimitBytes() {
+        for (Path path : CGROUP_MEMORY_LIMITS) {
+            try {
+                if (!Files.exists(path)) {
+                    continue;
+                }
+                String value = Files.readString(path).trim();
+                if (value.equals("max")) {
+                    return -1;
+                }
+                long limit = Long.parseLong(value);
+                return limit >= NO_CGROUP_LIMIT ? -1 : limit;
+            } catch (Exception e) {
+                logger.debug("Could not read the cgroup memory limit from {}", path, e);
+            }
+        }
+        return -1;
     }
 
     /** Total bytes currently under {@code dir} (spill/temp usage), or -1 when unknown/missing. */
@@ -112,7 +152,7 @@ final class ResourceSampler {
         return -1;
     }
 
-    /** Parses "600000" / "600000ms" / "10min" / "30s" / "1h" to milliseconds, or -1. */
+    /** Parses "600000" / "600000ms" / "10min" / "30s" / "1h" / "1d" (Postgres's units) to milliseconds, or -1. */
     static long parseDurationMs(String value) {
         Matcher m = Pattern.compile("([0-9]+)\\s*([a-zA-Z]*)").matcher(value);
         if (!m.matches()) {
@@ -124,6 +164,7 @@ final class ResourceSampler {
             case "s" -> n * 1000;
             case "min", "m" -> n * 60_000;
             case "h" -> n * 3_600_000;
+            case "d" -> n * 86_400_000;
             default -> -1L;
         };
     }

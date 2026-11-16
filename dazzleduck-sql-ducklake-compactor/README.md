@@ -5,24 +5,46 @@ A background service that runs minor and major compaction on DuckLake catalogs t
 ## Overview
 
 DuckLake writes small Parquet files on each insert/update. Without compaction, query performance
-degrades as the file count grows. This service compacts files via any number of configurable
-**tiers**, each a self-contained compaction level: its own file-size range, schedule, file-count
-cap, enable flag, and DuckDB connection settings. The bundled default is two tiers, "minor" and
-"major", matching what used to be hardcoded:
+degrades as the file count grows. This service merges files in **tiers**: each tier is a band of
+file sizes `[min_file_size, max_file_size)` with a target its merges write, so outputs move up the
+chain. The bundled default is three tiers (see [DYNAMIC_COMPACTION_SPEC.md](DYNAMIC_COMPACTION_SPEC.md)):
 
-- **minor** — merges adjacent small files below `8MB`. Runs frequently (every 1 minute).
-- **major** — merges files in `[8MB, 64MB)`. Runs less frequently (every 1 hour).
+| Tier | Band | Target | Groups per call (static cap) |
+|------|------|--------|------------------------------|
+| minor | `[0, 8MB)` | `16MB` | 12 |
+| major | `[8MB, 64MB)` | `64MB` | 16 |
+| mega | `[64MB, 256MB)` | `256MB` | 5 |
 
-There's nothing special about having exactly two — add, remove, rename, or resize tiers freely, as
-long as every **enabled** tier's `[min_file_size, max_file_size)` range is disjoint from every
-other enabled tier's. That's enforced at startup (refuses to start on overlapping ranges or
-duplicate tier names) and is what lets tiers run **concurrently with no locking between them**:
-since each only ever touches files in its own range, two tiers can never race on the same file.
+Files of `256MB` or more are final. Add, remove, rename, or resize tiers freely, as long as every
+**enabled** tier's band is disjoint from every other enabled tier's: that is checked at startup,
+and it is what lets tiers run concurrently, since each only ever touches files in its own band.
 
-Every tier is scheduled at a **fixed rate**, not a fixed delay: a cycle that takes time `T` waits
-`frequency - T` before the next one starts, rather than a full `frequency` after completion
-regardless of `T`. A cycle that runs longer than its frequency has no negative wait — the next one
-starts immediately.
+Each enabled `(database, tier)` runs **one loop thread**. A pass:
+
+1. **Refreshes**: one query over the catalog metadata lists the tables with work, grouped the way
+   `ducklake_merge_adjacent_files` groups files (schema version, partition, partition values).
+   Files with deletes and tables with `auto_compact = false` are left out, as DuckLake does.
+2. **Ranks** them by files waiting, most first; tables carried over from the previous pass go first.
+3. **Calls** each table in turn, in one transaction with one commit:
+
+   ```sql
+   SET SESSION ducklake_target_file_size = '<target> bytes';
+   CALL ducklake_merge_adjacent_files('<db>', '<table>', schema := '<schema>',
+        min_file_size := <min>, max_file_size := <max>, max_compacted_files := <cap>);
+   ```
+
+4. **Ends** when every table was called or `pass_time_limit` has passed; the rest carry over. After
+   a pass that found no work it sleeps `idle_sleep_max`, otherwise the next pass starts at once.
+
+The session target bounds every merge group (so a call's peak memory and each output file) and
+overrides table and catalog options, so no table falls back to DuckLake's 512 MB default. It needs
+DuckDB 1.5.4 or later; a tier whose `SET` fails does not start. The cap is sized per call, never
+above the tier's static cap (see [Call sizing](#call-sizing)).
+
+A failure costs one table's call: the table is retried on the next pass, and after 3 failures in a
+row it backs off for 15 minutes. A table runs at most one job at a time across tiers, data
+retention and the delete-file rewrite (a **table lease**): a loop skips a table another job holds,
+and retention and the rewrite wait for it.
 
 ## Configuration
 
@@ -35,7 +57,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `housekeeping_connection_settings` | `[]` | Raw SQL run on housekeeping's connection right after opening it — independent of any tier |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |
-| `rewrite_deletes_enabled` | `true` | Each housekeeping cycle first runs `ducklake_rewrite_data_files`, rewriting data files with enough deleted rows so their delete files are dropped |
+| `rewrite_deletes_enabled` | `true` | Each housekeeping cycle first runs `ducklake_rewrite_data_files` on each table in turn, under the table's lease, rewriting data files with enough deleted rows so their delete files are dropped |
 | `rewrite_delete_threshold` | unset | Fraction (0–1) of a file's rows that must be deleted before it is rewritten; unset uses the catalog's `rewrite_delete_threshold` option (DuckLake default 0.95) |
 | `data_retention` | off | Deletes expired rows of the tables listed in a policy table (see [Data retention](#data-retention)) |
 | `health_port` | `8080` | Port for the `GET /health` endpoint |
@@ -50,22 +72,37 @@ The bundled defaults live in this module's `application.conf` (not `reference.co
 compaction_tiers {
   minor {
     enabled = true
-    frequency = 1 minute
     min_file_size = 0
     max_file_size = 8MB
-    max_compacted_files = 1000   # 0 = unbounded
-    connection_settings = ["SET memory_limit='2GB'", "SET threads=2"]
+    target_file_size = 16MB
+    max_compacted_files = 12
+    min_files = 4
+    max_wait = 5 minutes
+    cpu_share = 0.5
+    connection_settings = ["SET enable_external_file_cache = false"]
   }
   major {
     enabled = true
-    frequency = 1 hour
     min_file_size = 8MB
     max_file_size = 64MB
-    max_compacted_files = 1000
-    connection_settings = ["SET memory_limit='8GB'", "SET threads=4"]
+    target_file_size = 64MB
+    max_compacted_files = 16
+    cpu_share = 0.25
+    connection_settings = ["SET enable_external_file_cache = false"]
+  }
+  mega {
+    enabled = true
+    min_file_size = 64MB
+    max_file_size = 256MB
+    target_file_size = 256MB
+    max_compacted_files = 5
+    cpu_share = 0.25
+    connection_settings = ["SET enable_external_file_cache = false"]
   }
 }
 ```
+
+Sizes are HOCON byte sizes, where `MB` is 10^6 bytes and `MiB` is 2^20.
 
 The names `housekeeping` and `retention` (in any case) are reserved: they tag the metrics of those
 jobs, so a tier with either name is refused at startup.
@@ -75,10 +112,10 @@ what makes a tier individually overridable: HOCON merges objects field-by-field 
 wholesale, so
 
 ```bash
---conf 'dazzleduck_sql_compaction.compaction_tiers.minor.frequency = 10 seconds'
+--conf 'dazzleduck_sql_compaction.compaction_tiers.minor.max_compacted_files = 8'
 ```
 
-changes one cadence and leaves every other field of `minor` — and every other tier — intact. The
+changes one field and leaves every other field of `minor` — and every other tier — intact. The
 same spelling works from a `config_provider` table (see below). Tiers are always processed in
 `min_file_size` order regardless of key order, so logs and the per-tier file-count gauges read in
 band order.
@@ -87,24 +124,62 @@ A **list** of tiers, each carrying its own `name` field, is still accepted so co
 against 0.2.19 keep working; with a list, declaration order is preserved.
 
 > **Migrating from the list shape:** don't add a per-tier override until the file is keyed by name.
-> Against a list, `compaction_tiers.minor.frequency` is an object that *replaces* the whole list
-> rather than merging into it, leaving one tier holding only the overridden field — startup then
-> fails naming the incomplete tier and pointing back here.
+> Against a list, `compaction_tiers.minor.max_compacted_files` is an object that *replaces* the
+> whole list rather than merging into it, leaving one tier holding only the overridden field —
+> startup then fails naming the incomplete tier and pointing back here.
 
 Per-tier fields:
 
-| Field | Description |
-|-------|-------------|
-| `enabled` | Set `false` to turn this tier off entirely, for all databases, without removing it from config |
-| `frequency` | How often this tier runs |
-| `min_file_size` / `max_file_size` | This tier only touches files in `[min_file_size, max_file_size)`. Always required, including `0` for the lowest tier |
-| `max_compacted_files` | Caps files merged per cycle (passed through as `ducklake_merge_adjacent_files`'s own `max_compacted_files`); `0` = unbounded, and a catalog with more eligible files than the cap just finishes over several ticks instead of one |
-| `connection_settings` | Optional (default none). Raw SQL run on this tier's own connection right after opening it, e.g. to set `memory_limit`/`threads` differently per tier. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | required | Set `false` to turn this tier off entirely, for all databases, without removing it from config |
+| `min_file_size` / `max_file_size` | required | This tier only touches files in `[min_file_size, max_file_size)`. Always required, including `0` for the lowest tier |
+| `target_file_size` | required | `ducklake_target_file_size` for this tier's calls. At least `max_file_size`: DuckLake skips a file as large as the target, so the files between them would never merge |
+| `max_compacted_files` | required | The static cap: the most groups (output files) one call merges. Positive |
+| `max_files_per_call` | `6000` | The most input files a call is sized to merge, about 4.5 minutes at the measured rate |
+| `call_time_limit` | `10 minutes` | The longest a call is sized to run |
+| `min_files` | `2` | A table is merged once one of its groups has this many files |
+| `max_wait` | none | ... or once a group's second-oldest file has waited this long |
+| `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
+| `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
+| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) for this tier's DuckDB instance; its threads are 2 x its CPUs, at least 1. Shares add up to at most 1 |
+| `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it, e.g. to set `memory_limit` per tier. A `SET threads` here overrides the one `cpu_share` computes. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
-Disabling a tier (`enabled = false`) is the direct way to turn it off. Simply raising a tier's
-`frequency` to a very large value is **not** equivalent — with the old hardcoded minor/major design
-that could starve the other tier of any chance to run at all; with independent per-tier schedules
-that's no longer true, but `enabled` is still the explicit way to say "don't run this."
+`frequency`, the timer of earlier releases, is no longer used; a config that still sets it starts.
+
+**Minor's admission threshold.** Any two files in a group merge, so without a threshold a slow
+table would rewrite its leftover file on almost every pass, committing a snapshot every few seconds.
+`min_files = 4` and `max_wait = 5 minutes` wait for a few files, or for a new file to have waited
+5 minutes. The wait is timed on a group's second-oldest file, because its oldest is usually the
+leftover of the last merge. DuckLake has no partition filter, so once a table is admitted every
+partition holding a leftover plus one new file is merged too.
+
+#### Call sizing
+
+From the table's files waiting and average file size, each call gets:
+
+```text
+files_per_group = min(ceil(target / average_file_size), files_waiting)
+file_cap        = max(1, floor(max_files_per_call / files_per_group))
+time_limit      = min(call_time_limit, 0.8 x idle_in_transaction_session_timeout)
+time_cap        = max(1, floor(time_limit / (files_per_group x sec_per_file)))
+cap             = min(static_cap, time_cap, max(file_cap, busy_partitions + 1))
+```
+
+`sec_per_file` is 0.045 s for a table with a sort key (measured) and 0.09 s without one (a guess).
+`busy_partitions` are the table's groups with a file committed in the last 10 minutes: DuckLake
+takes partitions in a fixed order, so a cap at or below them could give every slot to the same
+partitions on every call. When `busy_partitions + 1` is above the static or time cap, the table is
+reported as starved.
+
+The catalog's `idle_in_transaction_session_timeout` is read from Postgres when a tier's connection
+opens, so an `options=-cidle_in_transaction_session_timeout=600000` in the ATTACH string counts. A
+value of 0 (Postgres's default) or a SQLite or DuckDB-file catalog means no limit. A tier one full
+group of whose smallest files (3,200 files for minor) would not fit in 80% of the timeout does not
+start.
+
+The images set `MALLOC_ARENA_MAX=2`: most compactor memory is native `malloc` memory outside
+DuckDB's `memory_limit`, kept by glibc's per-thread arenas.
 
 ### Data retention
 
@@ -273,7 +348,7 @@ tiers are keyed by name rather than listed:
 
 | Row key | Effect |
 |---------|--------|
-| `compaction_tiers.minor.frequency` | retunes one cadence; the tier's other fields are untouched |
+| `compaction_tiers.minor.max_compacted_files` | retunes one field; the tier's other fields are untouched |
 | `compaction_tiers.minor.enabled` | turns one tier off while leaving it configured, so its file-count gauge still reports its band |
 | `compaction_tiers.mega.min_file_size` (+ the other scalars) | declares a whole new tier — `connection_settings` is optional precisely so this is possible |
 
@@ -286,11 +361,20 @@ back to file defaults would hide a broken override source.
 
 ## Health Check
 
-`GET /health` on `health_port` (default 8080) returns uptime plus per-database stats, with one
-nested object per configured tier (`totalCompactions`, `currentFiles`, `nextExecutionTime`) plus
-whole-catalog totals (`totalFailedCycles`, `totalFilesCompacted`, `totalFilesRewritten`, `lastSuccessTime`,
-`currentTotalFiles`). Note: the status is always `UP` while the process is running — it does not
-reflect failing compaction cycles.
+`GET /health` on `health_port` (default 8080) returns uptime, an `alerts` list, and per-database
+stats: one nested object per configured tier (`totalCompactions`, `currentFiles`, `loop`, and
+`telemetry` for its latest table call) plus whole-catalog totals (`totalFailedCycles`,
+`totalFilesCompacted`, `totalFilesRewritten`, `lastSuccessTime`, `currentTotalFiles`,
+`unexpiredSnapshots`). A tier's `loop` shows its `state` (`STARTING`, `RUNNING`, `REFUSED` with the
+reason, `STOPPED`), its last pass, queue, carry-over, back-offs, starved and stale tables, the
+catalog timeout it sizes calls by, its threads and `duckdb_memory()`.
+
+`alerts` lists the conditions that hold now: a tier with no completed pass in 15 minutes (a pass
+that finds no work counts), a tier that did not start, a table backed off after 3 failures, a
+starved table, a table whose oldest file with something to merge has waited over 30 minutes, a band
+whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
+RSS above 75% of the container's memory limit. The status is always `UP` while the process is
+running; watch `alerts` (or the metrics below) instead.
 
 ## Build
 
@@ -403,9 +487,18 @@ Micrometer metrics are emitted via the logging registry by default, and over OTL
 
 | Metric | Tags | Description |
 |--------|------|-------------|
-| `ducklake.compaction.duration` | `type` (tier name, or `housekeeping`), `step` (merge/rewrite_deletes/expire/cleanup), `database` | Time per compaction step |
-| `ducklake.compaction.cycles` | `tier`, `database` | Successful compaction cycles for this tier |
-| `ducklake.compaction.failures` | `type` (tier name, or `housekeeping`), `database` | Cycles that ended in an exception |
+| `ducklake.compaction.duration` | `type` (tier name, or `housekeeping`), `step` (discover/merge/rewrite_deletes/expire/cleanup), `database` | Time per step |
+| `ducklake.compaction.cycles` | `tier`, `database` | Successful table calls of this tier |
+| `ducklake.compaction.cycles_by_outcome` | `tier`, `database`, `outcome` (SUCCESS/EMPTY/FAILED) | Table calls by outcome |
+| `ducklake.compaction.failures` | `type` (tier name, or `housekeeping`/`retention`), `database` | Calls, refreshes and cycles that ended in an exception |
+| `ducklake.compaction.failures_by_class` | `class`, `database` | Failures by cause, including `PLANNING` |
+| `ducklake.compaction.commits` | `tier`, `database` | Calls that committed a merge, one snapshot each; its rate is the commits per minute expiry must keep up with |
+| `ducklake.compaction.passes` / `pass_age` | `tier`, `database` | Completed passes, and seconds since the last one |
+| `ducklake.compaction.queue` / `carry_over` / `backoffs` | `tier`, `database` | Tables the latest pass listed, left for the next pass, and backed off |
+| `ducklake.compaction.max_compacted_files` / `cap` | `tier`, `database` | The static cap, and the cap the latest call was given |
+| `ducklake.compaction.table.files_waiting` / `oldest_wait` / `starved` / `backoff` | `tier`, `database`, `table` | One table's state in one tier |
+| `ducklake.snapshots.unexpired` | `database` | Snapshots left after housekeeping's latest expiry |
+| `ducklake.process.rss_bytes` / `memory_limit_bytes` | — | Process RSS and the container's memory limit |
 | `ducklake.files.compacted` | `database` | Total files compacted, across all tiers |
 | `ducklake.files.rewritten` | `database` | Total data files rewritten by housekeeping to drop their delete files (`rewrite_deletes` step) |
 | `ducklake.files.total` | `database` | Total active Parquet files |

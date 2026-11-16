@@ -5,46 +5,295 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Runs one tier's per-table calls on its own DuckDB instance per database (DYNAMIC_COMPACTION_SPEC.md,
+ * Phase 1).
+ *
+ * <p>One real DuckDB instance per {@code (database, tier)} — see {@link RawConnections} for why this
+ * can't be a duplicated connection: {@code memory_limit} and {@code threads} are GLOBAL and would leak
+ * across tiers. Each pair's methods are called from that pair's loop thread only.
+ */
 public class DuckDbTierCompactor implements TierCompactor {
 
     private static final Logger logger = LoggerFactory.getLogger(DuckDbTierCompactor.class);
 
     private final String startupScript;
     private final CompactionState metrics;
+    private final int availableProcessors;
 
-    // One real DuckDB instance per (database, tier) pair — see RawConnections for why this can't be
-    // a duplicated/shared connection (GLOBAL-scoped settings like memory_limit would leak across
-    // tiers). Keyed by BOTH database and tier, not tier alone: with multiple databases configured,
-    // CompactionService deliberately sizes its thread pool so the same tier can run concurrently for
-    // different databases, and a plain JDBC Connection is not safe for concurrent use by more than
-    // one thread — keying by tier name only would hand two such threads the same Connection object.
-    // Opened lazily on first use and reused for the pair's whole lifetime.
-    private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
+    private record Open(Connection connection, Readiness readiness) {
+    }
+
+    private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
 
     public DuckDbTierCompactor(String startupScript, CompactionState metrics) {
+        this(startupScript, metrics, Runtime.getRuntime().availableProcessors());
+    }
+
+    /** @param availableProcessors the CPUs the tiers' {@code cpu_share} values divide */
+    public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors) {
         this.startupScript = startupScript;
         this.metrics = metrics;
+        this.availableProcessors = availableProcessors;
     }
 
     @Override
-    public MergeOutcome compact(String database, CompactionTier tier) throws Exception {
-        Connection connection = connectionFor(database, tier);
-        String sql = mergeAdjacentFilesSql(database, tier.minFileSize(), tier.maxFileSize(), tier.maxCompactedFiles());
+    public Readiness prepare(String database, CompactionTier tier) throws Exception {
+        String key = key(database, tier.name());
+        Open existing = open.get(key);
+        if (existing != null) {
+            return existing.readiness();
+        }
+        int threads = tier.threads(availableProcessors);
+        // threads first, so a connection_settings entry that sets it explicitly still wins
+        List<String> settings = new ArrayList<>();
+        settings.add("SET threads = " + threads);
+        settings.addAll(tier.connectionSettings());
+        Connection connection = RawConnections.open(startupScript, settings);
+        try {
+            Readiness readiness = check(connection, database, tier, threads);
+            if (readiness.isRefused()) {
+                connection.close();
+            } else {
+                open.put(key, new Open(connection, readiness));
+            }
+            return readiness;
+        } catch (Exception e) {
+            closeQuietly(connection);
+            throw e;
+        }
+    }
+
+    private static Readiness check(Connection connection, String database, CompactionTier tier, int threads)
+            throws SQLException {
+        try {
+            setTarget(connection, tier);
+        } catch (SQLException e) {
+            String message = String.valueOf(e.getMessage());
+            if (message.contains("unrecognized configuration parameter")) {
+                return new Readiness(("the DuckLake extension has no ducklake_target_file_size session setting"
+                        + " (it needs DuckDB 1.5.4 or later): %s").formatted(message.lines().findFirst().orElse("")),
+                        0, threads);
+            }
+            throw e;
+        }
+        long timeoutMs = idleTxnTimeoutMs(connection, database, tier);
+        if (!CallSizing.fullGroupFits(tier, timeoutMs)) {
+            return new Readiness(("one full group (%.0f s at %.3f s per file) does not fit in %.0f%% of the"
+                            + " catalog's idle-in-transaction timeout (%d ms)")
+                    .formatted(CallSizing.fullGroupSeconds(tier), CallSizing.SEC_PER_FILE_SORTED,
+                            CallSizing.TIMEOUT_SHARE * 100, timeoutMs), timeoutMs, threads);
+        }
+        return Readiness.ready(timeoutMs, threads);
+    }
+
+    /**
+     * Sets the tier's target on the session and reads it back: a call never runs without it, since a
+     * group would otherwise grow to the catalog's target (512 MB by default). The setting needs a unit.
+     */
+    static void setTarget(Connection connection, CompactionTier tier) throws SQLException {
+        String value = tier.targetFileSize() + " bytes";
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("SET SESSION ducklake_target_file_size = '" + value + "'");
+        }
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT current_setting('ducklake_target_file_size')")) {
+            String actual = rs.next() ? rs.getString(1) : null;
+            if (actual == null || !actual.trim().equalsIgnoreCase(value)) {
+                throw new IllegalStateException("ducklake_target_file_size is %s after setting it to %s"
+                        .formatted(actual, value));
+            }
+        }
+    }
+
+    /**
+     * The catalog database's {@code idle_in_transaction_session_timeout} in ms, or 0 for none: a value
+     * of 0 (Postgres's default, disabled), or a catalog that has no such setting (SQLite, a DuckDB
+     * file). Read from Postgres's {@code pg_settings} through {@code postgres_query} on the metadata
+     * catalog, whose connection carries the ATTACH string's options, so an
+     * {@code options=-cidle_in_transaction_session_timeout=...} there counts. ({@code SHOW} cannot be
+     * used: {@code postgres_query} wraps its query in a {@code COPY (SELECT ...)}.) When it cannot be
+     * read, a value set in the tier's connection_settings is used, else none.
+     */
+    static long idleTxnTimeoutMs(Connection connection, String database, CompactionTier tier) {
+        try {
+            // The metadata catalog itself is hidden from duckdb_databases(); the DuckLake catalog's
+            // path names its backend, e.g. "postgres:host=... dbname=...".
+            String path = null;
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT path FROM duckdb_databases() WHERE database_name = ? AND type = 'ducklake'")) {
+                statement.setString(1, database);
+                try (ResultSet rs = statement.executeQuery()) {
+                    if (rs.next()) {
+                        path = rs.getString(1);
+                    }
+                }
+            }
+            if (path == null || !path.regionMatches(true, 0, "postgres:", 0, "postgres:".length())) {
+                return 0;
+            }
+            String query = "SELECT setting, unit FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'";
+            try (Statement statement = connection.createStatement();
+                 ResultSet rs = statement.executeQuery("SELECT * FROM postgres_query(%s, %s)"
+                         .formatted(literal(metadataCatalogName(database)), literal(query)))) {
+                if (rs.next()) {
+                    String unit = rs.getString(2);
+                    long ms = ResourceSampler.parseDurationMs(rs.getString(1).trim() + (unit == null ? "" : unit.trim()));
+                    if (ms >= 0) {
+                        return ms;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Could not read the idle-in-transaction timeout of {}'s catalog for tier '{}'",
+                    database, tier.name(), e);
+        }
+        return Math.max(ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings()), 0);
+    }
+
+    @Override
+    public List<TableWork> discover(String database, CompactionTier tier) throws Exception {
+        Connection connection = connection(database, tier);
+        List<TableWork> work = new ArrayList<>();
+        Timer.Sample sample = metrics.startTimer();
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(discoverySql(database, tier))) {
+            while (rs.next()) {
+                work.add(new TableWork(
+                        rs.getString("schema_name"),
+                        rs.getString("table_name"),
+                        rs.getLong("files_waiting"),
+                        rs.getLong("bytes_waiting"),
+                        Instant.ofEpochMilli(rs.getLong("oldest_waiting_ms")),
+                        rs.getInt("busy_partitions"),
+                        rs.getBoolean("sorted")));
+            }
+        } finally {
+            metrics.stopTimer(sample, tier.name(), "discover", database);
+        }
+        return work;
+    }
+
+    /**
+     * The tables with work for a tier, from the catalog metadata, grouped the way
+     * {@code ducklake_merge_adjacent_files} groups files: by table, schema version (from
+     * {@code ducklake_schema_versions}, as DuckLake reads it), partition id and partition values. A
+     * file is eligible when it is live, in the band (and so below the target, which is at least the
+     * band's maximum) and has no delete file: DuckLake skips a file with deletes. Files whose deletes
+     * are still inlined in the catalog are counted, though DuckLake skips them too; the worst that
+     * costs is a call that merges nothing.
+     *
+     * <p>A table is listed when {@code auto_compact} is not off at its narrowest scope (table, then
+     * schema, then catalog; only {@code 'true'} enables it, as in DuckLake) and one of its groups has
+     * {@code min_files} files or, with a {@code max_wait}, a second-oldest file at least that old.
+     * File ages are the commit times of their first snapshot. A file whose first snapshot has been
+     * expired is at least as old as the oldest snapshot left, so that is its age.
+     */
+    static String discoverySql(String database, CompactionTier tier) {
+        String md = "\"" + metadataCatalogName(database).replace("\"", "\"\"") + "\"";
+        String admitted = "g.files >= " + tier.minFiles();
+        if (!tier.maxWait().isZero()) {
+            admitted += " OR g.second_oldest <= now() - INTERVAL %d SECOND".formatted(tier.maxWait().toSeconds());
+        }
+        return """
+                WITH live_tables AS (
+                  SELECT t.table_id, t.table_name, s.schema_id, s.schema_name
+                  FROM %1$s.ducklake_table t
+                  JOIN %1$s.ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL
+                  WHERE t.end_snapshot IS NULL
+                ),
+                options AS (
+                  SELECT scope, scope_id, any_value(value) AS value
+                  FROM %1$s.ducklake_metadata WHERE key = 'auto_compact'
+                  GROUP BY scope, scope_id
+                ),
+                compactable AS (
+                  SELECT lt.* FROM live_tables lt
+                  LEFT JOIN options ot ON ot.scope = 'table' AND ot.scope_id = lt.table_id
+                  LEFT JOIN options os ON os.scope = 'schema' AND os.scope_id = lt.schema_id
+                  LEFT JOIN options oc ON oc.scope IS NULL
+                  WHERE coalesce(ot.value, os.value, oc.value, 'true') = 'true'
+                ),
+                files AS (
+                  SELECT d.data_file_id, d.table_id, d.partition_id, d.file_size_bytes, d.begin_snapshot
+                  FROM %1$s.ducklake_data_file d
+                  WHERE d.end_snapshot IS NULL AND d.file_size_bytes >= %2$d AND d.file_size_bytes < %3$d
+                    AND d.table_id IN (SELECT table_id FROM compactable)
+                    AND d.data_file_id NOT IN (
+                      SELECT data_file_id FROM %1$s.ducklake_delete_file WHERE data_file_id IS NOT NULL)
+                ),
+                versions AS (
+                  SELECT table_id, begin_snapshot, schema_version,
+                         lead(begin_snapshot, 1, 9223372036854775807)
+                           OVER (PARTITION BY table_id ORDER BY begin_snapshot) AS next_begin
+                  FROM %1$s.ducklake_schema_versions
+                ),
+                partition_keys AS (
+                  SELECT data_file_id,
+                         string_agg(coalesce(partition_value, chr(0)), chr(31) ORDER BY partition_key_index) AS pkey
+                  FROM %1$s.ducklake_file_partition_value
+                  WHERE data_file_id IN (SELECT data_file_id FROM files)
+                  GROUP BY data_file_id
+                ),
+                eligible AS (
+                  SELECT f.table_id, f.partition_id, f.file_size_bytes, v.schema_version,
+                         coalesce(k.pkey, '') AS pkey,
+                         coalesce(sn.snapshot_time, oldest.snapshot_time) AS committed
+                  FROM files f
+                  LEFT JOIN %1$s.ducklake_snapshot sn ON sn.snapshot_id = f.begin_snapshot
+                  CROSS JOIN (SELECT min(snapshot_time) AS snapshot_time FROM %1$s.ducklake_snapshot) oldest
+                  LEFT JOIN versions v ON v.table_id = f.table_id
+                       AND f.begin_snapshot >= v.begin_snapshot AND f.begin_snapshot < v.next_begin
+                  LEFT JOIN partition_keys k ON k.data_file_id = f.data_file_id
+                ),
+                groups AS (
+                  SELECT table_id, count(*) AS files, sum(file_size_bytes) AS bytes,
+                         list_sort(list(committed))[2] AS second_oldest,
+                         count(*) FILTER (WHERE committed >= now() - INTERVAL %4$d SECOND) AS recent
+                  FROM eligible
+                  GROUP BY table_id, schema_version, partition_id, pkey
+                  HAVING count(*) >= 2
+                ),
+                sorted_tables AS (
+                  SELECT DISTINCT table_id FROM %1$s.ducklake_sort_info WHERE end_snapshot IS NULL
+                )
+                SELECT c.schema_name, c.table_name,
+                       sum(g.files)::BIGINT AS files_waiting,
+                       sum(g.bytes)::BIGINT AS bytes_waiting,
+                       epoch_ms(min(g.second_oldest)) AS oldest_waiting_ms,
+                       count(*) FILTER (WHERE g.recent > 0)::INTEGER AS busy_partitions,
+                       bool_or(st.table_id IS NOT NULL) AS sorted
+                FROM groups g
+                JOIN compactable c USING (table_id)
+                LEFT JOIN sorted_tables st USING (table_id)
+                GROUP BY c.schema_name, c.table_name, c.table_id
+                HAVING bool_or(%5$s)
+                """.formatted(md, tier.minFileSize(), tier.maxFileSize(), CallSizing.BUSY_WINDOW.toSeconds(), admitted);
+    }
+
+    @Override
+    public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap) throws Exception {
+        Connection connection = connection(database, tier);
+        setTarget(connection, tier);
+        String sql = mergeSql(database, table, tier, cap);
         Timer.Sample sample = metrics.startTimer();
         long start = System.nanoTime();
-        // ducklake_merge_adjacent_files returns one row per compacted table:
-        // (schema_name, table_name, files_processed, files_created). Sum across tables; null when the
-        // call returned no rows (nothing merged). Confirmed against DuckLake on DuckDB v1.5.x.
+        // One row per table merged: (schema_name, table_name, files_processed, files_created); none
+        // when nothing was merged.
         Long filesProcessed = null;
         Long filesCreated = null;
         try (Statement statement = connection.createStatement()) {
-            boolean hasResultSet = statement.execute(sql);
-            if (hasResultSet) {
-                try (var rs = statement.getResultSet()) {
+            if (statement.execute(sql)) {
+                try (ResultSet rs = statement.getResultSet()) {
                     long processed = 0, created = 0;
                     boolean anyRows = false;
                     while (rs.next()) {
@@ -62,57 +311,80 @@ public class DuckDbTierCompactor implements TierCompactor {
             metrics.stopTimer(sample, tier.name(), "merge", database);
         }
         long durationMergeMs = (System.nanoTime() - start) / 1_000_000;
-        logger.debug("Tier '{}' merge completed for {} in {}ms (filesProcessed={}, filesCreated={})",
-                tier.name(), database, durationMergeMs, filesProcessed, filesCreated);
-        // No separate commit time: merge + catalog commit are one atomic CALL here (see CompactionRun).
+        logger.debug("Tier '{}' merged {}.{} with cap {} in {}ms (filesProcessed={}, filesCreated={})",
+                tier.name(), database, table.name(), cap, durationMergeMs, filesProcessed, filesCreated);
         return new MergeOutcome(durationMergeMs, filesProcessed, filesCreated);
     }
 
-    private Connection connectionFor(String database, CompactionTier tier) throws SQLException {
-        String key = connectionKey(database, tier.name());
-        Connection existing = connections.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        synchronized (this) {
-            existing = connections.get(key);
-            if (existing != null) {
-                return existing;
-            }
-            Connection opened = RawConnections.open(startupScript, tier.connectionSettings());
-            connections.put(key, opened);
-            return opened;
+    /**
+     * One table's merge, fenced to the tier's band so tiers never touch each other's files.
+     * {@code max_compacted_files} is the cap of Call sizing, never above the tier's static cap.
+     */
+    static String mergeSql(String database, TableWork table, CompactionTier tier, int cap) {
+        return ("CALL ducklake_merge_adjacent_files(%s, %s, schema := %s, min_file_size := %d, max_file_size := %d,"
+                + " max_compacted_files := %d)").formatted(literal(database), literal(table.table()),
+                literal(table.schema()), tier.minFileSize(), tier.maxFileSize(), cap);
+    }
+
+    @Override
+    public void reset(String database, CompactionTier tier) {
+        Open removed = open.remove(key(database, tier.name()));
+        if (removed != null) {
+            closeQuietly(removed.connection());
         }
     }
 
-    private static String connectionKey(String database, String tierName) {
+    @Override
+    public long memoryUsageBytes(String database, CompactionTier tier) {
+        Open pair = open.get(key(database, tier.name()));
+        if (pair == null) {
+            return -1;
+        }
+        try (Statement statement = pair.connection().createStatement();
+             ResultSet rs = statement.executeQuery("SELECT coalesce(sum(memory_usage_bytes), 0) FROM duckdb_memory()")) {
+            return rs.next() ? rs.getLong(1) : -1;
+        } catch (SQLException e) {
+            logger.debug("Could not read duckdb_memory() for {} tier '{}'", database, tier.name(), e);
+            return -1;
+        }
+    }
+
+    private Connection connection(String database, CompactionTier tier) throws Exception {
+        Open pair = open.get(key(database, tier.name()));
+        if (pair == null) {
+            Readiness readiness = prepare(database, tier);
+            if (readiness.isRefused()) {
+                throw new IllegalStateException("tier '%s' is refused for %s: %s"
+                        .formatted(tier.name(), database, readiness.refused()));
+            }
+            pair = open.get(key(database, tier.name()));
+        }
+        return pair.connection();
+    }
+
+    static String metadataCatalogName(String database) {
+        return "__ducklake_metadata_" + database;
+    }
+
+    private static String literal(String value) {
+        return "'" + value.replace("'", "''") + "'";
+    }
+
+    private static String key(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;
     }
 
-    /**
-     * {@code min_file_size} is what keeps tiers from racing each other — every tier passes one
-     * (always required, including {@code 0} for the lowest tier), fencing it to its own range so
-     * tiers can run concurrently with no lock (their ranges are validated disjoint at startup in
-     * {@link CompactionConfig#from}). {@code max_compacted_files} is appended only when positive,
-     * matching that parameter's own unbounded-at-zero convention.
-     */
-    static String mergeAdjacentFilesSql(String database, long minFileSizeBytes, long maxFileSizeBytes, long maxCompactedFiles) {
-        StringBuilder sql = new StringBuilder("CALL ducklake_merge_adjacent_files('%s', min_file_size := %d, max_file_size := %d"
-                .formatted(database, minFileSizeBytes, maxFileSizeBytes));
-        if (maxCompactedFiles > 0) {
-            sql.append(", max_compacted_files := ").append(maxCompactedFiles);
+    private static void closeQuietly(Connection connection) {
+        try {
+            connection.close();
+        } catch (SQLException e) {
+            logger.warn("Failed to close a tier connection", e);
         }
-        return sql.append(")").toString();
     }
 
     @Override
     public void close() {
-        connections.values().forEach(connection -> {
-            try {
-                connection.close();
-            } catch (SQLException e) {
-                logger.warn("Failed to close a tier connection", e);
-            }
-        });
+        open.values().forEach(pair -> closeQuietly(pair.connection()));
+        open.clear();
     }
 }

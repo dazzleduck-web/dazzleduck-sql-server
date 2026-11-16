@@ -50,16 +50,19 @@ public class Main {
             List<String> tierNames = config.tiers().stream().map(CompactionTier::name).toList();
             CompactionState state = new CompactionState(telemetry.registry(), config.databases(), tierNames);
             TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state);
+            // One job per table at a time, across the tier loops, retention and the delete-file rewrite
+            TableLeases leases = new TableLeases();
             Housekeeper housekeeper = new DuckLakeHousekeeper(
                     startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
-                    config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
+                    config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state, leases);
             DataRetentionConfig retention = config.dataRetention();
             DataRetention dataRetention = retention.enabled()
                     ? new DuckLakeDataRetention(startupScript, config.databases(), retention.policyTable(),
-                            retention.connectionSettings(), retention.maxFilesPerCycle(), state)
+                            retention.connectionSettings(), retention.maxFilesPerCycle(), state, leases)
                     : null;
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
-            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state, runLog);
+            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state,
+                    runLog, leases, java.time.Clock.systemUTC());
             healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
 
             healthServer.start();

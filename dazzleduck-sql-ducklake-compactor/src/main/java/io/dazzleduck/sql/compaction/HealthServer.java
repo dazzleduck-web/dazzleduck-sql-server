@@ -97,6 +97,7 @@ public class HealthServer implements Closeable {
         sb.append("  \"status\": \"UP\",\n");
         sb.append("  \"uptime\": \"").append(stats.uptime()).append("\",\n");
         sb.append("  \"serviceStartTime\": \"").append(stats.serviceStart()).append("\",\n");
+        sb.append("  \"alerts\": ").append(stringArray(stats.alerts())).append(",\n");
         sb.append("  \"databases\": {");
 
         var entries = stats.databases().entrySet().stream().toList();
@@ -111,7 +112,7 @@ public class HealthServer implements Closeable {
                 sb.append("\n        \"").append(tierName).append("\": {\n");
                 sb.append("          \"totalCompactions\": ").append(ds.tierCompactionCounts().get(tierName)).append(",\n");
                 sb.append("          \"currentFiles\": ").append(ds.currentTierFileCounts().getOrDefault(tierName, 0L)).append(",\n");
-                sb.append("          \"nextExecutionTime\": ").append(instant(ds.nextExecutionTimeByTier().get(tierName)))
+                sb.append("          \"loop\": ").append(loopJson(ds.tiers().get(tierName)))
                         .append(runLog != null ? ",\n" : "\n");
                 if (runLog != null) {
                     sb.append("          \"telemetry\": ").append(telemetryJson(entry.getKey(), tierName)).append("\n");
@@ -124,7 +125,8 @@ public class HealthServer implements Closeable {
             sb.append("      \"totalFilesCompacted\": ").append(ds.totalFilesCompacted()).append(",\n");
             sb.append("      \"totalFilesRewritten\": ").append(ds.totalFilesRewritten()).append(",\n");
             sb.append("      \"lastSuccessTime\": ").append(instant(ds.lastSuccessTime())).append(",\n");
-            sb.append("      \"currentTotalFiles\": ").append(ds.currentTotalFiles()).append("\n");
+            sb.append("      \"currentTotalFiles\": ").append(ds.currentTotalFiles()).append(",\n");
+            sb.append("      \"unexpiredSnapshots\": ").append(ds.unexpiredSnapshots()).append("\n");
             sb.append("    }").append(i < entries.size() - 1 ? "," : "");
         }
 
@@ -137,9 +139,63 @@ public class HealthServer implements Closeable {
         return i == null ? "null" : "\"" + i + "\"";
     }
 
+    /** A tier loop's state, queue, carry-over, back-offs and memory, or null for a disabled tier. */
+    private static String loopJson(CompactionStats.TierStatus t) {
+        if (t == null) {
+            return "null";
+        }
+        return "{"
+                + "\"state\": " + string(t.state())
+                + ", \"refused\": " + string(t.refused())
+                + ", \"lastPass\": " + instant(t.lastPass())
+                + ", \"passes\": " + t.passes()
+                + ", \"queue\": " + t.queue()
+                + ", \"carryOver\": " + t.carryOver()
+                + ", \"backoffs\": " + stringArray(t.backoffs())
+                + ", \"starved\": " + stringArray(t.starved())
+                + ", \"stale\": " + stringArray(t.stale())
+                + ", \"idleTxnTimeoutMs\": " + t.idleTxnTimeoutMs()
+                + ", \"threads\": " + t.threads()
+                + ", \"duckdbMemoryBytes\": " + t.duckdbMemoryBytes()
+                + "}";
+    }
+
+    private static String stringArray(java.util.List<String> values) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < values.size(); i++) {
+            sb.append(i > 0 ? ", " : "").append(string(values.get(i)));
+        }
+        return sb.append("]").toString();
+    }
+
+    /** A JSON string literal, or null. */
+    static String string(String value) {
+        if (value == null) {
+            return "null";
+        }
+        StringBuilder sb = new StringBuilder("\"");
+        for (char c : value.toCharArray()) {
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.append('"').toString();
+    }
+
     /**
-     * The spec's {@code /health} extension: the latest run plus the derived aggregates for a tier,
-     * or {@code null} when nothing has run yet. Compact inline JSON on one object.
+     * The tier's latest table call plus the derived aggregates over its retained calls, or
+     * {@code null} when it has made none yet. Compact inline JSON on one object.
      */
     private String telemetryJson(String db, String tierName) {
         CompactionRunLog.Key key = new CompactionRunLog.Key(db, tierName);
@@ -150,28 +206,29 @@ public class HealthServer implements Closeable {
         CompactionRunLog.DerivedAggregates a = runLog.aggregates(key);
         return "{"
                 + "\"runId\": " + r.runId()
+                + ", \"table\": " + string(r.tableName())
                 + ", \"outcome\": \"" + r.outcome() + "\""
                 + ", \"failureClass\": \"" + r.failureClass() + "\""
                 + ", \"durationTotalMs\": " + r.durationTotalMs()
                 + ", \"durationMergeMs\": " + r.durationMergeMs()
-                + ", \"filesRetired\": " + r.filesRetired()
-                + ", \"bytesRetired\": " + r.bytesRetired()
-                + ", \"actualGapMs\": " + r.actualGapMs()
-                + ", \"maxCompactedFiles\": " + r.maxCompactedFiles()
+                + ", \"cap\": " + r.cap()
+                + ", \"staticCap\": " + r.staticCap()
+                + ", \"busyPartitions\": " + r.busyPartitions()
+                + ", \"filesWaiting\": " + r.filesWaiting()
+                + ", \"bytesWaiting\": " + r.bytesWaiting()
                 + ", \"filesProcessed\": " + r.filesProcessed()
                 + ", \"filesCreated\": " + r.filesCreated()
+                + ", \"filesRetired\": " + r.filesRetired()
+                + ", \"actualGapMs\": " + r.actualGapMs()
                 + ", \"rssPeakBytes\": " + r.rssPeakBytes()
                 + ", \"spillPeakBytes\": " + r.spillPeakBytes()
                 + ", \"memoryLimitBytes\": " + r.memoryLimitBytes()
+                + ", \"commitTimeoutMs\": " + r.commitTimeoutMs()
                 + ", \"derived\": {"
                 + "\"windowSize\": " + a.windowSize()
                 + ", \"throughputFilesPerSec\": " + round(a.throughputFilesPerSec())
-                + ", \"throughputBytesPerSec\": " + round(a.throughputBytesPerSec())
-                + ", \"arrivalFilesPerSec\": " + round(a.arrivalFilesPerSec())
-                + ", \"drainFilesPerSec\": " + round(a.drainFilesPerSec())
                 + ", \"p95DurationMs\": " + a.p95DurationMs()
                 + ", \"durationHeadroom\": " + round(a.durationHeadroom())
-                + ", \"saturated\": " + a.saturated()
                 + ", \"idleRatio\": " + round(a.idleRatio())
                 + "}}";
     }

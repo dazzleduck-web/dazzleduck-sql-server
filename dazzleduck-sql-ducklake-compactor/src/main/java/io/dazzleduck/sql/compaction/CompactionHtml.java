@@ -8,9 +8,9 @@ import java.util.Map;
 
 /**
  * Renders the compaction telemetry ring buffer ({@link CompactionRunLog}) as a self-contained,
- * auto-refreshing HTML dashboard — one card per {@code (database, tier)} showing its latest cycle,
- * the spec's derived aggregates, failure-by-class, resource headroom, and sparklines of cycle
- * duration and files retired over the retained window. Dependency-free (inline CSS + inline SVG) so
+ * auto-refreshing HTML dashboard — one card per {@code (database, tier)} showing its latest table
+ * call, the derived aggregates, failure-by-class, resource headroom, and sparklines of call duration
+ * and files retired over the retained window. Dependency-free (inline CSS + inline SVG) so
  * it serves from the compactor's bare {@code HttpServer}.
  */
 final class CompactionHtml {
@@ -21,7 +21,7 @@ final class CompactionHtml {
         List<CompactionRunLog.Key> keys = log.keys();
         StringBuilder cards = new StringBuilder();
         if (keys.isEmpty()) {
-            cards.append("<div class=\"empty\">No compaction cycles recorded yet.</div>");
+            cards.append("<div class=\"empty\">No table calls recorded yet.</div>");
         } else {
             for (CompactionRunLog.Key key : keys) {
                 cards.append(card(key, log.latest(key), log.recent(key), log.aggregates(key)));
@@ -69,7 +69,7 @@ final class CompactionHtml {
                 </head>
                 <body>
                     <h1>DuckLake Compaction Telemetry</h1>
-                    <div class="ts">Per-cycle capture · last %d runs per tier · auto-refresh %ds · generated %s</div>
+                    <div class="ts">Per-call capture · last %d calls per tier · auto-refresh %ds · generated %s</div>
                     <div class="grid">%s</div>
                 </body>
                 </html>
@@ -85,7 +85,7 @@ final class CompactionHtml {
             case FAILED -> "<span class=\"badge b-failed\">FAILED</span>";
         };
         String headroomClass = agg.durationHeadroom() >= 0.8 ? "bad" : agg.durationHeadroom() >= 0.5 ? "warn" : "good";
-        String drainClass = agg.drainFilesPerSec() < 0 ? "bad" : "good";
+        String capClass = latest.cap() < latest.staticCap() ? "warn" : null;
 
         StringBuilder chips = new StringBuilder();
         for (Map.Entry<CompactionRun.FailureClass, Long> e : agg.failuresByClass().entrySet()) {
@@ -105,11 +105,11 @@ final class CompactionHtml {
         return """
                 <div class="card">
                   <h2>%s %s <span class="db">· %s</span></h2>
-                  <div class="db">run #%d · %s ago · gap %s · saturated: %s</div>
+                  <div class="db">call #%d on %s · %s ago · gap %s</div>
                   <div class="metrics">
                     %s%s%s%s%s%s%s%s
                   </div>
-                  <div class="spark"><div class="lbl">cycle duration (ms), last %d</div>%s</div>
+                  <div class="spark"><div class="lbl">call duration (ms), last %d</div>%s</div>
                   <div class="spark"><div class="lbl">files retired, last %d</div>%s</div>
                   <div class="chips">%s</div>
                   <div class="res">RSS peak %s · spill %s · mem limit %s</div>
@@ -117,17 +117,18 @@ final class CompactionHtml {
                 </div>
                 """.formatted(
                 escape(key.tierName()), badge, escape(key.database()),
-                latest.runId(), age(latest.endedAt()), gap(latest.actualGapMs()),
-                agg.saturated() ? "<span class=\"warn\">yes</span>" : "no",
-                metric("files", (latest.activeFilesBefore() != null ? latest.activeFilesBefore() : "?")
-                        + " → " + (latest.activeFilesAfter() != null ? latest.activeFilesAfter() : "?"), null),
-                metric("retired", latest.filesRetired() != null ? latest.filesRetired() + " files" : "?", null),
+                latest.runId(), escape(latest.tableName()), age(latest.endedAt()), gap(latest.actualGapMs()),
+                metric("waiting", (latest.filesWaiting() != null ? latest.filesWaiting() + " files" : "?")
+                        + " · " + (latest.bytesWaiting() != null ? formatBytes(latest.bytesWaiting()) : "?"), null),
+                metric("merged", (latest.filesProcessed() != null ? latest.filesProcessed() : 0) + " → "
+                        + (latest.filesCreated() != null ? latest.filesCreated() : 0) + " files", null),
+                metric("cap", latest.cap() + " of " + latest.staticCap(), capClass),
+                metric("busy partitions", latest.busyPartitions(), null),
                 metric("throughput", fmt1(agg.throughputFilesPerSec()) + " f/s", null),
-                metric("bytes/s", formatBytes((long) agg.throughputBytesPerSec()) + "/s", null),
-                metric("arrival", fmt1(agg.arrivalFilesPerSec()) + " f/s", null),
-                metric("drain", fmt1(agg.drainFilesPerSec()) + " f/s", drainClass),
+                metric("idle calls", pct(agg.idleRatio()), null),
                 metric("p95 duration", agg.p95DurationMs() + " ms", null),
-                metric("headroom", pct(agg.durationHeadroom()), headroomClass),
+                metric("headroom", latest.commitTimeoutMs() > 0 ? pct(agg.durationHeadroom()) : "no timeout",
+                        latest.commitTimeoutMs() > 0 ? headroomClass : null),
                 durations.length, sparkline(durations, "#2b6cb0"),
                 filesRetired.length, sparkline(filesRetired, "#2f855a"),
                 chips.toString(),

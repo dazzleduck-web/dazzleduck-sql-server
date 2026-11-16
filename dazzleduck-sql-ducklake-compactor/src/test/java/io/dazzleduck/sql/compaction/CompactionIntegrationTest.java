@@ -34,15 +34,15 @@ class CompactionIntegrationTest {
     static final String CATALOG = "test_lake";
     static final String MD_DATABASE = "__ducklake_metadata_" + CATALOG;
 
-    static final CompactionTier MINOR = new CompactionTier(
-            "minor", true, Duration.ofSeconds(60), 0, 512 * 1024L, 0, List.of());
-    static final CompactionTier MAJOR = new CompactionTier(
-            "major", true, Duration.ofMillis(100), 512 * 1024L, 10 * 1024 * 1024L, 0, List.of());
+    static final CompactionTier MINOR = CompactionTier.of("minor", 0, 512 * 1024L, 1024 * 1024L, 12);
+    static final CompactionTier MAJOR = CompactionTier.of("major", 512 * 1024L, 10 * 1024 * 1024L, 10 * 1024 * 1024L, 16);
 
     static PostgreSQLContainer postgres;
     static SimpleMeterRegistry registry;
     static CompactionConfig config;
     static String startupScript;
+    static String connectionString;
+    static Path dataPath;
     static CompactionService service;
 
     @BeforeAll
@@ -53,13 +53,13 @@ class CompactionIntegrationTest {
                 .withPassword("duck");
         postgres.start();
 
-        Path dataPath = tempDir.resolve("data");
+        dataPath = tempDir.resolve("data");
         Files.createDirectories(dataPath);
 
         // The "postgres:" sub-scheme is required, not optional: "ducklake:host=..." with no scheme
         // silently falls back to a LOCAL file catalog named after the literal connection string
         // (verified empirically — zero ducklake_* tables ever appear in Postgres without it).
-        String connectionString = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
+        connectionString = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
                 postgres.getHost(), postgres.getFirstMappedPort());
         // Only the idempotent parts (extension load + ATTACH) — this text gets replayed by every raw
         // connection DuckDbTierCompactor/DuckLakeHousekeeper/CompactionService open (see
@@ -116,22 +116,28 @@ class CompactionIntegrationTest {
 
     @Test
     @Order(2)
-    void minorTierTimerIsRecorded() {
-        service.runTier(CATALOG, MINOR);
+    void aMinorPassListsTheTableAndMergesIt() {
+        TierLoop.PassResult result = service.runPass(CATALOG, MINOR);
+        assertEquals(1, result.listed(), "events has six small files");
+        assertEquals(1, result.merged());
 
-        Timer timer = registry.find("ducklake.compaction.duration")
-                .tag("type", "minor")
-                .tag("step", "merge")
-                .tag("database", CATALOG)
-                .timer();
+        for (String step : List.of("discover", "merge")) {
+            Timer timer = registry.find("ducklake.compaction.duration")
+                    .tag("type", "minor").tag("step", step).tag("database", CATALOG).timer();
+            assertNotNull(timer, "Minor tier timer not registered for " + step);
+            assertEquals(1, timer.count());
+        }
+        assertEquals(0, service.getStats().databases().get(CATALOG).tiers().get("minor").idleTxnTimeoutMs(),
+                "Postgres's default idle-in-transaction timeout is 0: no limit");
 
-        assertNotNull(timer, "Minor tier timer not registered");
-        assertEquals(1, timer.count());
+        TierLoop.PassResult again = service.runPass(CATALOG, MINOR);
+        assertEquals(0, again.listed(), "one file left: nothing to merge");
     }
 
     @Test
     @Order(3)
     void fileCountGaugesArePopulated() {
+        service.refreshFileCounts(CATALOG);
         double total = registry.find("ducklake.files.total")
                 .tag("database", CATALOG)
                 .gauge()
@@ -157,20 +163,28 @@ class CompactionIntegrationTest {
     void bothTiersCanRunConcurrentlyAgainstTheSameDatabase() throws Exception {
         // The whole point of raw, independent per-(database,tier) connections: this must not throw
         // (e.g. the file-handle conflict a local file-based catalog would hit) and both must complete.
-        Thread minorThread = new Thread(() -> service.runTier(CATALOG, MINOR));
-        Thread majorThread = new Thread(() -> service.runTier(CATALOG, MAJOR));
+        try (Connection conn = ConnectionPool.getConnection()) {
+            for (int i = 0; i < 3; i++) {
+                ConnectionPool.execute(conn, "INSERT INTO %s.main.events SELECT range, 'more' FROM range(10)".formatted(CATALOG));
+            }
+        }
+        Thread minorThread = new Thread(() -> service.runPass(CATALOG, MINOR));
+        Thread majorThread = new Thread(() -> service.runPass(CATALOG, MAJOR));
         minorThread.start();
         majorThread.start();
         minorThread.join(10_000);
         majorThread.join(10_000);
 
-        Timer mergeTimer = registry.find("ducklake.compaction.duration")
+        Timer discoverTimer = registry.find("ducklake.compaction.duration")
                 .tag("type", "major")
-                .tag("step", "merge")
+                .tag("step", "discover")
                 .tag("database", CATALOG)
                 .timer();
-        assertNotNull(mergeTimer, "Expected major tier timer for step: merge");
-        assertTrue(mergeTimer.count() >= 1, "Expected at least one recording for step: merge");
+        assertNotNull(discoverTimer, "Expected major tier timer for step: discover");
+        assertTrue(discoverTimer.count() >= 1, "Expected at least one recording for step: discover");
+        Timer minorMerge = registry.find("ducklake.compaction.duration")
+                .tag("type", "minor").tag("step", "merge").tag("database", CATALOG).timer();
+        assertEquals(2, minorMerge.count(), "minor merged the new files beside major");
     }
 
     @Test
@@ -178,6 +192,8 @@ class CompactionIntegrationTest {
     void housekeepingTimersAreRecorded() throws Exception {
         service.runHousekeeping(CATALOG);
 
+        assertTrue(service.getStats().databases().get(CATALOG).unexpiredSnapshots() > 0,
+                "housekeeping counts the snapshots left after expiry");
         for (String step : List.of("expire", "cleanup")) {
             Timer timer = registry.find("ducklake.compaction.duration")
                     .tag("type", "housekeeping")
@@ -197,7 +213,7 @@ class CompactionIntegrationTest {
                         .formatted(MD_DATABASE),
                 Long.class);
 
-        service.runTier(CATALOG, MAJOR);
+        service.runPass(CATALOG, MAJOR);
 
         long after = ConnectionPool.collectFirst(
                 "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE end_snapshot IS NULL"
@@ -209,16 +225,40 @@ class CompactionIntegrationTest {
 
     @Test
     @Order(7)
-    void connectionSettingsAreAppliedBeforeTheMergeCall() throws Exception {
-        // Proves the settings SQL actually runs on the same connection the merge uses, against a
-        // real catalog — a bad/incompatible setting would make RawConnections.open throw before the
-        // merge even starts.
+    void connectionSettingsAreAppliedWhenTheTierConnectionOpens() throws Exception {
+        // Proves the settings SQL actually runs on the connection the calls use, against a real
+        // catalog — a bad setting would make RawConnections.open throw before any call.
         CompactionState state = new CompactionState(new SimpleMeterRegistry(), config.databases(), List.of("minor", "major"));
-        TierCompactor withSettings = new DuckDbTierCompactor(startupScript, state);
-        CompactionTier majorWithSettings = new CompactionTier(
-                "major", true, MAJOR.frequency(), MAJOR.minFileSize(), MAJOR.maxFileSize(), 0, List.of("SET threads=2"));
+        try (TierCompactor withSettings = new DuckDbTierCompactor(startupScript, state)) {
+            assertFalse(withSettings.prepare(CATALOG, MAJOR.withConnectionSettings(List.of("SET threads=2"))).isRefused());
+            assertDoesNotThrow(() -> withSettings.discover(CATALOG, MAJOR));
+        }
+        try (TierCompactor bad = new DuckDbTierCompactor(startupScript, state)) {
+            assertThrows(Exception.class, () -> bad.prepare(CATALOG, MAJOR.withConnectionSettings(List.of("SET no_such_setting=1"))));
+        }
+    }
 
-        assertDoesNotThrow(() -> withSettings.compact(CATALOG, majorWithSettings));
+    @Test
+    @Order(9)
+    void theIdleTransactionTimeoutIsReadFromPostgresAndRefusesATierWhoseGroupCannotFit() throws Exception {
+        // The timeout comes from the catalog's own session, so an option in the ATTACH string counts.
+        String withTimeout = ("INSTALL ducklake; LOAD ducklake;\nATTACH 'ducklake:postgres:%s options=-cidle_in_transaction_session_timeout=%d'"
+                + " AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);");
+        CompactionState state = new CompactionState(new SimpleMeterRegistry(), config.databases(), List.of("minor"));
+        // The spec's minor tier: a full group of 5 KB files is 3,200 files, 144 s, so it needs 180 s.
+        CompactionTier specMinor = CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12);
+        try (TierCompactor compactor = new DuckDbTierCompactor(
+                withTimeout.formatted(connectionString, 600_000, CATALOG, dataPath), state)) {
+            TierCompactor.Readiness ready = compactor.prepare(CATALOG, specMinor);
+            assertFalse(ready.isRefused(), String.valueOf(ready.refused()));
+            assertEquals(600_000, ready.idleTxnTimeoutMs());
+        }
+        try (TierCompactor compactor = new DuckDbTierCompactor(
+                withTimeout.formatted(connectionString, 100_000, CATALOG, dataPath), state)) {
+            TierCompactor.Readiness refused = compactor.prepare(CATALOG, specMinor);
+            assertTrue(refused.isRefused(), "80 s cannot hold one 144 s group");
+            assertTrue(refused.refused().contains("does not fit"), refused.refused());
+        }
     }
 
     @Test

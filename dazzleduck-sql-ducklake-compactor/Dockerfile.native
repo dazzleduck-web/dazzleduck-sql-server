@@ -78,6 +78,9 @@ LABEL org.opencontainers.image.title="dazzleduck ducklake-compactor (native)"
 COPY --from=build /src/dazzleduck-sql-ducklake-compactor/target/compactor /usr/local/bin/compactor
 # Pre-installed DuckDB extensions (arrow, patched ducklake) so the compactor loads them without network.
 COPY --from=build /root/.duckdb /root/.duckdb
+# Most compactor memory is native malloc memory outside DuckDB's memory_limit, kept by glibc's
+# per-thread arenas; two arenas bound it (DYNAMIC_COMPACTION_SPEC.md).
+ENV MALLOC_ARENA_MAX=2
 # /health HTTP server.
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/compactor"]
