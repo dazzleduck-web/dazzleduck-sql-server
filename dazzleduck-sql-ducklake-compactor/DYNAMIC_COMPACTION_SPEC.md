@@ -34,7 +34,7 @@ These static caps keep each call near 1 GB of input (major 16 × 64 MB, mega 5 �
 
 **At most one leftover file per band.** Every in-band file is below the target, so a group's second file is always added: any two files in the same band, partition and schema version merge (7.9 + 7.9 MB → 15.8 MB). Once caught up, each partition holds at most one file per band per schema version, plus final files. This assumes no delete files: DuckLake skips files that carry them, so a workload with row-level deletes keeps more leftovers until they are rewritten.
 
-**Minor admission threshold.** Because any two files merge, a slow table would merge one new tiny file into its leftover on almost every pass, rewriting the leftover and committing a snapshot every few seconds until it reaches 8 MB. So minor admits a table only when one of its groups has at least `MINOR_MIN_FILES` eligible files, or its oldest eligible file is older than `MINOR_MAX_WAIT`. Major and mega keep the 2-file trigger: their inputs arrive slowly and are already large.
+**Minor admission threshold.** Because any two files merge, a slow table would merge one new tiny file into its leftover on almost every pass, rewriting the leftover and committing a snapshot every few seconds until it reaches 8 MB. So minor admits a table when one of its groups has at least `MINOR_MIN_FILES` (4) eligible files, or its oldest eligible file reaches `MINOR_MAX_WAIT` (5 min), so no small file waits longer than that. Both stay low because every small file waiting is one more file each query on that partition has to open. Major and mega keep the 2-file trigger: their inputs arrive slowly and are already large.
 
 ## Call sizing
 
@@ -82,8 +82,8 @@ In steady state a group takes well under a second and the cap is the static cap 
 | sec_per_file, sorted table | 0.045 s (4 threads) | Measured, ~22 files/s |
 | sec_per_file, unsorted table | 0.09 s | **Guess**: 2× sorted |
 | throughput (major, mega) | 50 MB/s | **Guess** |
-| MINOR_MIN_FILES | 16 | Proposed; about 1 s of merge work per call at the sorted rate |
-| MINOR_MAX_WAIT | 10 min | Proposed; bounds how long a quiet table keeps small files |
+| MINOR_MIN_FILES | 4 | Proposed; each waiting small file is one more file a query opens |
+| MINOR_MAX_WAIT | 5 min | Proposed; the longest a small file waits before it is merged |
 | PASS_TIME_LIMIT | 2 min | Proposed; after it, no new call starts until the next refresh |
 | THREADS_PER_CPU | 2 | Proposed; threads mostly wait on object-store reads |
 | MEM_BUDGET (minor) | 1 GiB | Example: minor `memory_limit` with a 4 GiB container limit |
