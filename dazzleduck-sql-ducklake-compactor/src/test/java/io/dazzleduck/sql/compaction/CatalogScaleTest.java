@@ -16,10 +16,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Review of #544: with a PostgreSQL catalog of ~1.5M live files, minor's discovery ran out of its
- * 512 MB, because the postgres scanner copied every table's catalog rows into DuckDB. The catalog
- * rows here are generated straight into PostgreSQL (discovery reads only the catalog), a million
- * small files of one table beside a small one, and the compactor's catalog queries must run in an
- * instance of 64 MB.
+ * 512 MB, because the postgres scanner copied every table's catalog rows into DuckDB; and every
+ * merge ran out of 307 MB, because DuckLake's file list aggregated the partition values of every
+ * file in the catalog (fixed in the patched DuckLake, from duckdb/ducklake#1410 and #1707). The
+ * catalog rows here are generated straight into PostgreSQL, a million small files of one
+ * partitioned table beside a small one, and the compactor's catalog queries and a merge of the
+ * small table must run in an instance of 64 MB. Runs on the patched extension ({@link PatchedDuckLake}).
  */
 class CatalogScaleTest {
 
@@ -40,10 +42,11 @@ class CatalogScaleTest {
         postgres.start();
         String connection = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
                 postgres.getHost(), postgres.getFirstMappedPort());
-        startupScript = "INSTALL ducklake; LOAD ducklake;\nATTACH 'ducklake:postgres:%s' AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);"
-                .formatted(connection, CATALOG, tempDir.resolve("data"));
+        startupScript = "LOAD '%s';\nATTACH 'ducklake:postgres:%s' AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);"
+                .formatted(PatchedDuckLake.extension(), connection, CATALOG, tempDir.resolve("data"));
         try (Connection c = RawConnections.open(startupScript, List.of()); Statement s = c.createStatement()) {
             s.execute("CREATE TABLE %s.main.big (id BIGINT)".formatted(CATALOG));
+            s.execute("ALTER TABLE %s.main.big SET PARTITIONED BY (id)".formatted(CATALOG));
             s.execute("CREATE TABLE %s.main.small (id BIGINT)".formatted(CATALOG));
             for (int i = 0; i < 3; i++) {
                 s.execute("INSERT INTO %s.main.big VALUES (%d)".formatted(CATALOG, i));
@@ -56,6 +59,12 @@ class CatalogScaleTest {
                     + " FROM ducklake_data_file f JOIN ducklake_table t USING (table_id) WHERE t.table_name = ''big'')")
                     .formatted(FAKE_FILES);
             s.execute("CALL postgres_execute('%s', '%s')".formatted(Sql.metadataCatalogName(CATALOG), copy));
+            // ... each with the partition value of that file
+            String values = ("INSERT INTO ducklake_file_partition_value SELECT (jsonb_populate_record(v, jsonb_build_object("
+                    + "''data_file_id'', 100000000 + g))).* FROM ducklake_file_partition_value v, generate_series(1, %d) g"
+                    + " WHERE v.data_file_id = (SELECT min(f.data_file_id) FROM ducklake_data_file f"
+                    + " JOIN ducklake_table t USING (table_id) WHERE t.table_name = ''big'')").formatted(FAKE_FILES);
+            s.execute("CALL postgres_execute('%s', '%s')".formatted(Sql.metadataCatalogName(CATALOG), values));
         }
     }
 
@@ -74,7 +83,8 @@ class CatalogScaleTest {
             assertFalse(readiness.isRefused(), String.valueOf(readiness.refused()));
             List<TableWork> work = compactor.discover(CATALOG, MINOR);
             TableWork big = work.stream().filter(w -> w.table().equals("big")).findFirst().orElseThrow();
-            assertEquals(FAKE_FILES + 3, big.filesWaiting());
+            assertEquals(FAKE_FILES + 1, big.filesWaiting(), "the copies share the template's partition; "
+                    + "the other two files are alone in theirs");
             assertEquals(3, work.stream().filter(w -> w.table().equals("small")).findFirst().orElseThrow().filesWaiting());
         }
         try (Connection c = RawConnections.open(startupScript, List.of("SET memory_limit = '64MB'"));
@@ -83,6 +93,19 @@ class CatalogScaleTest {
                      Sql.identifier(CatalogSql.postgresSchema(c, CATALOG)), List.of(MINOR))))) {
             assertTrue(rs.next());
             assertEquals(FAKE_FILES + 6, rs.getLong("total_files"));
+        }
+    }
+
+    @Test
+    void aMergeOfTheSmallTableReadsOnlyItsOwnPartitionValues() throws Exception {
+        // Without the backport, the file list of any merge aggregated the million partition values
+        try (Connection c = RawConnections.open(startupScript, List.of("SET memory_limit = '64MB'", "SET threads = 2"));
+             Statement s = c.createStatement();
+             var rs = s.executeQuery("SELECT sum(files_processed), sum(files_created) FROM ducklake_merge_adjacent_files("
+                     + "'%s', 'small', schema := 'main')".formatted(CATALOG))) {
+            assertTrue(rs.next());
+            assertEquals(3, rs.getLong(1));
+            assertEquals(1, rs.getLong(2));
         }
     }
 
