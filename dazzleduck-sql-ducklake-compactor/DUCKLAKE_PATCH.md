@@ -47,6 +47,18 @@ file in the catalog, whatever the table, and with a PostgreSQL catalog the postg
 them all into DuckDB: on a catalog of about 1.4 million files every call failed with
 `Failed to get compaction file list` at a few hundred MB of `memory_limit`.
 
+From `v1.5.6-dazzleduck.5` it also carries two compaction fixes (dazzleduck-web/ducklake#3):
+
+- A backport of [`duckdb/ducklake#1580`](https://github.com/duckdb/ducklake/pull/1580): an autocommit
+  compaction call commits its catalog transaction once the merge is planned and reopens it for the
+  commit, so a long rewrite no longer leaves the catalog session idle in a transaction, where a
+  catalog's `idle_in_transaction_session_timeout` killed it.
+- New, not upstream: a `merge_adjacent_files` call with `max_compacted_files` lists only the files of
+  the oldest groups it can fill (twice the cap, in chunks of `target_file_size`), not every
+  candidate file of the size band, whose list alone ran out of a few hundred MB on a table with a
+  backlog of about 569,000 small files. Files with a delete file or inlined deletions are left out,
+  as the merge skips them.
+
 The runtime and the otel-collector need it as well, not only the compactor. A commit's conflict
 check runs in the committing process, so an ingestion commit made with the stock extension can
 still fail against a concurrent retention `DELETE` or compaction even when the compactor is
@@ -76,7 +88,7 @@ select extension_version from duckdb_extensions() where extension_name = 'duckla
 |---|---|
 | Patched source | [`dazzleduck-web/ducklake`](https://github.com/dazzleduck-web/ducklake), branch `backport/v1.5.6-dazzleduck` |
 | Build + publish workflow | same repo, `.github/workflows/build-and-publish-extension.yml` (manually triggered) |
-| Published binaries | GitHub Releases on that repo, e.g. [`v1.5.6-dazzleduck.4`](https://github.com/dazzleduck-web/ducklake/releases/tag/v1.5.6-dazzleduck.4), assets `ducklake-<platform>.duckdb_extension` for `linux_amd64`, `linux_arm64` (the Docker images), `osx_amd64`, `osx_arm64` and `windows_amd64` (native binaries and local testing) |
+| Published binaries | GitHub Releases on that repo, e.g. [`v1.5.6-dazzleduck.5`](https://github.com/dazzleduck-web/ducklake/releases/tag/v1.5.6-dazzleduck.5), assets `ducklake-<platform>.duckdb_extension` for `linux_amd64`, `linux_arm64` (the Docker images), `osx_amd64`, `osx_arm64` and `windows_amd64` (native binaries and local testing) |
 | Version pins in this repo | the parent `pom.xml`: `ducklake.patch.release`, `ducklake.patch.built.for.duckdb.version`, `ducklake.extension.cache.version` |
 | Drift guard | `DuckLakePatchVersionTest` (fails the build if `duckdb.version` diverges from `ducklake.patch.built.for.duckdb.version`, or if `ducklake.extension.cache.version` no longer matches `duckdb.version`'s first three components) |
 | Runtime enablement | `allow_unsigned_extensions=true`, always as a JDBC connection **property** (not a `SET` statement — DuckDB rejects changing it once the instance is running). In the compactor: `RawConnections.java` for the compaction/housekeeping connections, and `src/main/resources/duckdb.properties` for the shared commons singleton `Main.java` runs the startup script against first (`ConnectionPool.executeOnSingleton` has no other hook for connection properties). In the runtime and the otel-collector: each module's `src/main/resources/duckdb.properties`, read by `ConnectionPool` |
