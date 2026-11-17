@@ -216,6 +216,9 @@
                             <MALLOC_ARENA_MAX>2</MALLOC_ARENA_MAX>
                         </environment>
                         <jvmFlags>
+                            <!-- MemoryBudget reserves the heap and splits the rest among the DuckDB
+                                 instances; the default of 25% would leave less for them -->
+                            <jvmFlag>-XX:MaxRAMPercentage=15</jvmFlag>
                             <jvmFlag>--add-opens=java.base/java.nio=ALL-UNNAMED</jvmFlag>
                             <jvmFlag>--add-opens=java.base/sun.nio.ch=ALL-UNNAMED</jvmFlag>
                             <jvmFlag>--enable-native-access=ALL-UNNAMED</jvmFlag>
@@ -332,6 +335,8 @@
                             </metadataRepository>
                             <buildArgs>
                                 <buildArg>--no-fallback</buildArg>
+                                <!-- The heap MemoryBudget reserves; the native default is 80% of memory -->
+                                <buildArg>-R:MaximumHeapSizePercent=15</buildArg>
                                 <buildArg>-H:+ReportExceptionStackTraces</buildArg>
                                 <!-- Logback/SLF4J must be initialized at build time or the build aborts. -->
                                 <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>

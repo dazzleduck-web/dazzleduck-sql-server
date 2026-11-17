@@ -15,7 +15,6 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -58,8 +57,8 @@ public class CompactionService implements Closeable {
 
     // One raw connection for the whole-catalog file-count gauges — deliberately not
     // io.dazzleduck.sql.commons.ConnectionPool (see RawConnections).
-    // The catalog's PostgreSQL schema per database, or empty when its counts run in DuckDB
-    private final ConcurrentHashMap<String, Optional<String>> postgresSchemas = new ConcurrentHashMap<>();
+    // Where each database's counts run, once known for sure (a failed lookup is retried next refresh)
+    private final ConcurrentHashMap<String, CatalogSql.Lookup> catalogLookups = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
 
     /**
@@ -147,6 +146,10 @@ public class CompactionService implements Closeable {
             }
         }
 
+        String overcommit = memoryOvercommitAlert();
+        if (overcommit != null) {
+            logger.warn(overcommit);
+        }
         logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping every {}s, "
                         + "data retention {}",
                 config.databases().size(), config.tiers().size(),
@@ -175,6 +178,18 @@ public class CompactionService implements Closeable {
         TierLoop loop = loops.compute(loopKey(database, tier.name()),
                 (k, existing) -> existing != null && existing.tier().equals(tier) ? existing : newLoop(database, tier));
         return loop.runPass();
+    }
+
+    /**
+     * The alert when the JVM and every DuckDB instance's memory_limit and allowance outside it
+     * ({@link MemoryBudget#overcommit}) exceed the process's memory, or null.
+     */
+    String memoryOvercommitAlert() {
+        long total = ResourceSampler.totalMemoryBytes();
+        long over = MemoryBudget.overcommit(config, total, Runtime.getRuntime().maxMemory());
+        return over <= 0 ? null : ("The JVM and the DuckDB instances' memory_limit settings, with their memory outside the"
+                + " limit, exceed the process's memory (%d bytes) by %d bytes; lower an explicit memory_limit in"
+                + " connection_settings, or give the container more memory").formatted(total, over);
     }
 
     /** Where the file-count instances spill, and the spill /health reports. Call before {@link #start()}. */
@@ -210,6 +225,10 @@ public class CompactionService implements Closeable {
         if (rss > 0 && limit > 0 && rss > RSS_ALERT_SHARE * limit) {
             alerts.add("RSS %d bytes is above %.0f%% of the container's memory limit %d bytes"
                     .formatted(rss, RSS_ALERT_SHARE * 100, limit));
+        }
+        String overcommit = memoryOvercommitAlert();
+        if (overcommit != null) {
+            alerts.add(overcommit);
         }
         CompactionStats.SpillStatus spillStatus = spill.status();
         alerts.addAll(SpillBudget.alerts(spillStatus));
@@ -285,7 +304,8 @@ public class CompactionService implements Closeable {
             int databases = config.databases().size();
             Connection opened = RawConnections.open(startupScript, spill.apply(database, "file-counts",
                     MemoryBudget.FILE_COUNTS, databases, MemoryBudget.withDefaultLimit(List.of(),
-                            MemoryBudget.FILE_COUNTS, databases, ResourceSampler.totalMemoryBytes())));
+                            MemoryBudget.FILE_COUNTS, databases,
+                            MemoryBudget.duckDbPoolBytes(ResourceSampler.totalMemoryBytes()))));
             countingConnections.put(database, opened);
             return opened;
         }
@@ -300,8 +320,14 @@ public class CompactionService implements Closeable {
         try (var statement = countingConnectionFor(database).createStatement()) {
             // A PostgreSQL catalog counts its own rows and returns one, instead of copying every live
             // file's row into DuckDB (CatalogSql)
-            String schema = postgresSchemas.computeIfAbsent(database,
-                    db -> Optional.ofNullable(CatalogSql.postgresSchema(countingConnections.get(db), db))).orElse(null);
+            CatalogSql.Lookup lookup = catalogLookups.get(database);
+            if (lookup == null) {
+                lookup = CatalogSql.postgresSchema(countingConnections.get(database), database);
+                if (lookup.definitive()) {
+                    catalogLookups.put(database, lookup);
+                }
+            }
+            String schema = lookup.schema();
             String sql = schema != null
                     ? CatalogSql.viaPostgres(database, fileCountsSql(Sql.identifier(schema), config.tiers()))
                     : fileCountsSql(Sql.metadataCatalog(database), config.tiers());

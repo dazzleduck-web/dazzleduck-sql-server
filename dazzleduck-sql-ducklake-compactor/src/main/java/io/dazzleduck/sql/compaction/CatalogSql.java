@@ -29,11 +29,27 @@ final class CatalogSql {
     }
 
     /**
-     * The PostgreSQL schema that holds the DuckLake catalog attached as {@code database} (DuckLake's
-     * {@code METADATA_SCHEMA}, {@code public} by default), or null when the catalog is not
-     * PostgreSQL or the schema cannot be found; callers then use their DuckDB SQL.
+     * Where a catalog's own queries run.
+     *
+     * @param schema     the PostgreSQL schema that holds the catalog's tables, or null to run the DuckDB
+     *                   queries
+     * @param definitive false when the lookup failed (a catalog briefly unreachable): look again later
+     *                   rather than settle for the DuckDB queries, which copy the whole catalog
      */
-    static String postgresSchema(Connection connection, String database) {
+    record Lookup(String schema, boolean definitive) {
+        static final Lookup IN_DUCKDB = new Lookup(null, true);
+        static final Lookup UNKNOWN = new Lookup(null, false);
+    }
+
+    /**
+     * The PostgreSQL schema that holds the DuckLake catalog attached as {@code database} (DuckLake's
+     * {@code METADATA_SCHEMA}, {@code public} by default). When several schemas of the database hold a
+     * DuckLake catalog, the one whose {@code data_path} is this catalog's is taken: the metadata schema
+     * itself is not exposed in SQL, and taking another lake's schema would list another lake's work.
+     * {@link Lookup#IN_DUCKDB} when the catalog is not PostgreSQL or no schema matches;
+     * {@link Lookup#UNKNOWN} when the lookup fails.
+     */
+    static Lookup postgresSchema(Connection connection, String database) {
         try {
             String path = null;
             // The DuckLake catalog's path names its backend, e.g. "postgres:host=... dbname=..."
@@ -47,37 +63,65 @@ final class CatalogSql {
                 }
             }
             if (!isPostgresPath(path)) {
-                return null;
+                return Lookup.IN_DUCKDB;
             }
-            // The metadata catalog is hidden from duckdb_tables() too, so ask PostgreSQL. Several schemas
-            // hold one when several lakes share a database: the connection's own schema is the one this
-            // catalog's unqualified names resolve to, as the DuckDB queries' do.
-            String query = "SELECT table_schema::text, table_schema = current_schema() FROM information_schema.tables"
-                    + " WHERE table_name = 'ducklake_snapshot'";
+            // The metadata catalog is hidden from duckdb_tables(), so ask PostgreSQL
             List<String> schemas = new ArrayList<>();
-            String current = null;
             try (Statement statement = connection.createStatement();
-                 ResultSet rs = statement.executeQuery(viaPostgres(database, query))) {
+                 ResultSet rs = statement.executeQuery(viaPostgres(database, "SELECT table_schema::text FROM"
+                         + " information_schema.tables WHERE table_name = 'ducklake_snapshot'"))) {
                 while (rs.next()) {
                     schemas.add(rs.getString(1));
-                    if (rs.getBoolean(2)) {
-                        current = rs.getString(1);
-                    }
                 }
             }
             if (schemas.size() == 1) {
-                return schemas.get(0);
+                return new Lookup(schemas.get(0), true);
             }
-            if (current != null) {
-                return current;
+            String dataPath = dataPath(connection, database);
+            List<String> matching = new ArrayList<>();
+            for (String schema : schemas) {
+                String query = ("SELECT value FROM %s.ducklake_metadata WHERE key = 'data_path' AND scope IS NULL")
+                        .formatted(Sql.identifier(schema));
+                try (Statement statement = connection.createStatement();
+                     ResultSet rs = statement.executeQuery(viaPostgres(database, query))) {
+                    if (rs.next() && dataPath != null && samePath(rs.getString(1), dataPath)) {
+                        matching.add(schema);
+                    }
+                }
             }
-            logger.warn("Cannot tell which schema of {}'s PostgreSQL catalog holds its tables (found {}); its catalog"
-                    + " queries copy the catalog into DuckDB", database, schemas);
-            return null;
+            if (matching.size() == 1) {
+                return new Lookup(matching.get(0), true);
+            }
+            logger.warn("Cannot tell which schema of {}'s PostgreSQL catalog holds its tables (found {}, {} with its"
+                    + " data_path {}); its catalog queries copy the catalog into DuckDB", database, schemas,
+                    matching.size(), dataPath);
+            return Lookup.IN_DUCKDB;
         } catch (SQLException e) {
-            logger.warn("Cannot tell whether {}'s catalog is PostgreSQL; its catalog queries run in DuckDB", database, e);
-            return null;
+            logger.warn("Cannot tell where {}'s catalog queries can run; looking again later", database, e);
+            return Lookup.UNKNOWN;
         }
+    }
+
+    private static String dataPath(Connection connection, String database) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT data_path FROM ducklake_settings(?)")) {
+            statement.setString(1, database);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    /** Whether two data paths name the same place, ignoring a trailing separator. */
+    static boolean samePath(String a, String b) {
+        return a != null && b != null && stripSeparator(a).equals(stripSeparator(b));
+    }
+
+    private static String stripSeparator(String path) {
+        String p = path.trim();
+        while (p.length() > 1 && (p.endsWith("/") || p.endsWith("\\"))) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
     }
 
     static boolean isPostgresPath(String path) {

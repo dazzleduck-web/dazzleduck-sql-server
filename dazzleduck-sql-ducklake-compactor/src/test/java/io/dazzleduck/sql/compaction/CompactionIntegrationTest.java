@@ -37,8 +37,10 @@ class CompactionIntegrationTest {
     static final String CATALOG = "test_lake";
     static final String MD_DATABASE = "__ducklake_metadata_" + CATALOG;
 
-    static final CompactionTier MINOR = CompactionTier.of("minor", 0, 512 * 1024L, 1024 * 1024L, 12);
-    static final CompactionTier MAJOR = CompactionTier.of("major", 512 * 1024L, 10 * 1024 * 1024L, 10 * 1024 * 1024L, 16);
+    // memory shares adding up to 1, as a validated config's do
+    static final CompactionTier MINOR = CompactionTier.of("minor", 0, 512 * 1024L, 1024 * 1024L, 12).withMemoryShare(0.5);
+    static final CompactionTier MAJOR = CompactionTier.of("major", 512 * 1024L, 10 * 1024 * 1024L, 10 * 1024 * 1024L, 16)
+            .withMemoryShare(0.5);
 
     static PostgreSQLContainer postgres;
     static SimpleMeterRegistry registry;
@@ -148,8 +150,9 @@ class CompactionIntegrationTest {
 
     private static void compareDiscoveryAndCounts() throws Exception {
         try (Connection connection = RawConnections.open(startupScript, List.of())) {
-            String schema = CatalogSql.postgresSchema(connection, CATALOG);
-            assertEquals("public", schema);
+            CatalogSql.Lookup lookup = CatalogSql.postgresSchema(connection, CATALOG);
+            assertEquals(new CatalogSql.Lookup("public", true), lookup);
+            String schema = lookup.schema();
             for (CompactionTier tier : List.of(MINOR, MINOR.withAdmission(100, Duration.ofSeconds(1)), MAJOR)) {
                 List<String> inDuckDb = rows(connection, DuckDbTierCompactor.discoverySql(CATALOG, tier));
                 List<String> inPostgres = rows(connection, CatalogSql.viaPostgres(CATALOG,
@@ -166,6 +169,25 @@ class CompactionIntegrationTest {
                     rows(connection, CatalogSql.viaPostgres(CATALOG,
                             CompactionService.fileCountsSql(Sql.identifier(schema), List.of(MINOR, MAJOR)))));
         }
+    }
+
+    @Test
+    @Order(1)
+    void aSecondLakeInTheSameDatabaseIsFoundByItsDataPath() throws Exception {
+        // Review of #544: with two lakes in one PostgreSQL database, taking the connection's current schema
+        // gave the second lake the first one's catalog, so discovery would list the other lake's work
+        Path otherData = tempDir.resolve("other-data");
+        Files.createDirectories(otherData);
+        String attachOther = "ATTACH 'ducklake:postgres:%s' AS other_lake (DATA_PATH '%s', METADATA_SCHEMA 'other')"
+                .formatted(connectionString, otherData);
+        try (Connection connection = RawConnections.open(startupScript, List.of(attachOther));
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE IF NOT EXISTS other_lake.main.t (i INTEGER)");
+            assertEquals(new CatalogSql.Lookup("other", true), CatalogSql.postgresSchema(connection, "other_lake"));
+            assertEquals(new CatalogSql.Lookup("public", true), CatalogSql.postgresSchema(connection, CATALOG));
+        }
+        assertTrue(CatalogSql.samePath("/data/lake/", "/data/lake"));
+        assertFalse(CatalogSql.samePath("/data/lake", "/data/lake2"));
     }
 
     /** Every row as text, oldest_waiting_ms to the second (DuckDB truncates to ms, PostgreSQL rounds). */

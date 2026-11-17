@@ -75,7 +75,7 @@ class SpillBudgetTest {
             total += capped.limit(share, 1);
         }
         assertTrue(total <= 1_000_000_000L, "the sizes add up to " + total);
-        assertEquals(20_000_000L, capped.limit(MemoryBudget.FILE_COUNTS, 1), "no 256 MiB minimum under a cap");
+        assertEquals(40_000_000L, capped.limit(MemoryBudget.FILE_COUNTS, 1), "no 256 MiB minimum under a cap: 4% of 1 GB");
         assertEquals(SpillBudget.MINIMUM_BYTES, new SpillBudget(dir, 1_000_000_000L).limit(MemoryBudget.FILE_COUNTS, 1),
                 "a budget of the free space keeps the minimum");
     }

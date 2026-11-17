@@ -90,7 +90,7 @@ class CatalogScaleTest {
         try (Connection c = RawConnections.open(startupScript, List.of("SET memory_limit = '64MB'"));
              Statement s = c.createStatement();
              var rs = s.executeQuery(CatalogSql.viaPostgres(CATALOG, CompactionService.fileCountsSql(
-                     Sql.identifier(CatalogSql.postgresSchema(c, CATALOG)), List.of(MINOR))))) {
+                     Sql.identifier(CatalogSql.postgresSchema(c, CATALOG).schema()), List.of(MINOR))))) {
             assertTrue(rs.next());
             assertEquals(FAKE_FILES + 6, rs.getLong("total_files"));
         }

@@ -34,14 +34,15 @@ public class DuckDbTierCompactor implements TierCompactor {
     private final SpillBudget spill;
 
     /**
-     * Share of the process's memory (the container's limit, else physical memory) that the tiers'
-     * DuckDB instances may use together, split by {@code memory_share} and database, for an instance
-     * whose connection_settings set no {@code memory_limit}. See {@link MemoryBudget} for the rest.
+     * Share of the DuckDB pool (the process's memory less the JVM, see {@link MemoryBudget}) that the
+     * tiers' DuckDB instances may use together, split by {@code memory_share} and database, for an
+     * instance whose connection_settings set no {@code memory_limit}.
      */
-    static final double MEMORY_SHARE = 0.5;
+    static final double MEMORY_SHARE = MemoryBudget.TIERS;
 
-    /** @param postgresSchema the catalog's PostgreSQL schema, or null when its queries run in DuckDB */
-    private record Open(Connection connection, Readiness readiness, String postgresSchema) {
+    /** @param catalog where its catalog queries run, looked up again while not definitive */
+    private record Open(Connection connection, Readiness readiness,
+                        java.util.concurrent.atomic.AtomicReference<CatalogSql.Lookup> catalog) {
     }
 
     private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
@@ -57,14 +58,16 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases, SpillBudget spill) {
         this(startupScript, metrics, Runtime.getRuntime().availableProcessors(), databases,
-                ResourceSampler.totalMemoryBytes(), spill);
+                MemoryBudget.duckDbPoolBytes(ResourceSampler.totalMemoryBytes()), spill);
     }
 
     /**
      * @param availableProcessors the CPUs a tier's {@code threads_per_cpu} multiplies
      * @param databases           the configured databases, which divide them again: each database runs
      *                            its own instance of every tier, so the shares are a process budget
-     * @param totalMemoryBytes    the process's memory, or -1 when unknown (no default memory_limit)
+     * @param totalMemoryBytes    the DuckDB pool: the process's memory less the JVM
+     *                            ({@link MemoryBudget#duckDbPoolBytes}), or -1 when unknown (no default
+     *                            memory_limit)
      */
     public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
                                long totalMemoryBytes) {
@@ -130,12 +133,12 @@ public class DuckDbTierCompactor implements TierCompactor {
             if (readiness.isRefused()) {
                 connection.close();
             } else {
-                String schema = CatalogSql.postgresSchema(connection, database);
-                if (schema != null) {
+                CatalogSql.Lookup catalog = CatalogSql.postgresSchema(connection, database);
+                if (catalog.schema() != null) {
                     logger.info("Tier '{}' lists the work in {} inside its PostgreSQL catalog (schema {})", tier.name(),
-                            database, schema);
+                            database, catalog.schema());
                 }
-                open.put(key, new Open(connection, readiness, schema));
+                open.put(key, new Open(connection, readiness, new java.util.concurrent.atomic.AtomicReference<>(catalog)));
             }
             return readiness;
         } catch (Exception e) {
@@ -292,8 +295,13 @@ public class DuckDbTierCompactor implements TierCompactor {
     @Override
     public List<TableWork> discover(String database, CompactionTier tier) throws Exception {
         Open pair = openFor(database, tier);
-        String sql = pair.postgresSchema() != null
-                ? CatalogSql.viaPostgres(database, discoverySqlPostgres(pair.postgresSchema(), tier))
+        CatalogSql.Lookup catalog = pair.catalog().get();
+        if (!catalog.definitive()) {
+            catalog = CatalogSql.postgresSchema(pair.connection(), database);
+            pair.catalog().set(catalog);
+        }
+        String sql = catalog.schema() != null
+                ? CatalogSql.viaPostgres(database, discoverySqlPostgres(catalog.schema(), tier))
                 : discoverySql(database, tier);
         List<TableWork> work = new ArrayList<>();
         Timer.Sample sample = metrics.startTimer();

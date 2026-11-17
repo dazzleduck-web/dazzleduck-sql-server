@@ -55,7 +55,8 @@ public class Main {
             // One job per table at a time, across the tier loops, retention and the delete-file rewrite
             TableLeases leases = new TableLeases();
             // Every DuckDB instance gets a slice of the process's memory (MemoryBudget)
-            long totalMemory = ResourceSampler.totalMemoryBytes();
+            // The DuckDB pool: the process's memory less the JVM's heap and overhead
+            long totalMemory = MemoryBudget.duckDbPoolBytes(ResourceSampler.totalMemoryBytes());
             int databases = config.databases().size();
             DuckLakeHousekeeper housekeeper = new DuckLakeHousekeeper(
                     startupScript, config.snapshotRetention(),

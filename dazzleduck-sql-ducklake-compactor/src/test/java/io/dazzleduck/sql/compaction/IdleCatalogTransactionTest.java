@@ -58,6 +58,8 @@ class IdleCatalogTransactionTest {
             s.execute("INSERT INTO %s.main.t VALUES (1)".formatted(CATALOG));
             s.execute("INSERT INTO %s.main.t VALUES (2)".formatted(CATALOG));
             s.execute("ALTER TABLE %s.main.t SET SORTED BY (COALESCE(sleep_ms(1000), i))".formatted(CATALOG));
+            // Only the merge counts: a slow runner could leave the setup statements idle past the timeout too
+            long logLinesBefore = postgres.getLogs().lines().count();
             try (ResultSet rs = s.executeQuery(("SELECT files_processed, files_created FROM ducklake_merge_adjacent_files("
                     + "'%s', 't', max_compacted_files => 4)").formatted(CATALOG))) {
                 assertTrue(rs.next());
@@ -66,7 +68,7 @@ class IdleCatalogTransactionTest {
             }
             // On v1.5.6-dazzleduck.4 PostgreSQL killed the session mid-merge; DuckLake retried the commit on a
             // new connection, so a merge this small still committed, but a call can lose its transaction
-            assertTrue(postgres.getLogs().lines().noneMatch(l -> l.contains("idle-in-transaction timeout")),
+            assertTrue(postgres.getLogs().lines().skip(logLinesBefore).noneMatch(l -> l.contains("idle-in-transaction timeout")),
                     "the catalog session was not left idle in a transaction during the rewrite");
             try (ResultSet rs = s.executeQuery("SELECT count(*), sum(i) FROM %s.main.t".formatted(CATALOG))) {
                 assertTrue(rs.next());

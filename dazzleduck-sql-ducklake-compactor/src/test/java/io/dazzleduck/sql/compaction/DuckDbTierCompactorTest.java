@@ -319,10 +319,11 @@ class DuckDbTierCompactorTest {
         assertEquals(1, minor.threads(1, 8), "at least one");
 
         DuckDbTierCompactor oneDb = new DuckDbTierCompactor(startup, state, 8, 1, 4_000_000_000L);
-        assertEquals(1_000_000_000L, oneDb.defaultMemoryLimitBytes(minor), "50% of 4 GB x 0.5");
+        // a 4 GB pool: the slice is 70% x memory_share / databases, less 64 MiB, over 1.25
+        assertEquals(1_066_312_908L, oneDb.defaultMemoryLimitBytes(minor), 2, "(70% x 0.5 x 4 GB - 64 MiB) / 1.25");
         DuckDbTierCompactor twoDbs = new DuckDbTierCompactor(startup, state, 8, 2, 4_000_000_000L);
-        assertEquals(500_000_000L, twoDbs.defaultMemoryLimitBytes(minor));
-        assertEquals(600_000_000L, oneDb.defaultMemoryLimitBytes(minor.withMemoryShare(0.3)), "50% of 4 GB x 0.3");
+        assertEquals(506_312_908L, twoDbs.defaultMemoryLimitBytes(minor), 2);
+        assertEquals(618_312_908L, oneDb.defaultMemoryLimitBytes(minor.withMemoryShare(0.3)), 2);
         assertEquals(-1L, oneDb.defaultMemoryLimitBytes(minor.withConnectionSettings(List.of("SET memory_limit='2GB'"))),
                 "an explicit memory_limit wins");
         assertEquals(-1L, new DuckDbTierCompactor(startup, state, 8, 1, -1).defaultMemoryLimitBytes(minor),
@@ -351,9 +352,9 @@ class DuckDbTierCompactorTest {
     @Test
     void theOtherInstancesGetASliceOfTheMemoryToo() {
         // Review on #542: housekeeping, retention and the file-count instance had DuckDB's default
-        assertEquals(List.of("SET memory_limit = '160000000 bytes'", "SET enable_external_file_cache = false"),
+        assertEquals(List.of("SET memory_limit = '138312908 bytes'", "SET enable_external_file_cache = false"),
                 MemoryBudget.withDefaultLimit(List.of("SET enable_external_file_cache = false"),
-                        MemoryBudget.HOUSEKEEPING, 2, 4_000_000_000L), "8% of 4 GB over 2 databases");
+                        MemoryBudget.HOUSEKEEPING, 2, 4_000_000_000L), "(12% of 4 GB / 2 - 64 MiB) / 1.25");
         assertEquals(List.of("SET memory_limit='1GB'"), MemoryBudget.withDefaultLimit(List.of("SET memory_limit='1GB'"),
                 MemoryBudget.RETENTION, 1, 4_000_000_000L), "an explicit limit wins");
         assertEquals(List.of(), MemoryBudget.withDefaultLimit(List.of(), MemoryBudget.FILE_COUNTS, 1, -1),
@@ -361,7 +362,40 @@ class DuckDbTierCompactorTest {
         assertEquals(MemoryBudget.MINIMUM_BYTES, MemoryBudget.limit(MemoryBudget.FILE_COUNTS, 8, 1_000_000_000L));
         double all = DuckDbTierCompactor.MEMORY_SHARE + MemoryBudget.HOUSEKEEPING + MemoryBudget.RETENTION
                 + MemoryBudget.FILE_COUNTS;
-        assertTrue(all <= 0.7, "about a third stays for the JVM and memory outside memory_limit: " + all);
+        assertTrue(all <= 1, "the shares divide the pool left after the JVM: " + all);
+    }
+
+    @Test
+    void theJvmAndTheMemoryOutsideEachLimitAreBudgeted() {
+        // Review of #544: the instances took 68% of a 2 GiB container and left the rest for both the JVM
+        // (a quarter of it by default) and DuckDB's memory outside memory_limit, measured at ~1.2 GB
+        long total = 2L << 30;
+        long mib = 1L << 20;
+        assertEquals((long) (0.20 * total) + 128 * mib, MemoryBudget.jvmReserveBytes(total, 512 * mib),
+                "a 512 MiB heap is reserved up to 20% of the memory, plus 128 MiB");
+        assertEquals(300 * mib + 128 * mib, MemoryBudget.jvmReserveBytes(total, 300 * mib));
+        assertEquals(128 * mib, MemoryBudget.jvmReserveBytes(total, Long.MAX_VALUE), "no heap limit reported");
+
+        long pool = total - MemoryBudget.jvmReserveBytes(total, 300 * mib);
+        for (double share : new double[]{MemoryBudget.TIERS * 0.4, MemoryBudget.TIERS * 0.3, MemoryBudget.HOUSEKEEPING}) {
+            long limit = MemoryBudget.limit(share, 1, pool);
+            assertTrue(MemoryBudget.footprintBytes(limit) <= share * pool + 1,
+                    "the limit and what the instance uses outside it fit its slice");
+        }
+
+        CompactionTier minor = CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12).withMemoryShare(0.4);
+        CompactionTier major = CompactionTier.of("major", 8_000_000, 64_000_000, 64_000_000, 16).withMemoryShare(0.3);
+        CompactionTier mega = CompactionTier.of("mega", 64_000_000, 256_000_000, 256_000_000, 5).withMemoryShare(0.3);
+        CompactionConfig defaults = new CompactionConfig(List.of("lake"), List.of(minor, major, mega),
+                java.time.Duration.ofMinutes(5), java.time.Duration.ofMinutes(15), List.of(), 0, 10);
+        assertEquals(0, MemoryBudget.overcommit(defaults, total, 300 * mib), "the default limits fit");
+
+        CompactionConfig explicit = new CompactionConfig(List.of("lake"),
+                List.of(minor.withConnectionSettings(List.of("SET memory_limit = '1100MB'")), major, mega),
+                java.time.Duration.ofMinutes(5), java.time.Duration.ofMinutes(15), List.of(), 0, 10);
+        assertTrue(MemoryBudget.overcommit(explicit, total, 300 * mib) > 0,
+                "1100 MB for minor beside the default major and mega does not fit 2 GiB");
+        assertEquals(0, MemoryBudget.overcommit(explicit, -1, 300 * mib), "unknown memory: no check");
     }
 
     @Test
@@ -379,7 +413,7 @@ class DuckDbTierCompactorTest {
         try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 4, 2, 4_000_000_000L)) {
             TierCompactor.Readiness readiness = compactor.prepare("lake", ALL);
             assertEquals(8, readiness.threads(), "4 threads per CPU x 4 CPUs / 2 databases");
-            assertEquals(1_000_000_000L, readiness.memoryLimitBytes(), "50% of 4 GB x 1.0 / 2 databases");
+            assertEquals(1_066_312_908L, readiness.memoryLimitBytes(), 2, "(70% of 4 GB / 2 databases - 64 MiB) / 1.25");
         }
     }
 
