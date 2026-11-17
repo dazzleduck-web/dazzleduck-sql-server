@@ -44,6 +44,8 @@ public class CompactionService implements Closeable {
     // null when data retention is off
     private final DataRetention dataRetention;
     private final CompactionState state;
+    // Where its file-count instances spill, and what /health reports; set by useSpill before start
+    private volatile SpillBudget spill = SpillBudget.NONE;
     private final CompactionRunLog runLog;
     private final TableLeases leases;
     private final Clock clock;
@@ -55,6 +57,8 @@ public class CompactionService implements Closeable {
 
     // One raw connection for the whole-catalog file-count gauges — deliberately not
     // io.dazzleduck.sql.commons.ConnectionPool (see RawConnections).
+    // Where each database's counts run, once known for sure (a failed lookup is retried next refresh)
+    private final ConcurrentHashMap<String, CatalogSql.Lookup> catalogLookups = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
 
     /**
@@ -142,13 +146,18 @@ public class CompactionService implements Closeable {
             }
         }
 
+        String overcommit = memoryOvercommitAlert();
+        if (overcommit != null) {
+            logger.warn(overcommit);
+        }
         logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping every {}s, "
                         + "data retention {}",
                 config.databases().size(), config.tiers().size(),
                 config.tiers().stream()
                         .map(t -> t.enabled()
-                                ? "%s [%d, %d) target %d, cap %d, cpu_share %.2f".formatted(t.name(), t.minFileSize(),
-                                        t.maxFileSize(), t.targetFileSize(), t.maxCompactedFiles(), t.cpuShare())
+                                ? "%s [%d, %d) target %d, cap %d, %d threads per CPU, memory_share %.2f".formatted(t.name(),
+                                        t.minFileSize(), t.maxFileSize(), t.targetFileSize(), t.maxCompactedFiles(),
+                                        t.threadsPerCpu(), t.memoryShare())
                                 : t.name() + " (disabled)")
                         .reduce((a, b) -> a + "; " + b).orElse(""),
                 housekeepingSeconds,
@@ -169,6 +178,23 @@ public class CompactionService implements Closeable {
         TierLoop loop = loops.compute(loopKey(database, tier.name()),
                 (k, existing) -> existing != null && existing.tier().equals(tier) ? existing : newLoop(database, tier));
         return loop.runPass();
+    }
+
+    /**
+     * The alert when the JVM and every DuckDB instance's memory_limit and allowance outside it
+     * ({@link MemoryBudget#overcommit}) exceed the process's memory, or null.
+     */
+    String memoryOvercommitAlert() {
+        long total = ResourceSampler.totalMemoryBytes();
+        long over = MemoryBudget.overcommit(config, total, Runtime.getRuntime().maxMemory());
+        return over <= 0 ? null : ("The JVM and the DuckDB instances' memory_limit settings, with their memory outside the"
+                + " limit, exceed the process's memory (%d bytes) by %d bytes; lower an explicit memory_limit in"
+                + " connection_settings, or give the container more memory").formatted(total, over);
+    }
+
+    /** Where the file-count instances spill, and the spill /health reports. Call before {@link #start()}. */
+    public void useSpill(SpillBudget value) {
+        this.spill = value;
     }
 
     public CompactionStats getStats() {
@@ -200,7 +226,13 @@ public class CompactionService implements Closeable {
             alerts.add("RSS %d bytes is above %.0f%% of the container's memory limit %d bytes"
                     .formatted(rss, RSS_ALERT_SHARE * 100, limit));
         }
-        return new CompactionStats(base.serviceStart(), dbStats, List.copyOf(alerts));
+        String overcommit = memoryOvercommitAlert();
+        if (overcommit != null) {
+            alerts.add(overcommit);
+        }
+        CompactionStats.SpillStatus spillStatus = spill.status();
+        alerts.addAll(SpillBudget.alerts(spillStatus));
+        return new CompactionStats(base.serviceStart(), dbStats, List.copyOf(alerts), spillStatus);
     }
 
     private List<String> tierAlerts(String db, CompactionTier tier, TierLoop loop, CompactionStats.TierStatus status,
@@ -269,8 +301,11 @@ public class CompactionService implements Closeable {
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, MemoryBudget.withDefaultLimit(List.of(),
-                    MemoryBudget.FILE_COUNTS, config.databases().size(), ResourceSampler.totalMemoryBytes()));
+            int databases = config.databases().size();
+            Connection opened = RawConnections.open(startupScript, spill.apply(database, "file-counts",
+                    MemoryBudget.FILE_COUNTS, databases, MemoryBudget.withDefaultLimit(List.of(),
+                            MemoryBudget.FILE_COUNTS, databases,
+                            MemoryBudget.duckDbPoolBytes(ResourceSampler.totalMemoryBytes()))));
             countingConnections.put(database, opened);
             return opened;
         }
@@ -282,16 +317,25 @@ public class CompactionService implements Closeable {
      */
     void refreshFileCounts(String database) {
         state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
-        String mdDatabase = Sql.metadataCatalog(database);
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
-        for (CompactionTier tier : config.tiers()) {
-            sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""
-                    .formatted(tier.minFileSize(), tier.maxFileSize(), tier.name()));
-        }
-        sql.append(" FROM %s.ducklake_data_file WHERE end_snapshot IS NULL".formatted(mdDatabase));
-
         try (var statement = countingConnectionFor(database).createStatement()) {
-            statement.execute(sql.toString());
+            // A PostgreSQL catalog counts its own rows and returns one, instead of copying every live
+            // file's row into DuckDB (CatalogSql)
+            CatalogSql.Lookup lookup = catalogLookups.get(database);
+            if (lookup == null) {
+                lookup = CatalogSql.postgresSchema(countingConnections.get(database), database);
+                if (lookup.definitive()) {
+                    catalogLookups.put(database, lookup);
+                } else {
+                    // The DuckDB query would copy a PostgreSQL catalog's every row: the next refresh retries
+                    logger.warn("Skipping the file counts of {}: the catalog lookup failed", database);
+                    return;
+                }
+            }
+            String schema = lookup.schema();
+            String sql = schema != null
+                    ? CatalogSql.viaPostgres(database, fileCountsSql(Sql.identifier(schema), config.tiers()))
+                    : fileCountsSql(Sql.metadataCatalog(database), config.tiers());
+            statement.execute(sql);
             try (ResultSet rs = statement.getResultSet()) {
                 if (rs.next()) {
                     Instant now = clock.instant();
@@ -304,6 +348,16 @@ public class CompactionService implements Closeable {
         } catch (Exception e) {
             logger.error("Failed to refresh file counts for {}", database, e);
         }
+    }
+
+    /** Per-tier counts of the live files in each band, and the total, from the catalog {@code md}. */
+    static String fileCountsSql(String md, List<CompactionTier> tiers) {
+        StringBuilder sql = new StringBuilder("SELECT count(*) AS total_files");
+        for (CompactionTier tier : tiers) {
+            sql.append(", count(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS %s"
+                    .formatted(tier.minFileSize(), tier.maxFileSize(), Sql.identifier(tier.name())));
+        }
+        return sql.append(" FROM %s.ducklake_data_file WHERE end_snapshot IS NULL".formatted(md)).toString();
     }
 
     @Override

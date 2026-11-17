@@ -145,6 +145,29 @@ class CallSizingTest {
     }
 
     @Test
+    void anInstanceGetsNoMoreThreadsThanHalfAGroupsMemoryHolds() {
+        // Review of #544: a pod with no CPU limit sees the node's CPUs, 64 threads on 16 of them
+        long minorLimit = (long) (0.5 * 0.4 * (2L << 30));
+        assertEquals(20, CallSizing.maxThreads(minorLimit), "half of 80% of 429 MB, at 8 MiB a thread");
+        assertEquals(1, CallSizing.maxThreads(1L << 20), "at least one");
+        assertEquals(Integer.MAX_VALUE, CallSizing.maxThreads(-1), "no cap without a limit");
+    }
+
+    @Test
+    void threadsDoNotShrinkAGroup() {
+        // Review of #544: charging 8 MiB a thread against the group left major, at its default 220 MiB in a
+        // 2 GiB container, merging 10 MB files two at a time; a load test measured about the same memory at
+        // 1, 2 and 8 threads
+        long limit = 220L << 20;
+        assertEquals((long) (0.8 * limit), CallSizing.groupMemoryBytes(limit));
+        assertEquals(-1, CallSizing.groupMemoryBytes(-1), "unknown without a limit");
+        CompactionTier major = CompactionTier.of("major", 8_000_000, 64_000_000, 64_000_000, 16);
+        CallSizing.Plan plan = CallSizing.plan(major, work(40, 10_000_000, 0, true), 0, limit);
+        assertEquals(4, plan.cap().filesPerGroup(), "176 MiB holds four 10 MB files at 4x their bytes");
+        assertEquals(40_000_000L, plan.target());
+    }
+
+    @Test
     void theStartupCheckRefusesATierOnlyWhenNotEvenTwoFilesFit() {
         // Review on #542: a 120 s timeout refused minor though plan would lower its target
         assertEquals(144.0, CallSizing.fullGroupSeconds(MINOR), 1e-9);

@@ -43,6 +43,20 @@ public final class CallSizing {
      * ({@code rss_growth_per_file}).
      */
     public static final double BYTES_EXPANSION = 4.0;
+    /**
+     * An allowance for what each DuckDB thread holds for its own reads (decoded pages, request
+     * buffers). It is not taken off a group's memory: a load test measured about the same memory at 1,
+     * 2 and 8 threads, and charging it left major merging 10 MB files two at a time at 2 GiB. It only
+     * caps the threads ({@link #maxThreads}).
+     */
+    public static final long PER_THREAD_BYTES = 8L << 20;
+    /**
+     * The threads get no more than this share of a group's memory at {@link #PER_THREAD_BYTES} each.
+     * Threads grow with CPUs and memory does not, and a container with a memory limit but no CPU limit
+     * sees the node's CPUs: without a cap, a 64-CPU node would run 256 threads per tier, at a thread
+     * count no measurement covers.
+     */
+    public static final double THREAD_MEMORY_SHARE = 0.5;
 
     private CallSizing() {
     }
@@ -102,11 +116,30 @@ public final class CallSizing {
         if (idleTxnTimeoutMs > 0) {
             max = Math.min(max, (long) Math.floor(TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0 / secPerFile(work.sorted())));
         }
-        if (memoryLimitBytes > 0) {
+        long groupMemory = groupMemoryBytes(memoryLimitBytes);
+        if (groupMemory >= 0) {
             double perFile = memoryPerFile(Math.max(1, work.averageFileSize()), work.sorted());
-            max = Math.min(max, (long) Math.floor(MEMORY_LIMIT_SHARE * memoryLimitBytes / perFile));
+            max = Math.min(max, (long) Math.floor(groupMemory / perFile));
         }
         return max;
+    }
+
+    /** The memory one group may use: 80% of the instance's {@code memory_limit}, or -1 when it is unknown. */
+    public static long groupMemoryBytes(long memoryLimitBytes) {
+        return memoryLimitBytes <= 0 ? -1 : (long) (MEMORY_LIMIT_SHARE * memoryLimitBytes);
+    }
+
+    /**
+     * The most threads an instance with {@code memoryLimitBytes} gets: their {@link #PER_THREAD_BYTES}
+     * take at most {@link #THREAD_MEMORY_SHARE} of 80% of it. At least 1; {@link Integer#MAX_VALUE}
+     * when the limit is unknown.
+     */
+    public static int maxThreads(long memoryLimitBytes) {
+        if (memoryLimitBytes <= 0) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) Math.max(1, Math.min(Integer.MAX_VALUE,
+                (long) (THREAD_MEMORY_SHARE * MEMORY_LIMIT_SHARE * memoryLimitBytes / PER_THREAD_BYTES)));
     }
 
     /**
@@ -183,10 +216,11 @@ public final class CallSizing {
             return ("not even two files fit in one group within %.0f%% of the catalog's idle-in-transaction"
                     + " timeout (%d ms)").formatted(TIMEOUT_SHARE * 100, idleTxnTimeoutMs);
         }
-        if (memoryLimitBytes > 0 && 2 * memoryPerFile(smallest, true) > MEMORY_LIMIT_SHARE * memoryLimitBytes) {
+        long groupMemory = groupMemoryBytes(memoryLimitBytes);
+        if (groupMemory >= 0 && 2 * memoryPerFile(smallest, true) > groupMemory) {
             return ("not even two of its smallest files (%d bytes) fit in one group within %.0f%% of the instance's"
                     + " memory_limit (%d bytes): give the tier more memory (memory_limit in its connection_settings,"
-                    + " or a larger cpu_share or container) or disable it").formatted(smallest,
+                    + " or a larger memory_share or container) or disable it").formatted(smallest,
                     MEMORY_LIMIT_SHARE * 100, memoryLimitBytes);
         }
         return null;

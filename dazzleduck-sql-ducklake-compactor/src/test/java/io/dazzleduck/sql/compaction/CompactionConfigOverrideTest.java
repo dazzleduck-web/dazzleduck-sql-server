@@ -536,13 +536,14 @@ class CompactionConfigOverrideTest {
     void theSpecsTierSettingsParseAndTheRestDefault() throws Exception {
         CompactionTier minor = tier(resolve(oneTier("""
                 target_file_size = 16MB, max_compacted_files = 12, min_files = 4, max_wait = 5 minutes,
-                cpu_share = 0.5, max_files_per_call = 3000, pass_time_limit = 1 minute, idle_sleep_max = 5 seconds,
-                call_time_limit = 8 minutes""")), "minor");
+                memory_share = 0.4, threads_per_cpu = 6, max_files_per_call = 3000,
+                pass_time_limit = 1 minute, idle_sleep_max = 5 seconds, call_time_limit = 8 minutes""")), "minor");
+        assertEquals(0.4, minor.memoryShare());
+        assertEquals(6, minor.threadsPerCpu());
         assertEquals(16_000_000L, minor.targetFileSize());
         assertEquals(12L, minor.maxCompactedFiles());
         assertEquals(4, minor.minFiles());
         assertEquals(Duration.ofMinutes(5), minor.maxWait());
-        assertEquals(0.5, minor.cpuShare());
         assertEquals(3000L, minor.maxFilesPerCall());
         assertEquals(Duration.ofMinutes(1), minor.passTimeLimit());
         assertEquals(Duration.ofSeconds(5), minor.idleSleep());
@@ -555,45 +556,50 @@ class CompactionConfigOverrideTest {
         assertEquals(CompactionTier.DEFAULT_PASS_TIME_LIMIT, defaults.passTimeLimit());
         assertEquals(CompactionTier.DEFAULT_IDLE_SLEEP, defaults.idleSleep());
         assertEquals(CompactionTier.DEFAULT_CALL_TIME_LIMIT, defaults.callTimeLimit());
-        assertEquals(1.0, defaults.cpuShare(), "the only enabled tier gets every CPU");
+        assertEquals(1.0, defaults.memoryShare(), "the only enabled tier gets all the tiers' memory");
+        assertEquals(CompactionTier.DEFAULT_THREADS_PER_CPU, defaults.threadsPerCpu());
+
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12, threads_per_cpu = 0")));
+        assertTrue(e.getMessage().contains("threads_per_cpu"), e.getMessage());
+
+        CompactionTier legacy = tier(resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.5")),
+                "minor");
+        assertEquals(CompactionTier.DEFAULT_THREADS_PER_CPU, legacy.threadsPerCpu(), "cpu_share is ignored, not refused");
     }
 
     @Test
-    void cpuSharesAddingUpToMoreThanOneAreRejected() {
-        Config raw = ConfigFactory.parseString("""
+    void memorySharesAreSplitAndChecked() throws Exception {
+        String tiers = """
                 databases = ["mylake"]
                 compaction_tiers {
-                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.75 }
-                  major { enabled = true, min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 16, cpu_share = 0.5 }
-                }
-                housekeeping_frequency = 5 minutes
-                housekeeping_connection_settings = []
-                snapshot_retention = 60 minutes
-                health_port = 9090
-                """);
-        var e = assertThrows(IllegalArgumentException.class, () -> resolve(raw));
-        assertTrue(e.getMessage().contains("cpu_share"), e.getMessage());
-    }
-
-    @Test
-    void tiersWithoutACpuShareSplitWhatTheOthersLeave() throws Exception {
-        Config raw = ConfigFactory.parseString("""
-                databases = ["mylake"]
-                compaction_tiers {
-                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.5 }
+                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, memory_share = %s }
                   major { enabled = true, min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 16 }
                   mega  { enabled = true, min_file_size = 64MB, max_file_size = 256MB, target_file_size = 256MB, max_compacted_files = 5 }
-                  off   { enabled = false, min_file_size = 256MB, max_file_size = 1GB, max_compacted_files = 5 }
                 }
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
                 snapshot_retention = 60 minutes
                 health_port = 9090
-                """);
-        CompactionConfig config = resolve(raw);
-        assertEquals(0.25, tier(config, "major").cpuShare(), 1e-9);
-        assertEquals(0.25, tier(config, "mega").cpuShare(), 1e-9);
-        assertEquals(0.0, tier(config, "off").cpuShare(), "a disabled tier gets no CPUs");
+                """;
+        CompactionConfig config = resolve(ConfigFactory.parseString(tiers.formatted("0.4")));
+        assertEquals(0.3, tier(config, "major").memoryShare(), 1e-9, "an equal part of what minor leaves");
+
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(ConfigFactory.parseString(tiers.formatted("1.5"))));
+        assertTrue(e.getMessage().contains("memory_share"), e.getMessage());
+    }
+
+    @Test
+    void theSpillDirectoryDefaultsAndCanBeTurnedOff() throws Exception {
+        CompactionConfig defaults = resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12"));
+        assertEquals(SpillBudget.DEFAULT_DIRECTORY, defaults.spillDirectory());
+        assertEquals(-1L, defaults.spillMaxSize());
+
+        CompactionConfig set = resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12")
+                .withFallback(ConfigFactory.parseString("spill_directory = \"\", spill_max_size = 20GB")));
+        assertEquals("", set.spillDirectory());
+        assertEquals(20_000_000_000L, set.spillMaxSize());
+        assertSame(SpillBudget.NONE, SpillBudget.create(set.spillDirectory(), set.spillMaxSize()));
     }
 
     @Test
@@ -608,6 +614,8 @@ class CompactionConfigOverrideTest {
         assertEquals(16L, tier(config, "major").maxCompactedFiles());
         assertEquals(5L, tier(config, "mega").maxCompactedFiles());
         assertEquals(256_000_000L, tier(config, "mega").targetFileSize());
-        assertEquals(1.0, config.tiers().stream().mapToDouble(CompactionTier::cpuShare).sum(), 1e-9);
+        assertEquals(1.0, config.tiers().stream().mapToDouble(CompactionTier::memoryShare).sum(), 1e-9);
+        assertEquals(0.4, minor.memoryShare(), 1e-9);
+        assertEquals(CompactionTier.DEFAULT_THREADS_PER_CPU, minor.threadsPerCpu());
     }
 }

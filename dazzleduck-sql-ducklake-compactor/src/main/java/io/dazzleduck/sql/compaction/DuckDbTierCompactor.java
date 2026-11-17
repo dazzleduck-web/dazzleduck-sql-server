@@ -31,15 +31,18 @@ public class DuckDbTierCompactor implements TierCompactor {
     private final int availableProcessors;
     private final int databases;
     private final long totalMemoryBytes;
+    private final SpillBudget spill;
 
     /**
-     * Share of the process's memory (the container's limit, else physical memory) that the tiers'
-     * DuckDB instances may use together, split by {@code cpu_share} and database, for an instance
-     * whose connection_settings set no {@code memory_limit}. See {@link MemoryBudget} for the rest.
+     * Share of the DuckDB pool (the process's memory less the JVM, see {@link MemoryBudget}) that the
+     * tiers' DuckDB instances may use together, split by {@code memory_share} and database, for an
+     * instance whose connection_settings set no {@code memory_limit}.
      */
-    static final double MEMORY_SHARE = 0.5;
+    static final double MEMORY_SHARE = MemoryBudget.TIERS;
 
-    private record Open(Connection connection, Readiness readiness) {
+    /** @param catalog where its catalog queries run, looked up again while not definitive */
+    private record Open(Connection connection, Readiness readiness,
+                        java.util.concurrent.atomic.AtomicReference<CatalogSql.Lookup> catalog) {
     }
 
     private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
@@ -50,18 +53,31 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     /** @param databases the configured databases: each runs its own instance of every tier */
     public DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases) {
+        this(startupScript, metrics, databases, SpillBudget.NONE);
+    }
+
+    DuckDbTierCompactor(String startupScript, CompactionState metrics, int databases, SpillBudget spill) {
         this(startupScript, metrics, Runtime.getRuntime().availableProcessors(), databases,
-                ResourceSampler.totalMemoryBytes());
+                MemoryBudget.duckDbPoolBytes(ResourceSampler.totalMemoryBytes()), spill);
     }
 
     /**
-     * @param availableProcessors the CPUs the tiers' {@code cpu_share} values divide
+     * @param availableProcessors the CPUs a tier's {@code threads_per_cpu} multiplies
      * @param databases           the configured databases, which divide them again: each database runs
      *                            its own instance of every tier, so the shares are a process budget
-     * @param totalMemoryBytes    the process's memory, or -1 when unknown (no default memory_limit)
+     * @param totalMemoryBytes    the DuckDB pool: the process's memory less the JVM
+     *                            ({@link MemoryBudget#duckDbPoolBytes}), or -1 when unknown (no default
+     *                            memory_limit)
      */
     public DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
                                long totalMemoryBytes) {
+        this(startupScript, metrics, availableProcessors, databases, totalMemoryBytes, SpillBudget.NONE);
+    }
+
+    /** @param spill where the instances spill: one directory per database and tier */
+    DuckDbTierCompactor(String startupScript, CompactionState metrics, int availableProcessors, int databases,
+                        long totalMemoryBytes, SpillBudget spill) {
+        this.spill = spill;
         this.startupScript = startupScript;
         this.metrics = metrics;
         this.availableProcessors = availableProcessors;
@@ -74,7 +90,7 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (totalMemoryBytes <= 0 || ResourceSampler.memoryLimitBytes(tier.connectionSettings()) >= 0) {
             return -1;
         }
-        return MemoryBudget.limit(MEMORY_SHARE * tier.cpuShare(), databases, totalMemoryBytes);
+        return MemoryBudget.limit(MEMORY_SHARE * tier.memoryShare(), databases, totalMemoryBytes);
     }
 
     @Override
@@ -84,8 +100,16 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (existing != null) {
             return existing.readiness();
         }
-        int threads = tier.threads(availableProcessors, databases);
         long memoryLimit = defaultMemoryLimitBytes(tier);
+        long knownLimit = memoryLimit > 0 ? memoryLimit : ResourceSampler.memoryLimitBytes(tier.connectionSettings());
+        int wanted = tier.threads(availableProcessors, databases);
+        int threads = Math.min(wanted, CallSizing.maxThreads(knownLimit));
+        if (threads < wanted) {
+            logger.info(("Tier '{}' for {} gets {} thread(s) instead of {}: each holds {} bytes of its own, and they may"
+                            + " take at most {}% of a group's memory (memory_limit {} bytes)"), tier.name(), database,
+                    threads, wanted, CallSizing.PER_THREAD_BYTES, Math.round(CallSizing.THREAD_MEMORY_SHARE * 100),
+                    knownLimit);
+        }
         // threads first, so a connection_settings entry that sets it explicitly still wins
         List<String> settings = new ArrayList<>();
         settings.add("SET threads = " + threads);
@@ -93,16 +117,28 @@ public class DuckDbTierCompactor implements TierCompactor {
             settings.add("SET memory_limit = '" + memoryLimit + " bytes'");
         }
         settings.addAll(tier.connectionSettings());
+        try {
+            settings = spill.apply(database, "tier-" + tier.name(), MEMORY_SHARE * tier.memoryShare(), databases,
+                    settings);
+        } catch (SQLException e) {
+            // Without it the first merge that spills fails, late and on every call
+            return new Readiness(e.getMessage(), -1, threads, memoryLimit);
+        }
         logger.info("Tier '{}' opens its DuckDB instance for {}: {} thread(s), memory_limit {}", tier.name(), database,
                 threads, memoryLimit > 0 ? memoryLimit + " bytes" : "from connection_settings or DuckDB's default");
         Connection connection = RawConnections.open(startupScript, settings);
         try {
-            long effectiveLimit = memoryLimit > 0 ? memoryLimit : ResourceSampler.memoryLimitBytes(tier.connectionSettings());
-            Readiness readiness = check(connection, database, tier, threads, effectiveLimit);
+            // connection_settings may set threads themselves: size groups by what the instance runs with
+            Readiness readiness = check(connection, database, tier, currentThreads(connection, threads), knownLimit);
             if (readiness.isRefused()) {
                 connection.close();
             } else {
-                open.put(key, new Open(connection, readiness));
+                CatalogSql.Lookup catalog = CatalogSql.postgresSchema(connection, database);
+                if (catalog.schema() != null) {
+                    logger.info("Tier '{}' lists the work in {} inside its PostgreSQL catalog (schema {})", tier.name(),
+                            database, catalog.schema());
+                }
+                open.put(key, new Open(connection, readiness, new java.util.concurrent.atomic.AtomicReference<>(catalog)));
             }
             return readiness;
         } catch (Exception e) {
@@ -258,11 +294,24 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     @Override
     public List<TableWork> discover(String database, CompactionTier tier) throws Exception {
-        Connection connection = connection(database, tier);
+        Open pair = openFor(database, tier);
+        CatalogSql.Lookup catalog = pair.catalog().get();
+        if (!catalog.definitive()) {
+            catalog = CatalogSql.postgresSchema(pair.connection(), database);
+            pair.catalog().set(catalog);
+            if (!catalog.definitive()) {
+                // The DuckDB query would copy a PostgreSQL catalog's every row into this instance: wait
+                throw new SQLException("Cannot tell where to list the work of " + database
+                        + " (the catalog lookup failed); the next pass retries");
+            }
+        }
+        String sql = catalog.schema() != null
+                ? CatalogSql.viaPostgres(database, discoverySqlPostgres(catalog.schema(), tier))
+                : discoverySql(database, tier);
         List<TableWork> work = new ArrayList<>();
         Timer.Sample sample = metrics.startTimer();
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery(discoverySql(database, tier))) {
+        try (Statement statement = pair.connection().createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
             while (rs.next()) {
                 work.add(new TableWork(
                         rs.getString("schema_name"),
@@ -376,6 +425,99 @@ public class DuckDbTierCompactor implements TierCompactor {
                 """.formatted(md, tier.minFileSize(), tier.maxFileSize(), CallSizing.BUSY_WINDOW.toSeconds(), admitted);
     }
 
+    /**
+     * {@link #discoverySql} in PostgreSQL's dialect, run inside a PostgreSQL catalog (see
+     * {@link CatalogSql}) so that only a few rows per table come back, not the catalog of every table.
+     * The same groups and results; files without a partition value are keyed by {@code chr(1)}, since
+     * PostgreSQL text cannot hold {@code chr(0)}.
+     *
+     * @param schema the PostgreSQL schema that holds the catalog's tables
+     */
+    static String discoverySqlPostgres(String schema, CompactionTier tier) {
+        String md = Sql.identifier(schema);
+        String admitted = "g.files >= " + tier.minFiles();
+        if (!tier.maxWait().isZero()) {
+            admitted += " OR g.second_oldest <= now() - make_interval(secs => %d)".formatted(tier.maxWait().toSeconds());
+        }
+        return """
+                WITH live_tables AS (
+                  SELECT t.table_id, t.table_name, s.schema_id, s.schema_name
+                  FROM %1$s.ducklake_table t
+                  JOIN %1$s.ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL
+                  WHERE t.end_snapshot IS NULL
+                ),
+                options AS (
+                  SELECT scope, scope_id, max(value) AS value
+                  FROM %1$s.ducklake_metadata WHERE key = 'auto_compact'
+                  GROUP BY scope, scope_id
+                ),
+                compactable AS (
+                  SELECT lt.* FROM live_tables lt
+                  LEFT JOIN options ot ON ot.scope = 'table' AND ot.scope_id = lt.table_id
+                  LEFT JOIN options os ON os.scope = 'schema' AND os.scope_id = lt.schema_id
+                  LEFT JOIN options oc ON oc.scope IS NULL
+                  WHERE coalesce(ot.value, os.value, oc.value, 'true') = 'true'
+                ),
+                files AS (
+                  SELECT d.data_file_id, d.table_id, d.partition_id, d.file_size_bytes, d.begin_snapshot
+                  FROM %1$s.ducklake_data_file d
+                  JOIN compactable c ON c.table_id = d.table_id
+                  WHERE d.end_snapshot IS NULL AND d.file_size_bytes >= %2$d AND d.file_size_bytes < %3$d
+                    AND NOT EXISTS (
+                      SELECT 1 FROM %1$s.ducklake_delete_file x WHERE x.data_file_id = d.data_file_id)
+                ),
+                versions AS (
+                  SELECT table_id, begin_snapshot, schema_version,
+                         lead(begin_snapshot, 1, 9223372036854775807)
+                           OVER (PARTITION BY table_id ORDER BY begin_snapshot) AS next_begin
+                  FROM %1$s.ducklake_schema_versions
+                ),
+                partition_keys AS (
+                  SELECT pv.data_file_id,
+                         string_agg(coalesce(pv.partition_value, chr(1)), chr(31) ORDER BY pv.partition_key_index) AS pkey
+                  FROM %1$s.ducklake_file_partition_value pv
+                  JOIN files f ON f.data_file_id = pv.data_file_id
+                  GROUP BY pv.data_file_id
+                ),
+                oldest AS (
+                  SELECT min(snapshot_time) AS snapshot_time FROM %1$s.ducklake_snapshot
+                ),
+                eligible AS (
+                  SELECT f.table_id, f.partition_id, f.file_size_bytes, v.schema_version,
+                         coalesce(k.pkey, '') AS pkey,
+                         coalesce(sn.snapshot_time, oldest.snapshot_time) AS committed
+                  FROM files f
+                  LEFT JOIN %1$s.ducklake_snapshot sn ON sn.snapshot_id = f.begin_snapshot
+                  CROSS JOIN oldest
+                  LEFT JOIN versions v ON v.table_id = f.table_id
+                       AND f.begin_snapshot >= v.begin_snapshot AND f.begin_snapshot < v.next_begin
+                  LEFT JOIN partition_keys k ON k.data_file_id = f.data_file_id
+                ),
+                groups AS (
+                  SELECT table_id, count(*) AS files, sum(file_size_bytes) AS bytes,
+                         (array_agg(committed ORDER BY committed))[2] AS second_oldest,
+                         count(*) FILTER (WHERE committed >= now() - make_interval(secs => %4$d)) AS recent
+                  FROM eligible
+                  GROUP BY table_id, schema_version, partition_id, pkey
+                  HAVING count(*) >= 2
+                ),
+                sorted_tables AS (
+                  SELECT DISTINCT table_id FROM %1$s.ducklake_sort_info WHERE end_snapshot IS NULL
+                )
+                SELECT c.schema_name::text AS schema_name, c.table_name::text AS table_name,
+                       sum(g.files)::bigint AS files_waiting,
+                       sum(g.bytes)::bigint AS bytes_waiting,
+                       (extract(epoch FROM min(g.second_oldest)) * 1000)::bigint AS oldest_waiting_ms,
+                       (count(*) FILTER (WHERE g.recent > 0))::integer AS busy_partitions,
+                       bool_or(st.table_id IS NOT NULL) AS sorted
+                FROM groups g
+                JOIN compactable c USING (table_id)
+                LEFT JOIN sorted_tables st USING (table_id)
+                GROUP BY c.schema_name, c.table_name, c.table_id
+                HAVING bool_or(%5$s)
+                """.formatted(md, tier.minFileSize(), tier.maxFileSize(), CallSizing.BUSY_WINDOW.toSeconds(), admitted);
+    }
+
     @Override
     public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long targetFileSize)
             throws Exception {
@@ -447,6 +589,10 @@ public class DuckDbTierCompactor implements TierCompactor {
     }
 
     private Connection connection(String database, CompactionTier tier) throws Exception {
+        return openFor(database, tier).connection();
+    }
+
+    private Open openFor(String database, CompactionTier tier) throws Exception {
         Open pair = open.get(key(database, tier.name()));
         if (pair == null) {
             Readiness readiness = prepare(database, tier);
@@ -456,12 +602,23 @@ public class DuckDbTierCompactor implements TierCompactor {
             }
             pair = open.get(key(database, tier.name()));
         }
-        return pair.connection();
+        return pair;
     }
 
 
     private static String key(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;
+    }
+
+    /** The instance's {@code threads} setting, or {@code fallback} if it cannot be read. */
+    static int currentThreads(Connection connection, int fallback) {
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT current_setting('threads')::BIGINT")) {
+            return rs.next() ? (int) Math.max(1, Math.min(Integer.MAX_VALUE, rs.getLong(1))) : fallback;
+        } catch (SQLException e) {
+            logger.debug("Cannot read the threads setting: {}", e.toString());
+            return fallback;
+        }
     }
 
     private static void closeQuietly(Connection connection) {

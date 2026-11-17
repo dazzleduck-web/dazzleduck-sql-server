@@ -98,6 +98,14 @@ public class HealthServer implements Closeable {
         sb.append("  \"uptime\": \"").append(stats.uptime()).append("\",\n");
         sb.append("  \"serviceStartTime\": \"").append(stats.serviceStart()).append("\",\n");
         sb.append("  \"alerts\": ").append(stringArray(stats.alerts())).append(",\n");
+        CompactionStats.SpillStatus spill = stats.spill();
+        if (spill != null) {
+            sb.append("  \"spill\": {\"directory\": ").append(string(spill.directory()))
+                    .append(", \"budgetBytes\": ").append(spill.budgetBytes())
+                    .append(", \"allocatedBytes\": ").append(spill.allocatedBytes())
+                    .append(", \"usedBytes\": ").append(spill.usedBytes())
+                    .append(", \"freeBytes\": ").append(spill.freeBytes()).append("},\n");
+        }
         sb.append("  \"databases\": {");
 
         var entries = stats.databases().entrySet().stream().toList();

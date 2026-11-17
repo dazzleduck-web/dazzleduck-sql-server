@@ -26,9 +26,12 @@ public record CompactionConfig(
         int runHistorySize,
         boolean rewriteDeletesEnabled,
         Double rewriteDeleteThreshold,
-        DataRetentionConfig dataRetention
+        DataRetentionConfig dataRetention,
+        String spillDirectory,
+        long spillMaxSize
 ) {
     private static final String CONFIG_PATH = "dazzleduck_sql_compaction";
+    private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(CompactionConfig.class);
 
     /**
      * Delete-file cleanup off, for callers (mostly tests) that only care about compaction tiers.
@@ -48,6 +51,15 @@ public record CompactionConfig(
         this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
                 healthPort, runHistorySize, rewriteDeletesEnabled, rewriteDeleteThreshold, DataRetentionConfig.DISABLED);
     }
+
+    /** No spill directory of the compactor's own (DuckDB's defaults), for callers (mostly tests). */
+    public CompactionConfig(List<String> databases, List<CompactionTier> tiers, Duration housekeepingFrequency,
+                            Duration snapshotRetention, List<String> housekeepingConnectionSettings,
+                            int healthPort, int runHistorySize, boolean rewriteDeletesEnabled,
+                            Double rewriteDeleteThreshold, DataRetentionConfig dataRetention) {
+        this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
+                healthPort, runHistorySize, rewriteDeletesEnabled, rewriteDeleteThreshold, dataRetention, null, -1);
+    }
     private static final String TIERS_KEY = "compaction_tiers";
 
     public static Config rawConfig(String[] args) throws Exception {
@@ -64,7 +76,7 @@ public record CompactionConfig(
     }
 
     static CompactionConfig from(Config c) {
-        List<CompactionTier> tiers = resolveCpuShares(parseTiers(c));
+        List<CompactionTier> tiers = resolveShares(parseTiers(c));
         validateTiers(tiers);
 
         return new CompactionConfig(
@@ -78,7 +90,9 @@ public record CompactionConfig(
                         ? c.getInt("run_history_size") : CompactionRunLog.DEFAULT_CAPACITY,
                 !c.hasPath("rewrite_deletes_enabled") || c.getBoolean("rewrite_deletes_enabled"),
                 rewriteDeleteThreshold(c),
-                DataRetentionConfig.from(c)
+                DataRetentionConfig.from(c),
+                c.hasPath("spill_directory") ? c.getString("spill_directory") : SpillBudget.DEFAULT_DIRECTORY,
+                c.hasPath("spill_max_size") ? c.getBytes("spill_max_size") : -1
         );
     }
 
@@ -187,9 +201,15 @@ public record CompactionConfig(
      * <p>{@code target_file_size} is read as optional here and required of an enabled tier by
      * {@link #validateTiers}, so a disabled tier can leave it out. {@code frequency}, the timer of
      * releases before per-table scheduling, is no longer read: a config that still sets it starts.
-     * An unset {@code cpu_share} is {@code NaN} until {@link #resolveCpuShares} fills it in.
+     * An unset {@code memory_share} is {@code NaN} until {@link #resolveShares} fills it in.
+     * {@code cpu_share}, which split the CPUs before {@code threads_per_cpu}, is ignored with a
+     * warning, so a config that still sets it starts.
      */
     private static CompactionTier toTier(String name, Config t) {
+        if (t.hasPath("cpu_share")) {
+            logger.warn("Compaction tier '{}': cpu_share is no longer used and is ignored; a tier's threads are"
+                    + " threads_per_cpu x the available CPUs, and its memory follows memory_share", name);
+        }
         return new CompactionTier(
                 name,
                 t.getBoolean("enabled"),
@@ -197,7 +217,8 @@ public record CompactionConfig(
                 t.getBytes("max_file_size"),
                 t.hasPath("target_file_size") ? t.getBytes("target_file_size") : 0,
                 t.getLong("max_compacted_files"),
-                t.hasPath("cpu_share") ? t.getDouble("cpu_share") : Double.NaN,
+                t.hasPath("memory_share") ? t.getDouble("memory_share") : Double.NaN,
+                t.hasPath("threads_per_cpu") ? t.getInt("threads_per_cpu") : CompactionTier.DEFAULT_THREADS_PER_CPU,
                 t.hasPath("pass_time_limit") ? t.getDuration("pass_time_limit") : CompactionTier.DEFAULT_PASS_TIME_LIMIT,
                 t.hasPath("idle_sleep_max") ? t.getDuration("idle_sleep_max") : CompactionTier.DEFAULT_IDLE_SLEEP,
                 t.hasPath("max_files_per_call") ? t.getLong("max_files_per_call") : CompactionTier.DEFAULT_MAX_FILES_PER_CALL,
@@ -207,34 +228,42 @@ public record CompactionConfig(
                 t.hasPath("connection_settings") ? t.getStringList("connection_settings") : List.of());
     }
 
+    /** {@link #resolveShare} for {@code memory_share}. */
+    static List<CompactionTier> resolveShares(List<CompactionTier> tiers) {
+        return resolveShare(tiers, "memory_share", CompactionTier::memoryShare, CompactionTier::withMemoryShare);
+    }
+
     /**
-     * Each enabled tier without a {@code cpu_share} gets an equal part of what the others leave, so
-     * the shares always add up to at most 1 (spec: Threads and cores). Disabled tiers get none.
+     * Each enabled tier without the share gets an equal part of what the others leave, so the shares
+     * always add up to at most 1 (spec: Threads and cores). Disabled tiers get none.
      */
-    static List<CompactionTier> resolveCpuShares(List<CompactionTier> tiers) {
+    static List<CompactionTier> resolveShare(List<CompactionTier> tiers, String key,
+                                             java.util.function.ToDoubleFunction<CompactionTier> share,
+                                             java.util.function.BiFunction<CompactionTier, Double, CompactionTier> with) {
         double set = 0;
         int unset = 0;
         for (CompactionTier tier : tiers) {
             if (!tier.enabled()) {
                 continue;
             }
-            if (Double.isNaN(tier.cpuShare())) {
+            if (Double.isNaN(share.applyAsDouble(tier))) {
                 unset++;
             } else {
-                set += tier.cpuShare();
+                set += share.applyAsDouble(tier);
             }
         }
         double each = unset == 0 ? 0 : (1.0 - set) / unset;
         List<CompactionTier> resolved = new ArrayList<>(tiers.size());
         for (CompactionTier tier : tiers) {
+            boolean missing = Double.isNaN(share.applyAsDouble(tier));
             if (!tier.enabled()) {
-                resolved.add(Double.isNaN(tier.cpuShare()) ? tier.withCpuShare(0) : tier);
-            } else if (Double.isNaN(tier.cpuShare())) {
+                resolved.add(missing ? with.apply(tier, 0.0) : tier);
+            } else if (missing) {
                 if (each <= 0) {
-                    throw new IllegalArgumentException(("Compaction tier '%s' has no cpu_share, and the other"
-                            + " enabled tiers' shares already add up to %s").formatted(tier.name(), set));
+                    throw new IllegalArgumentException(("Compaction tier '%s' has no %s, and the other"
+                            + " enabled tiers' shares already add up to %s").formatted(tier.name(), key, set));
                 }
-                resolved.add(tier.withCpuShare(each));
+                resolved.add(with.apply(tier, each));
             } else {
                 resolved.add(tier);
             }
@@ -275,15 +304,28 @@ public record CompactionConfig(
             throw new IllegalArgumentException(("Compaction tier '%s': min_files must be at least 2, since a"
                     + " merge needs two files, got %d").formatted(name, tier.minFiles()));
         }
-        if (!(tier.cpuShare() > 0 && tier.cpuShare() <= 1)) {
-            throw new IllegalArgumentException("Compaction tier '%s': cpu_share must be in (0, 1], got %s"
-                    .formatted(name, tier.cpuShare()));
+        if (!(tier.memoryShare() > 0 && tier.memoryShare() <= 1)) {
+            throw new IllegalArgumentException("Compaction tier '%s': memory_share must be in (0, 1], got %s"
+                    .formatted(name, tier.memoryShare()));
+        }
+        if (tier.threadsPerCpu() < 1) {
+            throw new IllegalArgumentException("Compaction tier '%s': threads_per_cpu must be at least 1, got %d"
+                    .formatted(name, tier.threadsPerCpu()));
         }
         requirePositive(name, "pass_time_limit", tier.passTimeLimit());
         requirePositive(name, "idle_sleep_max", tier.idleSleep());
         requirePositive(name, "call_time_limit", tier.callTimeLimit());
         if (tier.maxWait().isNegative()) {
             throw new IllegalArgumentException("Compaction tier '%s': max_wait must not be negative".formatted(name));
+        }
+    }
+
+    private static void requireSharesAtMostOne(List<CompactionTier> tiers, String key,
+                                               java.util.function.ToDoubleFunction<CompactionTier> share) {
+        double sum = tiers.stream().filter(CompactionTier::enabled).mapToDouble(share).sum();
+        if (sum > 1 + 1e-9) {
+            throw new IllegalArgumentException(
+                    "The enabled compaction tiers' %s values add up to %s, more than 1".formatted(key, sum));
         }
     }
 
@@ -314,12 +356,8 @@ public record CompactionConfig(
                 validateEnabledTier(tier);
             }
         }
-        double shares = tiers.stream().filter(CompactionTier::enabled).mapToDouble(CompactionTier::cpuShare).sum();
-        if (shares > 1 + 1e-9) {
-            // Each tier has its own DuckDB instance, so their threads add up.
-            throw new IllegalArgumentException(
-                    "The enabled compaction tiers' cpu_share values add up to %s, more than 1".formatted(shares));
-        }
+        // Each tier has its own DuckDB instance, so their memory adds up.
+        requireSharesAtMostOne(tiers, "memory_share", CompactionTier::memoryShare);
 
         List<CompactionTier> enabledSorted = tiers.stream()
                 .filter(CompactionTier::enabled)
