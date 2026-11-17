@@ -89,14 +89,14 @@ class CompactionStressTest {
      * written but not yet committed. So it must exceed the longest a commit can take: every write
      * here is one DuckLake INSERT/DELETE/UPDATE, but its commit retries up to
      * {@link #COMMIT_RETRIES} times, waiting 100 ms x 1.5^n (each wait capped at 60 s), which is up
-     * to about 15 minutes. A 20-second age once deleted the file of a commit that retried for 28
+     * to about 6 minutes. A 20-second age once deleted the file of a commit that retried for 28
      * seconds, and the commit then landed pointing at it. Longer than the run, so the cleaner scans
      * concurrently but deletes nothing here. Ingestion that writes with COPY first and registers
      * later with {@code ducklake_add_data_files} (the otel collector) needs hours.
      */
     static final Duration ORPHAN_AGE = Duration.ofMinutes(16);
     /** DuckLake's commit retries, as the compactor and the otel collector configure them. */
-    static final int COMMIT_RETRIES = 30;
+    static final int COMMIT_RETRIES = 20;
 
     // Small bands so files move through both tiers within a one-minute run.
     static final CompactionTier MINOR = CompactionTier.of("minor", 0, 32 * 1024L, 64 * 1024L, 12);
