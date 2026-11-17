@@ -183,6 +183,9 @@ class CompactionIntegrationTest {
         try (Connection connection = RawConnections.open(startupScript, List.of(attachOther));
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE IF NOT EXISTS other_lake.main.t (i INTEGER)");
+            // a schema with a table of that name but no DuckLake catalog to read is skipped, not fatal
+            statement.execute(("CALL postgres_execute('%s', 'CREATE SCHEMA IF NOT EXISTS junk;"
+                    + " CREATE TABLE IF NOT EXISTS junk.ducklake_snapshot (x INTEGER)')").formatted(MD_DATABASE));
             assertEquals(new CatalogSql.Lookup("other", true), CatalogSql.postgresSchema(connection, "other_lake"));
             assertEquals(new CatalogSql.Lookup("public", true), CatalogSql.postgresSchema(connection, CATALOG));
         }

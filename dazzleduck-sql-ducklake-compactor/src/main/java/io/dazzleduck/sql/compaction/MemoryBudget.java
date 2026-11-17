@@ -29,7 +29,7 @@ import java.util.List;
  * calibrate it with the per-call RSS readings.
  *
  * <p>An instance whose own settings set a {@code memory_limit} keeps it; {@link #overcommit} checks
- * that the limits, their allowances and the JVM still fit the process's memory.
+ * that the limits, their allowances and the JVM (its whole heap) still fit the process's memory.
  */
 final class MemoryBudget {
 
@@ -110,7 +110,10 @@ final class MemoryBudget {
         if (totalBytes <= 0) {
             return 0;
         }
+        // The default limits are sized from the reserve, at most 20% of the memory; the check counts the
+        // whole heap, so a heap raised past that (-Xmx, MaxRAMPercentage) is reported
         long pool = Math.max(0, totalBytes - jvmReserveBytes(totalBytes, maxHeapBytes));
+        long heap = maxHeapBytes <= 0 || maxHeapBytes == Long.MAX_VALUE ? 0 : maxHeapBytes;
         int databases = Math.max(1, config.databases().size());
         long perDatabase = 0;
         for (CompactionTier tier : config.tiers()) {
@@ -123,7 +126,7 @@ final class MemoryBudget {
             perDatabase += footprintBytes(limitOf(config.dataRetention().connectionSettings(), RETENTION, databases, pool));
         }
         perDatabase += footprintBytes(limit(FILE_COUNTS, databases, pool));
-        long planned = jvmReserveBytes(totalBytes, maxHeapBytes) + perDatabase * databases;
+        long planned = heap + JVM_OVERHEAD_BYTES + perDatabase * databases;
         return Math.max(0, planned - totalBytes);
     }
 

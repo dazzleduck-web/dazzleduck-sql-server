@@ -299,6 +299,11 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (!catalog.definitive()) {
             catalog = CatalogSql.postgresSchema(pair.connection(), database);
             pair.catalog().set(catalog);
+            if (!catalog.definitive()) {
+                // The DuckDB query would copy a PostgreSQL catalog's every row into this instance: wait
+                throw new SQLException("Cannot tell where to list the work of " + database
+                        + " (the catalog lookup failed); the next pass retries");
+            }
         }
         String sql = catalog.schema() != null
                 ? CatalogSql.viaPostgres(database, discoverySqlPostgres(catalog.schema(), tier))

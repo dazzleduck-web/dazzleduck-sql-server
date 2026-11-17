@@ -26,8 +26,8 @@ class SpillBudgetTest {
         Path instance = dir.resolve("spill").resolve("my_lake").resolve("tier-minor");
         assertTrue(Files.isDirectory(instance), "created, missing parents too");
         assertEquals(List.of("SET temp_directory = '" + instance + "'",
-                "SET max_temp_directory_size = '1000000000 bytes'", "SET threads = 4"), settings,
-                "20% of 10 GB over two databases");
+                "SET max_temp_directory_size = '680000000 bytes'", "SET threads = 4"), settings,
+                "68% of 20% of 10 GB over two databases");
 
         try (Connection c = RawConnections.open("", settings); Statement s = c.createStatement();
              ResultSet rs = s.executeQuery("SELECT current_setting('temp_directory')")) {
@@ -75,7 +75,10 @@ class SpillBudgetTest {
             total += capped.limit(share, 1);
         }
         assertTrue(total <= 1_000_000_000L, "the sizes add up to " + total);
-        assertEquals(40_000_000L, capped.limit(MemoryBudget.FILE_COUNTS, 1), "no 256 MiB minimum under a cap: 4% of 1 GB");
+        // Review of #544: with MemoryBudget's shares adding up to 98%, spill could fill nearly all the disk
+        double all = MemoryBudget.TIERS + MemoryBudget.HOUSEKEEPING + MemoryBudget.RETENTION + MemoryBudget.FILE_COUNTS;
+        assertTrue(SpillBudget.BUDGET_SHARE * all <= 0.7, "a third of the free space stays for the disk's other users");
+        assertEquals(27_200_000L, capped.limit(MemoryBudget.FILE_COUNTS, 1), "no 256 MiB minimum under a cap: 68% of 4% of 1 GB");
         assertEquals(SpillBudget.MINIMUM_BYTES, new SpillBudget(dir, 1_000_000_000L).limit(MemoryBudget.FILE_COUNTS, 1),
                 "a budget of the free space keeps the minimum");
     }
@@ -102,7 +105,7 @@ class SpillBudgetTest {
     void healthAlertsAgainstTheSizesGivenOutAndTheSpaceTheyMayStillNeed() throws Exception {
         // Review of #544: the given sizes add up to 68% of the budget, so an 80%-of-budget alert never fired
         SpillBudget spill = new SpillBudget(dir, 10_000_000_000L, true);
-        spill.apply("lake", "tier-minor", 0.0001, 1, List.of()); // 1,000,000 bytes
+        spill.apply("lake", "tier-minor", 0.0001 / SpillBudget.BUDGET_SHARE, 1, List.of()); // 1,000,000 bytes
         Files.write(spill.directory("lake", "tier-minor").resolve("duckdb_temp_storage_DEFAULT-0.tmp"), new byte[900_000]);
         CompactionStats.SpillStatus status = spill.status();
         assertEquals(1_000_000L, status.allocatedBytes());

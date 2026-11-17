@@ -323,8 +323,9 @@ created and probed (a file written and deleted) when its instance opens, and a t
 is not writable does not start, with the reason in `/health`. Instances never share a directory,
 since DuckDB cleans up its temp directory when an instance closes.
 
-Each instance's `max_temp_directory_size` is split like its `memory_limit`, from a budget of the
-free space under the root at startup, or `spill_max_size` when that is smaller. Set `spill_max_size`
+Each instance's `max_temp_directory_size` is split like its `memory_limit`, from 68% of a budget of
+the free space under the root at startup, or of `spill_max_size` when that is smaller; the rest of
+the disk stays for its other users, such as logs. Set `spill_max_size`
 on Kubernetes, where an `emptyDir` volume's `sizeLimit` is not visible as free space and going over
 it evicts the pod. Without a cap no instance gets less than 256 MiB; under a cap there is no minimum,
 so the sizes always add up to less than it. An instance whose `connection_settings` set

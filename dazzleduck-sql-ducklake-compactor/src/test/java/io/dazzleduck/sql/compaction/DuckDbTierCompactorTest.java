@@ -396,6 +396,8 @@ class DuckDbTierCompactorTest {
         assertTrue(MemoryBudget.overcommit(explicit, total, 300 * mib) > 0,
                 "1100 MB for minor beside the default major and mega does not fit 2 GiB");
         assertEquals(0, MemoryBudget.overcommit(explicit, -1, 300 * mib), "unknown memory: no check");
+        assertTrue(MemoryBudget.overcommit(defaults, total, 1024 * mib) > 0,
+                "a heap raised to half the memory is reported, though the limits only reserve 20% for it");
     }
 
     @Test

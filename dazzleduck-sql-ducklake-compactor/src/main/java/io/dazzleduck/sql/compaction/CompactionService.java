@@ -325,6 +325,10 @@ public class CompactionService implements Closeable {
                 lookup = CatalogSql.postgresSchema(countingConnections.get(database), database);
                 if (lookup.definitive()) {
                     catalogLookups.put(database, lookup);
+                } else {
+                    // The DuckDB query would copy a PostgreSQL catalog's every row: the next refresh retries
+                    logger.warn("Skipping the file counts of {}: the catalog lookup failed", database);
+                    return;
                 }
             }
             String schema = lookup.schema();

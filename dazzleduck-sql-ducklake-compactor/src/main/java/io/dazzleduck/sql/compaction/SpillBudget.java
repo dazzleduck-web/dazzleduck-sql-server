@@ -44,6 +44,12 @@ final class SpillBudget {
     /** No instance is given less, unless the budget is a configured cap. */
     static final long MINIMUM_BYTES = 256L << 20;
     /**
+     * The most of the budget the instances' sizes add up to. The shares are MemoryBudget's, which
+     * divide what the JVM leaves and add up to nearly all of it; a disk has other users (logs, the
+     * rest of /tmp), so spill keeps to this part of the free space, as it did before the shares grew.
+     */
+    static final double BUDGET_SHARE = 0.68;
+    /**
      * /health alerts when the instances together use more than this share of the sizes they were
      * given, or when the free space under the root is less than what they may still spill.
      */
@@ -118,7 +124,7 @@ final class SpillBudget {
         if (budgetBytes <= 0) {
             return -1;
         }
-        long split = (long) (share * budgetBytes / Math.max(1, databases));
+        long split = (long) (BUDGET_SHARE * share * budgetBytes / Math.max(1, databases));
         return capped ? Math.max(1, split) : Math.max(MINIMUM_BYTES, split);
     }
 

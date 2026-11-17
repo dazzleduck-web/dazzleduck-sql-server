@@ -87,6 +87,9 @@ final class CatalogSql {
                     if (rs.next() && dataPath != null && samePath(rs.getString(1), dataPath)) {
                         matching.add(schema);
                     }
+                } catch (SQLException e) {
+                    // Not a DuckLake catalog, or one this user cannot read: it is not this lake's
+                    logger.debug("Skipping schema {} of {}'s PostgreSQL catalog: {}", schema, database, e.toString());
                 }
             }
             if (matching.size() == 1) {
