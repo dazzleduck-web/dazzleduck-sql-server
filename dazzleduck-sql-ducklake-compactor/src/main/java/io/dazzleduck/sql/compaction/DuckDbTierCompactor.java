@@ -40,7 +40,8 @@ public class DuckDbTierCompactor implements TierCompactor {
      */
     static final double MEMORY_SHARE = 0.5;
 
-    private record Open(Connection connection, Readiness readiness) {
+    /** @param postgresSchema the catalog's PostgreSQL schema, or null when its queries run in DuckDB */
+    private record Open(Connection connection, Readiness readiness, String postgresSchema) {
     }
 
     private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
@@ -129,7 +130,12 @@ public class DuckDbTierCompactor implements TierCompactor {
             if (readiness.isRefused()) {
                 connection.close();
             } else {
-                open.put(key, new Open(connection, readiness));
+                String schema = CatalogSql.postgresSchema(connection, database);
+                if (schema != null) {
+                    logger.info("Tier '{}' lists the work in {} inside its PostgreSQL catalog (schema {})", tier.name(),
+                            database, schema);
+                }
+                open.put(key, new Open(connection, readiness, schema));
             }
             return readiness;
         } catch (Exception e) {
@@ -285,11 +291,14 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     @Override
     public List<TableWork> discover(String database, CompactionTier tier) throws Exception {
-        Connection connection = connection(database, tier);
+        Open pair = openFor(database, tier);
+        String sql = pair.postgresSchema() != null
+                ? CatalogSql.viaPostgres(database, discoverySqlPostgres(pair.postgresSchema(), tier))
+                : discoverySql(database, tier);
         List<TableWork> work = new ArrayList<>();
         Timer.Sample sample = metrics.startTimer();
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery(discoverySql(database, tier))) {
+        try (Statement statement = pair.connection().createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
             while (rs.next()) {
                 work.add(new TableWork(
                         rs.getString("schema_name"),
@@ -403,6 +412,99 @@ public class DuckDbTierCompactor implements TierCompactor {
                 """.formatted(md, tier.minFileSize(), tier.maxFileSize(), CallSizing.BUSY_WINDOW.toSeconds(), admitted);
     }
 
+    /**
+     * {@link #discoverySql} in PostgreSQL's dialect, run inside a PostgreSQL catalog (see
+     * {@link CatalogSql}) so that only a few rows per table come back, not the catalog of every table.
+     * The same groups and results; files without a partition value are keyed by {@code chr(1)}, since
+     * PostgreSQL text cannot hold {@code chr(0)}.
+     *
+     * @param schema the PostgreSQL schema that holds the catalog's tables
+     */
+    static String discoverySqlPostgres(String schema, CompactionTier tier) {
+        String md = Sql.identifier(schema);
+        String admitted = "g.files >= " + tier.minFiles();
+        if (!tier.maxWait().isZero()) {
+            admitted += " OR g.second_oldest <= now() - make_interval(secs => %d)".formatted(tier.maxWait().toSeconds());
+        }
+        return """
+                WITH live_tables AS (
+                  SELECT t.table_id, t.table_name, s.schema_id, s.schema_name
+                  FROM %1$s.ducklake_table t
+                  JOIN %1$s.ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL
+                  WHERE t.end_snapshot IS NULL
+                ),
+                options AS (
+                  SELECT scope, scope_id, max(value) AS value
+                  FROM %1$s.ducklake_metadata WHERE key = 'auto_compact'
+                  GROUP BY scope, scope_id
+                ),
+                compactable AS (
+                  SELECT lt.* FROM live_tables lt
+                  LEFT JOIN options ot ON ot.scope = 'table' AND ot.scope_id = lt.table_id
+                  LEFT JOIN options os ON os.scope = 'schema' AND os.scope_id = lt.schema_id
+                  LEFT JOIN options oc ON oc.scope IS NULL
+                  WHERE coalesce(ot.value, os.value, oc.value, 'true') = 'true'
+                ),
+                files AS (
+                  SELECT d.data_file_id, d.table_id, d.partition_id, d.file_size_bytes, d.begin_snapshot
+                  FROM %1$s.ducklake_data_file d
+                  JOIN compactable c ON c.table_id = d.table_id
+                  WHERE d.end_snapshot IS NULL AND d.file_size_bytes >= %2$d AND d.file_size_bytes < %3$d
+                    AND NOT EXISTS (
+                      SELECT 1 FROM %1$s.ducklake_delete_file x WHERE x.data_file_id = d.data_file_id)
+                ),
+                versions AS (
+                  SELECT table_id, begin_snapshot, schema_version,
+                         lead(begin_snapshot, 1, 9223372036854775807)
+                           OVER (PARTITION BY table_id ORDER BY begin_snapshot) AS next_begin
+                  FROM %1$s.ducklake_schema_versions
+                ),
+                partition_keys AS (
+                  SELECT pv.data_file_id,
+                         string_agg(coalesce(pv.partition_value, chr(1)), chr(31) ORDER BY pv.partition_key_index) AS pkey
+                  FROM %1$s.ducklake_file_partition_value pv
+                  JOIN files f ON f.data_file_id = pv.data_file_id
+                  GROUP BY pv.data_file_id
+                ),
+                oldest AS (
+                  SELECT min(snapshot_time) AS snapshot_time FROM %1$s.ducklake_snapshot
+                ),
+                eligible AS (
+                  SELECT f.table_id, f.partition_id, f.file_size_bytes, v.schema_version,
+                         coalesce(k.pkey, '') AS pkey,
+                         coalesce(sn.snapshot_time, oldest.snapshot_time) AS committed
+                  FROM files f
+                  LEFT JOIN %1$s.ducklake_snapshot sn ON sn.snapshot_id = f.begin_snapshot
+                  CROSS JOIN oldest
+                  LEFT JOIN versions v ON v.table_id = f.table_id
+                       AND f.begin_snapshot >= v.begin_snapshot AND f.begin_snapshot < v.next_begin
+                  LEFT JOIN partition_keys k ON k.data_file_id = f.data_file_id
+                ),
+                groups AS (
+                  SELECT table_id, count(*) AS files, sum(file_size_bytes) AS bytes,
+                         (array_agg(committed ORDER BY committed))[2] AS second_oldest,
+                         count(*) FILTER (WHERE committed >= now() - make_interval(secs => %4$d)) AS recent
+                  FROM eligible
+                  GROUP BY table_id, schema_version, partition_id, pkey
+                  HAVING count(*) >= 2
+                ),
+                sorted_tables AS (
+                  SELECT DISTINCT table_id FROM %1$s.ducklake_sort_info WHERE end_snapshot IS NULL
+                )
+                SELECT c.schema_name::text AS schema_name, c.table_name::text AS table_name,
+                       sum(g.files)::bigint AS files_waiting,
+                       sum(g.bytes)::bigint AS bytes_waiting,
+                       (extract(epoch FROM min(g.second_oldest)) * 1000)::bigint AS oldest_waiting_ms,
+                       (count(*) FILTER (WHERE g.recent > 0))::integer AS busy_partitions,
+                       bool_or(st.table_id IS NOT NULL) AS sorted
+                FROM groups g
+                JOIN compactable c USING (table_id)
+                LEFT JOIN sorted_tables st USING (table_id)
+                GROUP BY c.schema_name, c.table_name, c.table_id
+                HAVING bool_or(%5$s)
+                """.formatted(md, tier.minFileSize(), tier.maxFileSize(), CallSizing.BUSY_WINDOW.toSeconds(), admitted);
+    }
+
     @Override
     public MergeOutcome compact(String database, CompactionTier tier, TableWork table, int cap, long targetFileSize)
             throws Exception {
@@ -474,6 +576,10 @@ public class DuckDbTierCompactor implements TierCompactor {
     }
 
     private Connection connection(String database, CompactionTier tier) throws Exception {
+        return openFor(database, tier).connection();
+    }
+
+    private Open openFor(String database, CompactionTier tier) throws Exception {
         Open pair = open.get(key(database, tier.name()));
         if (pair == null) {
             Readiness readiness = prepare(database, tier);
@@ -483,7 +589,7 @@ public class DuckDbTierCompactor implements TierCompactor {
             }
             pair = open.get(key(database, tier.name()));
         }
-        return pair.connection();
+        return pair;
     }
 
 

@@ -355,6 +355,18 @@ that happens, widen `net.ipv4.ip_local_port_range` and enable `net.ipv4.tcp_tw_r
 container (on Kubernetes, as pod `sysctls`), or lower the tier's `threads_per_cpu`. With the default
 of 4 threads per CPU this matters more than it did with fewer threads.
 
+### Catalog queries on a PostgreSQL catalog
+
+DuckDB reads a PostgreSQL catalog's tables through the postgres scanner, which copies them in `ctid`
+ranges and pushes down only simple column-versus-constant filters. So the compactor runs its own
+catalog queries inside PostgreSQL, through `postgres_query`, and only their results come back:
+tier discovery (a few rows per table) and the file-count gauges (one row). Data retention looks up
+the table and column ids first and then filters by them, so only that table's file rows are copied.
+Without this, every pass copied the catalog rows of every table in the lake: at about 1.5 million
+live files, the minor tier's discovery ran out of its 512 MB `memory_limit`. The PostgreSQL schema
+that holds the catalog is the one with `ducklake_snapshot` (the connection's current schema when
+several lakes share a database). DuckDB-file and SQLite catalogs run the same queries in DuckDB.
+
 ### Connections
 
 Each tier, plus housekeeping, gets its own **real, independent DuckDB connection** — not

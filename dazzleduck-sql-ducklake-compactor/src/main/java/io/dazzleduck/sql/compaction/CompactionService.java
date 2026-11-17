@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -57,6 +58,8 @@ public class CompactionService implements Closeable {
 
     // One raw connection for the whole-catalog file-count gauges — deliberately not
     // io.dazzleduck.sql.commons.ConnectionPool (see RawConnections).
+    // The catalog's PostgreSQL schema per database, or empty when its counts run in DuckDB
+    private final ConcurrentHashMap<String, Optional<String>> postgresSchemas = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
 
     /**
@@ -294,16 +297,15 @@ public class CompactionService implements Closeable {
      */
     void refreshFileCounts(String database) {
         state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
-        String mdDatabase = Sql.metadataCatalog(database);
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
-        for (CompactionTier tier : config.tiers()) {
-            sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""
-                    .formatted(tier.minFileSize(), tier.maxFileSize(), tier.name()));
-        }
-        sql.append(" FROM %s.ducklake_data_file WHERE end_snapshot IS NULL".formatted(mdDatabase));
-
         try (var statement = countingConnectionFor(database).createStatement()) {
-            statement.execute(sql.toString());
+            // A PostgreSQL catalog counts its own rows and returns one, instead of copying every live
+            // file's row into DuckDB (CatalogSql)
+            String schema = postgresSchemas.computeIfAbsent(database,
+                    db -> Optional.ofNullable(CatalogSql.postgresSchema(countingConnections.get(db), db))).orElse(null);
+            String sql = schema != null
+                    ? CatalogSql.viaPostgres(database, fileCountsSql(Sql.identifier(schema), config.tiers()))
+                    : fileCountsSql(Sql.metadataCatalog(database), config.tiers());
+            statement.execute(sql);
             try (ResultSet rs = statement.getResultSet()) {
                 if (rs.next()) {
                     Instant now = clock.instant();
@@ -316,6 +318,16 @@ public class CompactionService implements Closeable {
         } catch (Exception e) {
             logger.error("Failed to refresh file counts for {}", database, e);
         }
+    }
+
+    /** Per-tier counts of the live files in each band, and the total, from the catalog {@code md}. */
+    static String fileCountsSql(String md, List<CompactionTier> tiers) {
+        StringBuilder sql = new StringBuilder("SELECT count(*) AS total_files");
+        for (CompactionTier tier : tiers) {
+            sql.append(", count(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS %s"
+                    .formatted(tier.minFileSize(), tier.maxFileSize(), Sql.identifier(tier.name())));
+        }
+        return sql.append(" FROM %s.ducklake_data_file WHERE end_snapshot IS NULL".formatted(md)).toString();
     }
 
     @Override

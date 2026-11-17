@@ -432,10 +432,44 @@ public class DuckLakeDataRetention implements DataRetention {
     /**
      * The live data files of the table that could hold rows below {@code cutoff} (or are without
      * statistics), with the range of the time column each one holds.
+     *
+     * <p>The table and column are resolved to their ids first, from the small table, schema and
+     * column catalogs, and the file and statistics catalogs are then filtered by those ids as
+     * literals. A PostgreSQL catalog's scanner pushes such filters down, so only this table's rows
+     * are copied into DuckDB; joined on names, every table's files and column statistics were.
      */
     private static List<FileRange> fileRanges(Connection connection, RetentionPolicy policy, String type, long cutoff)
             throws SQLException {
         String metadata = metadataCatalog(policy);
+        List<long[]> ids = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT t.table_id, c.column_id
+                FROM %1$s.ducklake_table t
+                JOIN %1$s.ducklake_schema sc ON sc.schema_id = t.schema_id AND sc.end_snapshot IS NULL
+                JOIN %1$s.ducklake_column c ON c.table_id = t.table_id AND c.end_snapshot IS NULL
+                     AND c.parent_column IS NULL
+                WHERE t.end_snapshot IS NULL AND lower(sc.schema_name) = lower(?)
+                  AND lower(t.table_name) = lower(?) AND lower(c.column_name) = lower(?)
+                """.formatted(metadata))) {
+            statement.setString(1, policy.schema());
+            statement.setString(2, policy.table());
+            statement.setString(3, policy.timeColumn());
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    ids.add(new long[]{rs.getLong(1), rs.getLong(2)});
+                }
+            }
+        }
+        List<FileRange> files = new ArrayList<>();
+        for (long[] id : ids) {
+            files.addAll(fileRanges(connection, metadata, type, cutoff, id[0], id[1]));
+        }
+        return files;
+    }
+
+    /** {@link #fileRanges(Connection, RetentionPolicy, String, long)} for one resolved table and column. */
+    private static List<FileRange> fileRanges(Connection connection, String metadata, String type, long cutoff,
+                                              long tableId, long columnId) throws SQLException {
         String min = toMicrosSql(type, "s.min_value");
         String max = toMicrosSql(type, "s.max_value");
         // Only files that can matter: a file from the cutoff on never moves the boundary or expires
@@ -449,23 +483,17 @@ public class DuckLakeDataRetention implements DataRetention {
                 SELECT %2$s AS min_us, %3$s AS max_us, s.min_value, s.max_value,
                        coalesce(s.null_count, 1) > 0 AS has_nulls,
                        s.data_file_id IS NOT NULL AS has_row
-                FROM %1$s.ducklake_data_file d
-                JOIN %1$s.ducklake_table t ON t.table_id = d.table_id AND t.end_snapshot IS NULL
-                JOIN %1$s.ducklake_schema sc ON sc.schema_id = t.schema_id AND sc.end_snapshot IS NULL
-                JOIN %1$s.ducklake_column c ON c.table_id = t.table_id AND c.end_snapshot IS NULL
-                     AND c.parent_column IS NULL
-                LEFT JOIN %1$s.ducklake_file_column_stats s
-                     ON s.data_file_id = d.data_file_id AND s.column_id = c.column_id
-                WHERE d.end_snapshot IS NULL AND lower(sc.schema_name) = lower(?)
-                  AND lower(t.table_name) = lower(?) AND lower(c.column_name) = lower(?)
+                FROM (SELECT data_file_id FROM %1$s.ducklake_data_file
+                      WHERE table_id = %4$d AND end_snapshot IS NULL) d
+                LEFT JOIN (SELECT data_file_id, min_value, max_value, null_count
+                           FROM %1$s.ducklake_file_column_stats
+                           WHERE table_id = %4$d AND column_id = %5$d) s
+                     ON s.data_file_id = d.data_file_id
                 )) WHERE NOT has_stats OR min_us < ?
-                """.formatted(metadata, min, max);
+                """.formatted(metadata, min, max, tableId, columnId);
         List<FileRange> files = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, policy.schema());
-            statement.setString(2, policy.table());
-            statement.setString(3, policy.timeColumn());
-            statement.setLong(4, cutoff);
+            statement.setLong(1, cutoff);
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
                     long minUs = rs.getLong(1);

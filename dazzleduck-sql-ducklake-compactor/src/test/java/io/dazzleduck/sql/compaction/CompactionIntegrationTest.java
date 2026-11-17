@@ -10,6 +10,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
 
@@ -112,6 +115,81 @@ class CompactionIntegrationTest {
                         .formatted(MD_DATABASE),
                 Long.class);
         assertTrue(total > 0, "Expected files to exist before compaction, found: " + total);
+    }
+
+    @Test
+    @Order(1)
+    void discoveryAndFileCountsRunInsidePostgresWithTheSameResults() throws Exception {
+        // Review of #544: through the postgres scanner, discovery copied every table's catalog rows into
+        // DuckDB and ran out of memory at ~1.5M files; inside PostgreSQL only the result comes back
+        try (Connection setup = ConnectionPool.getConnection()) {
+            ConnectionPool.execute(setup, "CREATE TABLE %s.main.parted (day INTEGER, v VARCHAR)".formatted(CATALOG));
+            ConnectionPool.execute(setup, "ALTER TABLE %s.main.parted SET PARTITIONED BY (day)".formatted(CATALOG));
+            ConnectionPool.execute(setup, "CREATE TABLE %s.main.deleted (id BIGINT)".formatted(CATALOG));
+            for (int i = 0; i < 4; i++) {
+                ConnectionPool.execute(setup, "INSERT INTO %s.main.parted SELECT range %% 2, 'v' FROM range(4)"
+                        .formatted(CATALOG));
+                ConnectionPool.execute(setup, "INSERT INTO %s.main.deleted SELECT range FROM range(5)".formatted(CATALOG));
+            }
+            ConnectionPool.execute(setup, "ALTER TABLE %s.main.parted ADD COLUMN w INTEGER".formatted(CATALOG));
+            ConnectionPool.execute(setup, "INSERT INTO %s.main.parted SELECT range %% 2, 'v', 1 FROM range(4)"
+                    .formatted(CATALOG));
+            ConnectionPool.execute(setup, "DELETE FROM %s.main.deleted WHERE id = 1".formatted(CATALOG));
+        }
+        try {
+            compareDiscoveryAndCounts();
+        } finally {
+            try (Connection drop = ConnectionPool.getConnection()) {
+                ConnectionPool.execute(drop, "DROP TABLE %s.main.parted".formatted(CATALOG));
+                ConnectionPool.execute(drop, "DROP TABLE %s.main.deleted".formatted(CATALOG));
+            }
+        }
+    }
+
+    private static void compareDiscoveryAndCounts() throws Exception {
+        try (Connection connection = RawConnections.open(startupScript, List.of())) {
+            String schema = CatalogSql.postgresSchema(connection, CATALOG);
+            assertEquals("public", schema);
+            for (CompactionTier tier : List.of(MINOR, MINOR.withAdmission(100, Duration.ofSeconds(1)), MAJOR)) {
+                List<String> inDuckDb = rows(connection, DuckDbTierCompactor.discoverySql(CATALOG, tier));
+                List<String> inPostgres = rows(connection, CatalogSql.viaPostgres(CATALOG,
+                        DuckDbTierCompactor.discoverySqlPostgres(schema, tier)));
+                assertEquals(inDuckDb, inPostgres, "tier " + tier.name() + " " + tier.minFiles());
+                if (tier == MINOR) {
+                    // every insert into deleted holds id 1, so the DELETE gave all four files a delete file
+                    assertEquals(2, inDuckDb.size(), "events and parted; deleted's files all have deletes: " + inDuckDb);
+                    assertTrue(inDuckDb.stream().anyMatch(r -> r.contains("table_name=parted files_waiting=8")
+                            && r.contains("busy_partitions=2")), "two partitions, two schema versions: " + inDuckDb);
+                }
+            }
+            assertEquals(rows(connection, CompactionService.fileCountsSql(Sql.metadataCatalog(CATALOG), List.of(MINOR, MAJOR))),
+                    rows(connection, CatalogSql.viaPostgres(CATALOG,
+                            CompactionService.fileCountsSql(Sql.identifier(schema), List.of(MINOR, MAJOR)))));
+        }
+    }
+
+    /** Every row as text, oldest_waiting_ms to the second (DuckDB truncates to ms, PostgreSQL rounds). */
+    private static List<String> rows(Connection connection, String sql) throws SQLException {
+        List<String> rows = new java.util.ArrayList<>();
+        try (Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
+            int columns = rs.getMetaData().getColumnCount();
+            while (rs.next()) {
+                StringBuilder row = new StringBuilder();
+                for (int c = 1; c <= columns; c++) {
+                    String name = rs.getMetaData().getColumnName(c);
+                    Object value = rs.getObject(c);
+                    if (name.equals("oldest_waiting_ms") && value != null) {
+                        value = ((Number) value).longValue() / 1000;
+                    } else if (value instanceof Number n) {
+                        value = n.longValue();
+                    }
+                    row.append(name).append('=').append(value).append(' ');
+                }
+                rows.add(row.toString());
+            }
+        }
+        java.util.Collections.sort(rows);
+        return rows;
     }
 
     @Test
