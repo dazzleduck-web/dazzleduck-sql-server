@@ -86,12 +86,17 @@ class CompactionStressTest {
     /**
      * {@code ducklake_delete_orphaned_files} deletes any Parquet file under DATA_PATH that the catalog
      * does not know and that is older than this, including files an unfinished transaction has
-     * written but not yet committed. Seconds are safe here only because every write in this test is a
-     * DuckLake INSERT/DELETE/UPDATE that writes and commits in one sub-second transaction. Ingestion
-     * that writes with COPY first and registers later with {@code ducklake_add_data_files} (the otel
-     * collector) needs hours, or deleting would lose data.
+     * written but not yet committed. So it must exceed the longest a commit can take: every write
+     * here is one DuckLake INSERT/DELETE/UPDATE, but its commit retries up to
+     * {@link #COMMIT_RETRIES} times, waiting 100 ms x 1.5^n (each wait capped at 60 s), which is up
+     * to about 15 minutes. A 20-second age once deleted the file of a commit that retried for 28
+     * seconds, and the commit then landed pointing at it. Longer than the run, so the cleaner scans
+     * concurrently but deletes nothing here. Ingestion that writes with COPY first and registers
+     * later with {@code ducklake_add_data_files} (the otel collector) needs hours.
      */
-    static final Duration ORPHAN_AGE = Duration.ofSeconds(20);
+    static final Duration ORPHAN_AGE = Duration.ofMinutes(16);
+    /** DuckLake's commit retries, as the compactor and the otel collector configure them. */
+    static final int COMMIT_RETRIES = 30;
 
     // Small bands so files move through both tiers within a one-minute run.
     static final CompactionTier MINOR = CompactionTier.of("minor", 0, 32 * 1024L, 64 * 1024L, 12);
@@ -130,8 +135,8 @@ class CompactionStressTest {
         String connectionString = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
                 postgres.getHost(), postgres.getFirstMappedPort());
         String load = EXTENSION_PATH.isBlank()
-                ? "INSTALL ducklake; LOAD ducklake;"
-                : "LOAD '%s';".formatted(EXTENSION_PATH);
+                ? "INSTALL ducklake; LOAD ducklake; SET ducklake_max_retry_count = %d;".formatted(COMMIT_RETRIES)
+                : "LOAD '%s'; SET ducklake_max_retry_count = %d;".formatted(EXTENSION_PATH, COMMIT_RETRIES);
         startupScript = "%s\nATTACH 'ducklake:postgres:%s' AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);"
                 .formatted(load, connectionString, CATALOG, dataPath);
 
@@ -154,7 +159,9 @@ class CompactionStressTest {
                 List.of(), 0, 100_000, true, REWRITE_DELETE_THRESHOLD);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         state = new CompactionState(registry, config.databases(), List.of("minor", "major"));
-        runLog = new CompactionRunLog(config.runHistorySize());
+        // filesMerged sums every run of the test, so keep them all, not the last run_history_size:
+        // a longer run would otherwise drop a tier's early merges and report it never merged.
+        runLog = new CompactionRunLog(Integer.MAX_VALUE);
         TableLeases leases = new TableLeases();
         housekeeper = new DuckLakeHousekeeper(startupScript, config.snapshotRetention(), List.of(),
                 config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state, leases);
