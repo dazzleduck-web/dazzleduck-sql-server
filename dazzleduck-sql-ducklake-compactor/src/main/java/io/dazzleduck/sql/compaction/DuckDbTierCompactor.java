@@ -96,8 +96,16 @@ public class DuckDbTierCompactor implements TierCompactor {
         if (existing != null) {
             return existing.readiness();
         }
-        int threads = tier.threads(availableProcessors, databases);
         long memoryLimit = defaultMemoryLimitBytes(tier);
+        long knownLimit = memoryLimit > 0 ? memoryLimit : ResourceSampler.memoryLimitBytes(tier.connectionSettings());
+        int wanted = tier.threads(availableProcessors, databases);
+        int threads = Math.min(wanted, CallSizing.maxThreads(knownLimit));
+        if (threads < wanted) {
+            logger.info(("Tier '{}' for {} gets {} thread(s) instead of {}: each holds {} bytes of its own, and they may"
+                            + " take at most {}% of a group's memory (memory_limit {} bytes)"), tier.name(), database,
+                    threads, wanted, CallSizing.PER_THREAD_BYTES, Math.round(CallSizing.THREAD_MEMORY_SHARE * 100),
+                    knownLimit);
+        }
         // threads first, so a connection_settings entry that sets it explicitly still wins
         List<String> settings = new ArrayList<>();
         settings.add("SET threads = " + threads);
@@ -116,8 +124,8 @@ public class DuckDbTierCompactor implements TierCompactor {
                 threads, memoryLimit > 0 ? memoryLimit + " bytes" : "from connection_settings or DuckDB's default");
         Connection connection = RawConnections.open(startupScript, settings);
         try {
-            long effectiveLimit = memoryLimit > 0 ? memoryLimit : ResourceSampler.memoryLimitBytes(tier.connectionSettings());
-            Readiness readiness = check(connection, database, tier, threads, effectiveLimit);
+            // connection_settings may set threads themselves: size groups by what the instance runs with
+            Readiness readiness = check(connection, database, tier, currentThreads(connection, threads), knownLimit);
             if (readiness.isRefused()) {
                 connection.close();
             } else {
@@ -481,6 +489,17 @@ public class DuckDbTierCompactor implements TierCompactor {
 
     private static String key(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;
+    }
+
+    /** The instance's {@code threads} setting, or {@code fallback} if it cannot be read. */
+    static int currentThreads(Connection connection, int fallback) {
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT current_setting('threads')::BIGINT")) {
+            return rs.next() ? (int) Math.max(1, Math.min(Integer.MAX_VALUE, rs.getLong(1))) : fallback;
+        } catch (SQLException e) {
+            logger.debug("Cannot read the threads setting: {}", e.toString());
+            return fallback;
+        }
     }
 
     private static void closeQuietly(Connection connection) {

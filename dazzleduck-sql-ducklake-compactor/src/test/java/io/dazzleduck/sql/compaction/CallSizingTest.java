@@ -145,6 +145,20 @@ class CallSizingTest {
     }
 
     @Test
+    void anInstanceGetsNoMoreThreadsThanHalfAGroupsMemoryHolds() {
+        // Review of #544: a 2 GiB pod with no CPU limit sees 16 CPUs, 64 threads x 8 MiB = 537 MB, more
+        // than minor's 343 MB for a group, so every tier was refused
+        long minorLimit = (long) (0.5 * 0.4 * (2L << 30));
+        int threads = CallSizing.maxThreads(minorLimit);
+        assertEquals(20, threads, "half of 80% of 429 MB, at 8 MiB a thread");
+        assertTrue(CallSizing.groupMemoryBytes(minorLimit, threads) >= CallSizing.THREAD_MEMORY_SHARE * 0.8 * minorLimit);
+        assertNull(CallSizing.startupRefusal(CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12), 0, minorLimit,
+                threads));
+        assertEquals(1, CallSizing.maxThreads(1L << 20), "at least one");
+        assertEquals(Integer.MAX_VALUE, CallSizing.maxThreads(-1), "no cap without a limit");
+    }
+
+    @Test
     void eachThreadsReadBuffersComeOffAGroupsMemory() {
         // Review on #542: more threads, each with its own read buffers, leave less for the group
         long limit = 256L << 20;

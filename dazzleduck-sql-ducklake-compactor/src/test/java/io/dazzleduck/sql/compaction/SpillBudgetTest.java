@@ -65,19 +65,57 @@ class SpillBudgetTest {
     }
 
     @Test
-    void healthReportsUsageAndAlertsWhenSpillOrDiskRunsLow() throws Exception {
-        SpillBudget spill = new SpillBudget(dir, 1_000L);
-        Files.write(dir.resolve("block.tmp"), new byte[900]);
+    void underAConfiguredCapTheSizesNeverAddUpToMoreThanIt() {
+        // Review of #544: six instances raised to 256 MiB went over a 1 GB cap, which evicts the pod
+        SpillBudget capped = SpillBudget.create(dir.toString(), 1_000_000_000L);
+        double[] shares = {0.5 * 0.4, 0.5 * 0.3, 0.5 * 0.3, MemoryBudget.HOUSEKEEPING, MemoryBudget.RETENTION,
+                MemoryBudget.FILE_COUNTS};
+        long total = 0;
+        for (double share : shares) {
+            total += capped.limit(share, 1);
+        }
+        assertTrue(total <= 1_000_000_000L, "the sizes add up to " + total);
+        assertEquals(20_000_000L, capped.limit(MemoryBudget.FILE_COUNTS, 1), "no 256 MiB minimum under a cap");
+        assertEquals(SpillBudget.MINIMUM_BYTES, new SpillBudget(dir, 1_000_000_000L).limit(MemoryBudget.FILE_COUNTS, 1),
+                "a budget of the free space keeps the minimum");
+    }
+
+    @Test
+    void spillFilesAnEarlierProcessLeftAreDeletedTheFirstTimeOnly() throws Exception {
+        // Review of #544: a killed process leaves its spill files, which DuckDB removes only on its next spill
+        SpillBudget spill = new SpillBudget(dir, 10_000_000_000L);
+        Path instance = spill.directory("lake", "tier-minor");
+        Files.createDirectories(instance);
+        Path leftover = Files.write(instance.resolve("duckdb_temp_storage_DEFAULT-0.tmp"), new byte[1_000]);
+        Path other = Files.write(instance.resolve("notes.txt"), new byte[10]);
+        spill.apply("lake", "tier-minor", 0.2, 1, List.of());
+        assertFalse(Files.exists(leftover), "deleted before the instance opens");
+        assertTrue(Files.exists(other), "only DuckDB's spill files");
+
+        // a later open in the same process (after the instance was replaced) leaves the directory alone
+        Path current = Files.write(instance.resolve("duckdb_temp_storage_DEFAULT-0.tmp"), new byte[1_000]);
+        spill.apply("lake", "tier-minor", 0.2, 1, List.of());
+        assertTrue(Files.exists(current));
+    }
+
+    @Test
+    void healthAlertsAgainstTheSizesGivenOutAndTheSpaceTheyMayStillNeed() throws Exception {
+        // Review of #544: the given sizes add up to 68% of the budget, so an 80%-of-budget alert never fired
+        SpillBudget spill = new SpillBudget(dir, 10_000_000_000L, true);
+        spill.apply("lake", "tier-minor", 0.0001, 1, List.of()); // 1,000,000 bytes
+        Files.write(spill.directory("lake", "tier-minor").resolve("duckdb_temp_storage_DEFAULT-0.tmp"), new byte[900_000]);
         CompactionStats.SpillStatus status = spill.status();
-        assertEquals(900L, status.usedBytes());
+        assertEquals(1_000_000L, status.allocatedBytes());
+        assertEquals(900_000L, status.usedBytes());
         assertTrue(status.freeBytes() > 0);
         List<String> alerts = SpillBudget.alerts(status);
-        assertEquals(1, alerts.size(), "900 of 1,000 bytes is above 80%");
+        assertEquals(1, alerts.size(), "900 KB of the 1 MB given is above 80%");
         assertTrue(alerts.get(0).contains("Spill under"), alerts.get(0));
 
-        assertEquals(1, SpillBudget.alerts(new CompactionStats.SpillStatus("/s", 1_000_000L, 0, 50_000L)).size(),
-                "free space below 10% of the budget");
-        assertEquals(List.of(), SpillBudget.alerts(new CompactionStats.SpillStatus("/s", 1_000_000L, 0, 500_000L)));
+        assertEquals(List.of(), SpillBudget.alerts(new CompactionStats.SpillStatus("/s", 10L << 30, 4L << 30, 0, 5L << 30)));
+        List<String> disk = SpillBudget.alerts(new CompactionStats.SpillStatus("/s", 10L << 30, 4L << 30, 1L << 30, 2L << 30));
+        assertEquals(1, disk.size(), "2 GiB free, but the instances may still spill 3 GiB");
+        assertTrue(disk.get(0).contains("may still spill"), disk.get(0));
         assertNull(SpillBudget.NONE.status());
     }
 }

@@ -49,6 +49,12 @@ public final class CallSizing {
      * it with the per-call RSS readings.
      */
     public static final long PER_THREAD_BYTES = 8L << 20;
+    /**
+     * The most of a group's memory the threads' own may take: an instance gets no more threads than
+     * that leaves room for. Threads grow with CPUs and memory does not, so a container with a memory
+     * limit but no CPU limit (it sees the node's CPUs) would otherwise give them all of it.
+     */
+    public static final double THREAD_MEMORY_SHARE = 0.5;
 
     private CallSizing() {
     }
@@ -116,6 +122,19 @@ public final class CallSizing {
             return -1;
         }
         return Math.max(0, (long) (MEMORY_LIMIT_SHARE * memoryLimitBytes) - (long) threads * PER_THREAD_BYTES);
+    }
+
+    /**
+     * The most threads an instance with {@code memoryLimitBytes} gets: their {@link #PER_THREAD_BYTES}
+     * take at most {@link #THREAD_MEMORY_SHARE} of 80% of it. At least 1; {@link Integer#MAX_VALUE}
+     * when the limit is unknown.
+     */
+    public static int maxThreads(long memoryLimitBytes) {
+        if (memoryLimitBytes <= 0) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) Math.max(1, Math.min(Integer.MAX_VALUE,
+                (long) (THREAD_MEMORY_SHARE * MEMORY_LIMIT_SHARE * memoryLimitBytes / PER_THREAD_BYTES)));
     }
 
     /** {@link #maxFilesPerGroup(TableWork, long, long)} with the instance's threads' own memory taken off. */

@@ -24,7 +24,14 @@ import java.util.regex.Pattern;
  *
  * <p>{@code max_temp_directory_size} is split like {@link MemoryBudget}, from a budget of the free
  * space under the root at startup, or a configured cap when that is smaller. The cap matters on
- * Kubernetes, where an {@code emptyDir}'s {@code sizeLimit} is not visible through statfs.
+ * Kubernetes, where an {@code emptyDir}'s {@code sizeLimit} is not visible through statfs and going
+ * over it evicts the pod, so under a cap no instance is raised to {@link #MINIMUM_BYTES}: the
+ * instances' sizes always add up to less than the cap.
+ *
+ * <p>A process killed while spilling (an out-of-memory kill) leaves its spill files behind, and
+ * DuckDB removes them only when an instance spills to the same directory again; an {@code emptyDir}
+ * keeps them across container restarts. So the first time this process uses an instance's
+ * directory, it deletes any {@code duckdb_temp_*} files left in it.
  *
  * <p>An instance whose own settings set {@code temp_directory} keeps it, and gets no size either
  * unless they set it.
@@ -34,15 +41,18 @@ final class SpillBudget {
     private static final Logger logger = LoggerFactory.getLogger(SpillBudget.class);
 
     static final String DEFAULT_DIRECTORY = "/tmp/ducklake-compactor";
-    /** No instance is given less. */
+    /** No instance is given less, unless the budget is a configured cap. */
     static final long MINIMUM_BYTES = 256L << 20;
-    /** /health alerts when the instances together use more than this share of the budget ... */
+    /**
+     * /health alerts when the instances together use more than this share of the sizes they were
+     * given, or when the free space under the root is less than what they may still spill.
+     */
     static final double USED_ALERT_SHARE = 0.8;
-    /** ... or when the free space under the root falls below this share of it. */
-    static final double FREE_ALERT_SHARE = 0.1;
+    /** What DuckDB names its spill files. */
+    static final String SPILL_FILE_PREFIX = "duckdb_temp_";
 
     /** No spill directory: DuckDB's defaults. */
-    static final SpillBudget NONE = new SpillBudget(null, -1);
+    static final SpillBudget NONE = new SpillBudget(null, -1, false);
 
     private static final Pattern SETS_DIRECTORY = Pattern.compile("(?i)\\btemp_directory\\b");
     private static final Pattern SETS_SIZE = Pattern.compile("(?i)\\bmax_temp_directory_size\\b");
@@ -50,10 +60,22 @@ final class SpillBudget {
 
     private final Path root;
     private final long budgetBytes;
+    private final boolean capped;
+    /** The {@code max_temp_directory_size} given to each instance's directory. */
+    private final java.util.concurrent.ConcurrentHashMap<Path, Long> allocated = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Directories already cleared of an earlier process's spill files. */
+    private final java.util.Set<Path> cleared = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /** A budget of the free space: no instance gets less than {@link #MINIMUM_BYTES}. */
     SpillBudget(Path root, long budgetBytes) {
+        this(root, budgetBytes, false);
+    }
+
+    /** @param capped whether the budget is a configured cap that the instances' sizes must stay under */
+    SpillBudget(Path root, long budgetBytes, boolean capped) {
         this.root = root;
         this.budgetBytes = budgetBytes;
+        this.capped = capped;
     }
 
     /**
@@ -73,10 +95,11 @@ final class SpillBudget {
             // Each instance probes its own directory when it opens and reports what is wrong
             logger.error("Spill directory {} cannot be created: {}", root, e.toString());
         }
-        long budget = free > 0 && maxBytes > 0 ? Math.min(free, maxBytes) : free > 0 ? free : maxBytes;
+        boolean capped = maxBytes > 0 && (free <= 0 || maxBytes <= free);
+        long budget = capped ? maxBytes : free;
         logger.info("DuckDB instances spill under {}, a budget of {} bytes ({} free{})", root, budget, free,
                 maxBytes > 0 ? ", capped at " + maxBytes : "");
-        return new SpillBudget(root, budget);
+        return new SpillBudget(root, budget, capped);
     }
 
     Path root() {
@@ -87,12 +110,16 @@ final class SpillBudget {
         return budgetBytes;
     }
 
-    /** The {@code max_temp_directory_size} for {@code share} of the budget, or -1 when unknown. */
+    /**
+     * The {@code max_temp_directory_size} for {@code share} of the budget, or -1 when unknown. At
+     * least {@link #MINIMUM_BYTES}, except under a configured cap, which the sizes must not exceed.
+     */
     long limit(double share, int databases) {
         if (budgetBytes <= 0) {
             return -1;
         }
-        return Math.max(MINIMUM_BYTES, (long) (share * budgetBytes / Math.max(1, databases)));
+        long split = (long) (share * budgetBytes / Math.max(1, databases));
+        return capped ? Math.max(1, split) : Math.max(MINIMUM_BYTES, split);
     }
 
     /**
@@ -111,6 +138,9 @@ final class SpillBudget {
         Path dir = directory(database, kind);
         try {
             Files.createDirectories(dir);
+            if (cleared.add(dir)) {
+                clearLeftovers(dir);
+            }
             Files.delete(Files.createTempFile(dir, "probe", ".tmp"));
         } catch (IOException | RuntimeException e) {
             throw new SQLException("Spill directory %s is not writable: %s".formatted(dir, e), e);
@@ -120,9 +150,28 @@ final class SpillBudget {
         long limit = limit(share, databases);
         if (limit > 0 && settings.stream().noneMatch(s -> SETS_SIZE.matcher(s).find())) {
             with.add("SET max_temp_directory_size = '" + limit + " bytes'");
+            allocated.put(dir, limit);
         }
         with.addAll(settings);
         return List.copyOf(with);
+    }
+
+    /** Deletes the spill files an earlier process left in {@code dir}; no instance uses it yet. */
+    private static void clearLeftovers(Path dir) throws IOException {
+        long files = 0;
+        long bytes = 0;
+        try (var entries = Files.newDirectoryStream(dir, SPILL_FILE_PREFIX + "*")) {
+            for (Path file : entries) {
+                if (Files.isRegularFile(file)) {
+                    bytes += Files.size(file);
+                    Files.delete(file);
+                    files++;
+                }
+            }
+        }
+        if (files > 0) {
+            logger.info("Deleted {} spill file(s), {} bytes, that an earlier process left in {}", files, bytes, dir);
+        }
     }
 
     Path directory(String database, String kind) {
@@ -159,22 +208,27 @@ final class SpillBudget {
         } catch (IOException e) {
             logger.debug("Cannot read the spill directory {}: {}", root, e.toString());
         }
-        return new CompactionStats.SpillStatus(root.toString(), budgetBytes, used, free);
+        long given = allocated.values().stream().mapToLong(Long::longValue).sum();
+        return new CompactionStats.SpillStatus(root.toString(), budgetBytes, given, used, free);
     }
 
-    /** The alerts for {@link #status()}: spill near its budget, or the disk near full. */
+    /**
+     * The alerts for {@link #status()}: the instances near the sizes they were given (they fail a
+     * merge that needs more), or less free space than they may still spill (the disk fills first).
+     */
     static List<String> alerts(CompactionStats.SpillStatus status) {
         List<String> alerts = new ArrayList<>();
-        if (status == null || status.budgetBytes() <= 0) {
+        if (status == null || status.allocatedBytes() <= 0 || status.usedBytes() < 0) {
             return alerts;
         }
-        if (status.usedBytes() > USED_ALERT_SHARE * status.budgetBytes()) {
-            alerts.add("Spill under %s uses %d bytes, above %.0f%% of its budget of %d bytes".formatted(
-                    status.directory(), status.usedBytes(), USED_ALERT_SHARE * 100, status.budgetBytes()));
+        if (status.usedBytes() > USED_ALERT_SHARE * status.allocatedBytes()) {
+            alerts.add("Spill under %s uses %d bytes, above %.0f%% of the %d bytes its instances may spill".formatted(
+                    status.directory(), status.usedBytes(), USED_ALERT_SHARE * 100, status.allocatedBytes()));
         }
-        if (status.freeBytes() >= 0 && status.freeBytes() < FREE_ALERT_SHARE * status.budgetBytes()) {
-            alerts.add("Free space under %s is %d bytes, below %.0f%% of the spill budget of %d bytes".formatted(
-                    status.directory(), status.freeBytes(), FREE_ALERT_SHARE * 100, status.budgetBytes()));
+        long headroom = status.allocatedBytes() - status.usedBytes();
+        if (status.freeBytes() >= 0 && status.freeBytes() < headroom) {
+            alerts.add(("Free space under %s is %d bytes, less than the %d bytes its instances may still spill")
+                    .formatted(status.directory(), status.freeBytes(), headroom));
         }
         return alerts;
     }

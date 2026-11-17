@@ -34,7 +34,8 @@ class HealthServerTest {
         var ds = new CompactionStats.DatabaseStats(
                 Map.of("tier", 1L), 0, 5, 2, Instant.now(), Map.of("tier", loop), Map.of("tier", 3L), 3, 42);
         return new CompactionStats(Instant.now(), Map.of("db", ds), List.of("db tier 'tier' backs off \"main.bad\""),
-                new CompactionStats.SpillStatus("/tmp/ducklake-compactor", 20_000_000_000L, 1_024, 19_000_000_000L));
+                new CompactionStats.SpillStatus("/tmp/ducklake-compactor", 20_000_000_000L, 13_600_000_000L, 1_024,
+                        19_000_000_000L));
     }
 
     private String get(String path) throws Exception {
@@ -60,7 +61,7 @@ class HealthServerTest {
         assertTrue(health.contains("\"status\": \"UP\""));
         assertTrue(health.contains("\"telemetry\""), "per-tier telemetry section present");
         assertTrue(health.contains("\"spill\": {\"directory\": \"/tmp/ducklake-compactor\", \"budgetBytes\": 20000000000,"
-                + " \"usedBytes\": 1024, \"freeBytes\": 19000000000}"), health);
+                + " \"allocatedBytes\": 13600000000, \"usedBytes\": 1024, \"freeBytes\": 19000000000}"), health);
         assertTrue(health.contains("\"throughputFilesPerSec\""), "derived aggregates present");
         assertTrue(health.contains("\"table\": \"main.events\""), "the latest call's table");
         assertTrue(health.contains("\"state\": \"RUNNING\""), "the tier loop's state");

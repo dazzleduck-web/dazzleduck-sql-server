@@ -148,7 +148,7 @@ Per-tier fields:
 | `max_wait` | none | ... or once a group's second-oldest file has waited this long |
 | `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
 | `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
-| `threads_per_cpu` | `4` | DuckDB threads per available CPU (`Runtime.availableProcessors()`, which reads the container limit) for each of this tier's instances, divided among the databases, at least 1. Every tier gets them; there is no CPU share. Merging small files from an object store costs two GETs per file, so its time is about the latency x 2 x files / threads: in a load test at about 25 ms per request, 1,000 files of 8 KB took 13.9 s on 4 threads, 6.9 s on 8 and 3.5 s on 16, and no DuckDB setting changed the request count. More threads also mean more connections; see "Many small files and ephemeral ports" below. `cpu_share`, used before, is ignored with a warning |
+| `threads_per_cpu` | `4` | DuckDB threads per available CPU (`Runtime.availableProcessors()`, which reads the container limit) for each of this tier's instances, divided among the databases, at least 1. Every tier gets them; there is no CPU share. Merging small files from an object store costs two GETs per file, so its time is about the latency x 2 x files / threads: in a load test at about 25 ms per request, 1,000 files of 8 KB took 13.9 s on 4 threads, 6.9 s on 8 and 3.5 s on 16, and no DuckDB setting changed the request count. More threads also mean more connections; see "Many small files and ephemeral ports" below. `cpu_share`, used before, is ignored with a warning; a tier's memory, which used to follow it, now follows `memory_share`, so a config that set only `cpu_share` should set `memory_share` to keep its split. An instance gets no more threads than leave half of a group's memory (80% of `memory_limit`) for the group, at 8 MiB a thread: a container with a memory limit but no CPU limit sees all of the node's CPUs. A `SET threads` in `connection_settings` wins, and groups are sized for it |
 | `memory_share` | an equal part of what the other tiers leave | Share of the tiers' memory for this tier: unless `connection_settings` sets one, each instance gets a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share, divided among the databases. Separate from `cpu_share` because minor merges many tiny files and needs threads, while major and mega merge few large files and need memory. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1. Each thread holds its own read buffers, so a merge group is sized to 80% of the `memory_limit` less 8 MiB per thread |
 | `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads`, `SET memory_limit` or `SET temp_directory` here overrides the computed one. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
@@ -325,8 +325,15 @@ since DuckDB cleans up its temp directory when an instance closes.
 
 Each instance's `max_temp_directory_size` is split like its `memory_limit`, from a budget of the
 free space under the root at startup, or `spill_max_size` when that is smaller. Set `spill_max_size`
-on Kubernetes, where an `emptyDir` volume's `sizeLimit` is not visible as free space. No instance
-gets less than 256 MiB. An instance whose `connection_settings` set `temp_directory` keeps it. Set
+on Kubernetes, where an `emptyDir` volume's `sizeLimit` is not visible as free space and going over
+it evicts the pod. Without a cap no instance gets less than 256 MiB; under a cap there is no minimum,
+so the sizes always add up to less than it. An instance whose `connection_settings` set
+`temp_directory` keeps it.
+
+A process killed while spilling (an out-of-memory kill, say) leaves its spill files behind, and
+DuckDB removes them only when an instance spills to the same directory again; an `emptyDir` keeps
+them across container restarts. So the first time the compactor uses an instance's directory it
+deletes any `duckdb_temp_*` files left in it. Set
 `spill_directory = ""` to leave DuckDB's defaults.
 
 ```hocon
@@ -334,8 +341,10 @@ spill_directory = "/tmp/ducklake-compactor"
 spill_max_size = 20GB
 ```
 
-`/health` reports the root, its budget, the bytes spilled under it now and the free space, and
-alerts when spill uses more than 80% of the budget or the free space falls below 10% of it.
+`/health` reports the root, its budget, the sizes given to the instances opened so far
+(`allocatedBytes`), the bytes spilled under it now and the free space. It alerts when spill uses
+more than 80% of the sizes given (merges that need more fail), or when the free space is less than
+the instances may still spill (the disk fills first).
 
 ### Many small files and ephemeral ports
 
@@ -444,7 +453,7 @@ starved table, a table skipped because not even two of its files fit in one grou
 catalog's timeout and the instance's memory, a table whose oldest file with something to merge has waited over 30 minutes, a band
 whose file count rose for 30 minutes, unexpired snapshots growing across 3 housekeeping runs, and
 RSS above 75% of the container's memory limit, and spill above 80% of its budget or free space
-under the spill directory below 10% of it. The status is always `UP` while the process is
+under the spill directory below what the instances may still spill. The status is always `UP` while the process is
 running; watch `alerts` (or the metrics below) instead.
 
 When alerting on metrics, `last_success_age` alone is not enough: a success is a table call that

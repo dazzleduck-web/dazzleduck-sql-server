@@ -102,6 +102,7 @@ public class HealthServer implements Closeable {
         if (spill != null) {
             sb.append("  \"spill\": {\"directory\": ").append(string(spill.directory()))
                     .append(", \"budgetBytes\": ").append(spill.budgetBytes())
+                    .append(", \"allocatedBytes\": ").append(spill.allocatedBytes())
                     .append(", \"usedBytes\": ").append(spill.usedBytes())
                     .append(", \"freeBytes\": ").append(spill.freeBytes()).append("},\n");
         }

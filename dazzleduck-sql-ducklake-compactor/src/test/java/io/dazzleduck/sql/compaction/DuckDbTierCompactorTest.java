@@ -204,6 +204,22 @@ class DuckDbTierCompactorTest {
     }
 
     @Test
+    void threadsAreCappedByMemoryAndAnExplicitThreadsSettingIsWhatGroupsAreSizedFor() throws Exception {
+        // Review of #544: 16 CPUs and 2 GiB give minor 64 threads, whose buffers left no memory for a group
+        CompactionTier minor = ALL.withMemoryShare(0.4);
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 16, 1, 2L << 30)) {
+            TierCompactor.Readiness readiness = compactor.prepare("lake", minor);
+            assertFalse(readiness.isRefused(), String.valueOf(readiness.refused()));
+            assertEquals(20, readiness.threads(), "capped from 64 so the threads take at most half of a group's memory");
+        }
+        try (DuckDbTierCompactor compactor = new DuckDbTierCompactor(startup, state, 16, 1, 2L << 30)) {
+            TierCompactor.Readiness readiness = compactor.prepare("lake",
+                    minor.withConnectionSettings(List.of("SET threads = 3")));
+            assertEquals(3, readiness.threads(), "the instance's own setting, not the computed one");
+        }
+    }
+
+    @Test
     void aTierWhoseSpillDirectoryIsNotWritableDoesNotStart(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
             throws Exception {
         java.nio.file.Path file = java.nio.file.Files.createFile(dir.resolve("file"));

@@ -27,11 +27,13 @@ public record CompactionStats(
     /**
      * Where the DuckDB instances spill (see {@code SpillBudget}).
      *
-     * @param budgetBytes what {@code max_temp_directory_size} is split from, -1 unknown
-     * @param usedBytes   bytes spilled under the directory now, -1 unknown
-     * @param freeBytes   free space under it, -1 unknown
+     * @param budgetBytes    what {@code max_temp_directory_size} is split from, -1 unknown
+     * @param allocatedBytes the sizes given to the instances opened so far, added up
+     * @param usedBytes      bytes spilled under the directory now, -1 unknown
+     * @param freeBytes      free space under it, -1 unknown
      */
-    public record SpillStatus(String directory, long budgetBytes, long usedBytes, long freeBytes) {
+    public record SpillStatus(String directory, long budgetBytes, long allocatedBytes, long usedBytes,
+                              long freeBytes) {
     }
 
     /**
