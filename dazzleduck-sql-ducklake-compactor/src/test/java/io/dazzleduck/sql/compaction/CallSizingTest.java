@@ -146,35 +146,25 @@ class CallSizingTest {
 
     @Test
     void anInstanceGetsNoMoreThreadsThanHalfAGroupsMemoryHolds() {
-        // Review of #544: a 2 GiB pod with no CPU limit sees 16 CPUs, 64 threads x 8 MiB = 537 MB, more
-        // than minor's 343 MB for a group, so every tier was refused
+        // Review of #544: a pod with no CPU limit sees the node's CPUs, 64 threads on 16 of them
         long minorLimit = (long) (0.5 * 0.4 * (2L << 30));
-        int threads = CallSizing.maxThreads(minorLimit);
-        assertEquals(20, threads, "half of 80% of 429 MB, at 8 MiB a thread");
-        assertTrue(CallSizing.groupMemoryBytes(minorLimit, threads) >= CallSizing.THREAD_MEMORY_SHARE * 0.8 * minorLimit);
-        assertNull(CallSizing.startupRefusal(CompactionTier.of("minor", 0, 8_000_000, 16_000_000, 12), 0, minorLimit,
-                threads));
+        assertEquals(20, CallSizing.maxThreads(minorLimit), "half of 80% of 429 MB, at 8 MiB a thread");
         assertEquals(1, CallSizing.maxThreads(1L << 20), "at least one");
         assertEquals(Integer.MAX_VALUE, CallSizing.maxThreads(-1), "no cap without a limit");
     }
 
     @Test
-    void eachThreadsReadBuffersComeOffAGroupsMemory() {
-        // Review on #542: more threads, each with its own read buffers, leave less for the group
-        long limit = 256L << 20;
-        assertEquals((long) (0.8 * limit) - 6 * CallSizing.PER_THREAD_BYTES, CallSizing.groupMemoryBytes(limit, 6));
-        assertEquals(0, CallSizing.groupMemoryBytes(limit, 1_000), "never below zero");
-        assertEquals(-1, CallSizing.groupMemoryBytes(-1, 6), "unknown without a limit");
-
+    void threadsDoNotShrinkAGroup() {
+        // Review of #544: charging 8 MiB a thread against the group left major, at its default 220 MiB in a
+        // 2 GiB container, merging 10 MB files two at a time; a load test measured about the same memory at
+        // 1, 2 and 8 threads
+        long limit = 220L << 20;
+        assertEquals((long) (0.8 * limit), CallSizing.groupMemoryBytes(limit));
+        assertEquals(-1, CallSizing.groupMemoryBytes(-1), "unknown without a limit");
         CompactionTier major = CompactionTier.of("major", 8_000_000, 64_000_000, 64_000_000, 16);
-        TableWork tenMb = work(40, 10_000_000, 0, true);
-        assertEquals(5, CallSizing.plan(major, tenMb, 0, limit, 0, Long.MAX_VALUE).cap().filesPerGroup());
-        assertEquals(2, CallSizing.plan(major, tenMb, 0, limit, 16, Long.MAX_VALUE).cap().filesPerGroup(),
-                "16 threads take 128 MiB of the 205 MiB: 77 MiB holds two 40 MB files");
-        assertNull(CallSizing.plan(major, tenMb, 0, limit, 24, Long.MAX_VALUE), "24 threads leave room for no two");
-        String refused = CallSizing.startupRefusal(major, 0, limit, 24);
-        assertNotNull(refused);
-        assertTrue(refused.contains("threads_per_cpu"), refused);
+        CallSizing.Plan plan = CallSizing.plan(major, work(40, 10_000_000, 0, true), 0, limit);
+        assertEquals(4, plan.cap().filesPerGroup(), "176 MiB holds four 10 MB files at 4x their bytes");
+        assertEquals(40_000_000L, plan.target());
     }
 
     @Test

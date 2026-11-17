@@ -44,15 +44,17 @@ public final class CallSizing {
      */
     public static final double BYTES_EXPANSION = 4.0;
     /**
-     * Memory each DuckDB thread holds for its own reads (decoded pages, request buffers), taken off
-     * a group's memory before it is sized. A starting value, like {@link #BYTES_EXPANSION}: calibrate
-     * it with the per-call RSS readings.
+     * An allowance for what each DuckDB thread holds for its own reads (decoded pages, request
+     * buffers). It is not taken off a group's memory: a load test measured about the same memory at 1,
+     * 2 and 8 threads, and charging it left major merging 10 MB files two at a time at 2 GiB. It only
+     * caps the threads ({@link #maxThreads}).
      */
     public static final long PER_THREAD_BYTES = 8L << 20;
     /**
-     * The most of a group's memory the threads' own may take: an instance gets no more threads than
-     * that leaves room for. Threads grow with CPUs and memory does not, so a container with a memory
-     * limit but no CPU limit (it sees the node's CPUs) would otherwise give them all of it.
+     * The threads get no more than this share of a group's memory at {@link #PER_THREAD_BYTES} each.
+     * Threads grow with CPUs and memory does not, and a container with a memory limit but no CPU limit
+     * sees the node's CPUs: without a cap, a 64-CPU node would run 256 threads per tier, at a thread
+     * count no measurement covers.
      */
     public static final double THREAD_MEMORY_SHARE = 0.5;
 
@@ -110,18 +112,21 @@ public final class CallSizing {
      * when neither is known.
      */
     public static long maxFilesPerGroup(TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes) {
-        return maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes, 0);
+        long max = Long.MAX_VALUE;
+        if (idleTxnTimeoutMs > 0) {
+            max = Math.min(max, (long) Math.floor(TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0 / secPerFile(work.sorted())));
+        }
+        long groupMemory = groupMemoryBytes(memoryLimitBytes);
+        if (groupMemory >= 0) {
+            double perFile = memoryPerFile(Math.max(1, work.averageFileSize()), work.sorted());
+            max = Math.min(max, (long) Math.floor(groupMemory / perFile));
+        }
+        return max;
     }
 
-    /**
-     * The memory one group may use: 80% of the instance's {@code memory_limit} less
-     * {@link #PER_THREAD_BYTES} for each of its threads, or -1 when the limit is unknown.
-     */
-    public static long groupMemoryBytes(long memoryLimitBytes, int threads) {
-        if (memoryLimitBytes <= 0) {
-            return -1;
-        }
-        return Math.max(0, (long) (MEMORY_LIMIT_SHARE * memoryLimitBytes) - (long) threads * PER_THREAD_BYTES);
+    /** The memory one group may use: 80% of the instance's {@code memory_limit}, or -1 when it is unknown. */
+    public static long groupMemoryBytes(long memoryLimitBytes) {
+        return memoryLimitBytes <= 0 ? -1 : (long) (MEMORY_LIMIT_SHARE * memoryLimitBytes);
     }
 
     /**
@@ -135,20 +140,6 @@ public final class CallSizing {
         }
         return (int) Math.max(1, Math.min(Integer.MAX_VALUE,
                 (long) (THREAD_MEMORY_SHARE * MEMORY_LIMIT_SHARE * memoryLimitBytes / PER_THREAD_BYTES)));
-    }
-
-    /** {@link #maxFilesPerGroup(TableWork, long, long)} with the instance's threads' own memory taken off. */
-    public static long maxFilesPerGroup(TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes, int threads) {
-        long max = Long.MAX_VALUE;
-        if (idleTxnTimeoutMs > 0) {
-            max = Math.min(max, (long) Math.floor(TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0 / secPerFile(work.sorted())));
-        }
-        long groupMemory = groupMemoryBytes(memoryLimitBytes, threads);
-        if (groupMemory >= 0) {
-            double perFile = memoryPerFile(Math.max(1, work.averageFileSize()), work.sorted());
-            max = Math.min(max, (long) Math.floor(groupMemory / perFile));
-        }
-        return max;
     }
 
     /**
@@ -165,15 +156,9 @@ public final class CallSizing {
      */
     public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes,
                             long groupFilesLimit) {
-        return plan(tier, work, idleTxnTimeoutMs, memoryLimitBytes, 0, groupFilesLimit);
-    }
-
-    /** {@link #plan(CompactionTier, TableWork, long, long, long)} for an instance of {@code threads} threads. */
-    public static Plan plan(CompactionTier tier, TableWork work, long idleTxnTimeoutMs, long memoryLimitBytes,
-                            int threads, long groupFilesLimit) {
         long average = Math.max(1, work.averageFileSize());
         long fullGroup = Math.max(1, Math.min(ceilDiv(tier.targetFileSize(), average), work.filesWaiting()));
-        long maxFiles = Math.min(maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes, threads), groupFilesLimit);
+        long maxFiles = Math.min(maxFilesPerGroup(work, idleTxnTimeoutMs, memoryLimitBytes), groupFilesLimit);
         if (fullGroup <= maxFiles) {
             return new Plan(of(tier, work, idleTxnTimeoutMs), tier.targetFileSize(), tier.maxFileSize(), false);
         }
@@ -226,24 +211,17 @@ public final class CallSizing {
      * fit run with a lowered target.
      */
     public static String startupRefusal(CompactionTier tier, long idleTxnTimeoutMs, long memoryLimitBytes) {
-        return startupRefusal(tier, idleTxnTimeoutMs, memoryLimitBytes, 0);
-    }
-
-    /** {@link #startupRefusal(CompactionTier, long, long)} for an instance of {@code threads} threads. */
-    public static String startupRefusal(CompactionTier tier, long idleTxnTimeoutMs, long memoryLimitBytes,
-                                        int threads) {
         long smallest = Math.max(tier.minFileSize(), TINY_FILE_BYTES);
         if (idleTxnTimeoutMs > 0 && 2 * SEC_PER_FILE_SORTED > TIMEOUT_SHARE * idleTxnTimeoutMs / 1000.0) {
             return ("not even two files fit in one group within %.0f%% of the catalog's idle-in-transaction"
                     + " timeout (%d ms)").formatted(TIMEOUT_SHARE * 100, idleTxnTimeoutMs);
         }
-        long groupMemory = groupMemoryBytes(memoryLimitBytes, threads);
+        long groupMemory = groupMemoryBytes(memoryLimitBytes);
         if (groupMemory >= 0 && 2 * memoryPerFile(smallest, true) > groupMemory) {
             return ("not even two of its smallest files (%d bytes) fit in one group within %.0f%% of the instance's"
-                    + " memory_limit (%d bytes) less %d bytes for each of its %d threads: give the tier more memory"
-                    + " (memory_limit in its connection_settings, or a larger memory_share or container), fewer"
-                    + " threads (threads_per_cpu), or disable it").formatted(smallest, MEMORY_LIMIT_SHARE * 100,
-                    memoryLimitBytes, PER_THREAD_BYTES, threads);
+                    + " memory_limit (%d bytes): give the tier more memory (memory_limit in its connection_settings,"
+                    + " or a larger memory_share or container) or disable it").formatted(smallest,
+                    MEMORY_LIMIT_SHARE * 100, memoryLimitBytes);
         }
         return null;
     }

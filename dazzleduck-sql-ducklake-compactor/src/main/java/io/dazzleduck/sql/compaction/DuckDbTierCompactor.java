@@ -163,7 +163,7 @@ public class DuckDbTierCompactor implements TierCompactor {
             return new Readiness(e.getMessage(), 0, threads);
         }
         long timeoutMs = idleTxnTimeoutMs(connection, database, tier);
-        String refusal = CallSizing.startupRefusal(tier, timeoutMs, memoryLimitBytes, threads);
+        String refusal = CallSizing.startupRefusal(tier, timeoutMs, memoryLimitBytes);
         if (refusal != null) {
             return new Readiness(refusal, timeoutMs, threads, memoryLimitBytes);
         }
