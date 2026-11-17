@@ -57,15 +57,16 @@ import static org.junit.jupiter.api.Assertions.*;
  *   <li>{@code compaction.stress.writers} (default 4)</li>
  *   <li>{@code compaction.stress.readers} (default 2)</li>
  *   <li>{@code compaction.stress.seed} (default: random, printed; fixes each thread's random choices, though thread timing still varies between runs)</li>
- *   <li>{@code ducklake.extension.path}: a DuckLake extension file to {@code LOAD} instead of
- *       installing the stock one, e.g. a patched build from DUCKLAKE_PATCH.md's releases. The file
- *       must be named {@code ducklake.duckdb_extension}: DuckDB derives the entry point from it.</li>
+ *   <li>{@code ducklake.extension.path}: a DuckLake extension file to {@code LOAD} instead of the
+ *       pinned patched release ({@link PatchedDuckLake}, {@code ducklake.patch.release}), e.g. a local
+ *       build. The file must be named {@code ducklake.duckdb_extension}: DuckDB derives the entry
+ *       point from it.</li>
  * </ul>
  *
  * <p>The stock extension (DuckDB v1.5.5 and v1.5.6) fails this test: it lacks duckdb/ducklake#1482,
  * so two concurrent deletes on one data file leave it with two active delete files, and deleted
- * rows come back. Run it against the patched build ({@code v1.5.6-dazzleduck.1} or later, which
- * has macOS builds).
+ * rows come back; concurrent merges of the same files can also both commit and duplicate rows. It
+ * therefore runs against the pinned patched release by default.
  */
 @Tag("stress")
 class CompactionStressTest {
@@ -74,6 +75,7 @@ class CompactionStressTest {
     static final int WRITERS = Integer.getInteger("compaction.stress.writers", 4);
     static final int READERS = Integer.getInteger("compaction.stress.readers", 2);
     static final long SEED = Long.getLong("compaction.stress.seed", new Random().nextLong());
+    // Read by PatchedDuckLake too; here only to report which extension ran
     static final String EXTENSION_PATH = System.getProperty("ducklake.extension.path", "");
 
     static final String CATALOG = "stress_lake";
@@ -134,9 +136,9 @@ class CompactionStressTest {
         Files.createDirectories(dataPath);
         String connectionString = "host=%s port=%d dbname=ducklake user=duck password=duck".formatted(
                 postgres.getHost(), postgres.getFirstMappedPort());
-        String load = EXTENSION_PATH.isBlank()
-                ? "INSTALL ducklake; LOAD ducklake; SET ducklake_max_retry_count = %d;".formatted(COMMIT_RETRIES)
-                : "LOAD '%s'; SET ducklake_max_retry_count = %d;".formatted(EXTENSION_PATH, COMMIT_RETRIES);
+        // The patched extension the images ship (a local build with -Dducklake.extension.path): the stock
+        // one fails this test, so running it by default only ever reported stock DuckLake's bugs
+        String load = "LOAD '%s'; SET ducklake_max_retry_count = %d;".formatted(PatchedDuckLake.extension(), COMMIT_RETRIES);
         startupScript = "%s\nATTACH 'ducklake:postgres:%s' AS %s (DATA_PATH '%s', DATA_INLINING_ROW_LIMIT 0);"
                 .formatted(load, connectionString, CATALOG, dataPath);
 
@@ -150,7 +152,7 @@ class CompactionStressTest {
                 rs.next();
                 System.out.printf("CompactionStressTest: duration=%s writers=%d readers=%d seed=%d ducklake=%s (%s)%n",
                         DURATION, WRITERS, READERS, SEED, rs.getString(1),
-                        EXTENSION_PATH.isBlank() ? "stock" : EXTENSION_PATH);
+                        EXTENSION_PATH.isBlank() ? "pinned patched release" : EXTENSION_PATH);
             }
         }
 
