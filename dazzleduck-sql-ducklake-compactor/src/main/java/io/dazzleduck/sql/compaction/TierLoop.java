@@ -290,7 +290,7 @@ final class TierLoop {
                 known.expireLearnedLimits(clock.instant());
             }
             CallSizing.Plan plan = CallSizing.plan(tier, work, readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes(),
-                    known != null ? known.groupFilesLimit : Long.MAX_VALUE);
+                    readiness.threads(), known != null ? known.groupFilesLimit : Long.MAX_VALUE);
             if (plan == null) {
                 skipOversized(work);
                 continue;
@@ -391,7 +391,7 @@ final class TierLoop {
         if (!health.oversized) {
             logger.warn(("Tier '{}' skips {}.{}: not even two of its files ({} files of about {} bytes, {}) fit in one"
                             + " group within 80% of the catalog's idle-in-transaction timeout ({} ms) and of the"
-                            + " instance's memory_limit ({} bytes). Add a sort key, raise the timeout or the memory,"
+                            + " instance's memory_limit ({} bytes) less its threads' own. Add a sort key, raise the timeout or the memory,"
                             + " or write larger files"),
                     tier.name(), database, work.name(), work.filesWaiting(), work.averageFileSize(),
                     work.sorted() ? "sorted" : "unsorted", readiness.idleTxnTimeoutMs(), readiness.memoryLimitBytes());

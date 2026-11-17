@@ -14,15 +14,14 @@ import java.util.List;
  *                           Required for an enabled tier, and at least {@code maxFileSize}
  * @param maxCompactedFiles  the static cap: the most {@code max_compacted_files} (groups) one call is
  *                           ever given. Every sizing rule can only lower it
- * @param cpuShare           share of the process's CPUs this tier's DuckDB instances get; their
- *                           threads are {@link #THREADS_PER_CPU} times their CPUs
  * @param memoryShare        share of the tiers' memory this tier's instances get (see
- *                           {@link MemoryBudget}). Separate from {@code cpuShare}: minor merges many
+ *                           {@link MemoryBudget}). Minor merges many
  *                           tiny files and needs threads, major and mega merge few large files and
  *                           need memory
- * @param minThreads         the fewest DuckDB threads an instance gets, whatever its CPUs: merging
- *                           small files from an object store waits on round trips, not on CPU, so a
- *                           small CPU share must still keep requests in flight
+ * @param threadsPerCpu      DuckDB threads per available CPU for each of this tier's instances,
+ *                           divided among the databases (see {@link #threads}). Every tier gets them,
+ *                           not a share: merging small files from an object store waits on round
+ *                           trips, so threads keep requests in flight rather than CPUs busy
  * @param passTimeLimit      after this, a pass starts no new call; the tables not yet called carry
  *                           over to the front of the next pass
  * @param idleSleep          how long the loop sleeps after a refresh that found no work
@@ -40,9 +39,8 @@ public record CompactionTier(
         long maxFileSize,
         long targetFileSize,
         long maxCompactedFiles,
-        double cpuShare,
         double memoryShare,
-        int minThreads,
+        int threadsPerCpu,
         Duration passTimeLimit,
         Duration idleSleep,
         long maxFilesPerCall,
@@ -58,13 +56,13 @@ public record CompactionTier(
     /** Any two files in a group merge, so 2 is DuckLake's own trigger. */
     public static final int DEFAULT_MIN_FILES = 2;
     public static final Duration DEFAULT_CALL_TIME_LIMIT = Duration.ofMinutes(10);
-    /** DuckDB threads per CPU of a tier: they mostly wait on object-store reads. */
-    public static final int THREADS_PER_CPU = 2;
     /**
-     * Enough threads to keep requests in flight against an object store: with 2 on a 1.5-CPU
-     * container and ~25 ms per request, a load test used 8-77% of its CPUs.
+     * DuckDB threads per CPU. Merging small files from an object store costs two GETs per file, so its
+     * time is the latency x 2 x files / threads: 1,000 files of 8 KB at ~25 ms per request took 13.9 s
+     * on 4 threads, 6.9 s on 8 and 3.5 s on 16. With 2 threads on a 1.5-CPU container a load test
+     * used 8-77% of its CPUs.
      */
-    public static final int DEFAULT_MIN_THREADS = 4;
+    public static final int DEFAULT_THREADS_PER_CPU = 4;
 
     public CompactionTier {
         connectionSettings = List.copyOf(connectionSettings);
@@ -72,92 +70,86 @@ public record CompactionTier(
 
     /**
      * A tier with the spec's defaults for everything but its band, target and static cap, and all of
-     * the process's CPUs and of the tiers' memory. For tests and simple configs.
+     * the tiers' memory. For tests and simple configs.
      */
     public static CompactionTier of(String name, long minFileSize, long maxFileSize, long targetFileSize,
                                     long maxCompactedFiles) {
-        return new CompactionTier(name, true, minFileSize, maxFileSize, targetFileSize, maxCompactedFiles, 1.0, 1.0,
-                DEFAULT_MIN_THREADS, DEFAULT_PASS_TIME_LIMIT, DEFAULT_IDLE_SLEEP, DEFAULT_MAX_FILES_PER_CALL,
+        return new CompactionTier(name, true, minFileSize, maxFileSize, targetFileSize, maxCompactedFiles, 1.0,
+                DEFAULT_THREADS_PER_CPU, DEFAULT_PASS_TIME_LIMIT, DEFAULT_IDLE_SLEEP, DEFAULT_MAX_FILES_PER_CALL,
                 DEFAULT_MIN_FILES, Duration.ZERO, DEFAULT_CALL_TIME_LIMIT, List.of());
     }
 
     /** A copy with the fields given; the rest are this tier's. */
-    private CompactionTier copy(boolean enabled, long maxFileSize, long targetFileSize, double cpuShare,
-                                double memoryShare, int minThreads, Duration passTimeLimit, Duration idleSleep,
+    private CompactionTier copy(boolean enabled, long maxFileSize, long targetFileSize,
+                                double memoryShare, int threadsPerCpu, Duration passTimeLimit, Duration idleSleep,
                                 long maxFilesPerCall, int minFiles, Duration maxWait, Duration callTimeLimit,
                                 List<String> connectionSettings) {
-        return new CompactionTier(name, enabled, minFileSize, maxFileSize, targetFileSize, maxCompactedFiles, cpuShare,
-                memoryShare, minThreads, passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, callTimeLimit,
+        return new CompactionTier(name, enabled, minFileSize, maxFileSize, targetFileSize, maxCompactedFiles,
+                memoryShare, threadsPerCpu, passTimeLimit, idleSleep, maxFilesPerCall, minFiles, maxWait, callTimeLimit,
                 connectionSettings);
     }
 
     public CompactionTier withEnabled(boolean value) {
-        return copy(value, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
-                maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
-    }
-
-    public CompactionTier withCpuShare(double value) {
-        return copy(enabled, maxFileSize, targetFileSize, value, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(value, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withMemoryShare(double value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, value, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, value, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
-    public CompactionTier withMinThreads(int value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, value, passTimeLimit, idleSleep,
+    public CompactionTier withThreadsPerCpu(int value) {
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, value, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withAdmission(int files, Duration wait) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, files, wait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withPassTimeLimit(Duration value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, value, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, value, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withIdleSleep(Duration value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, value,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, value,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withMaxFilesPerCall(long value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 value, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withCallTimeLimit(Duration value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, value, connectionSettings);
     }
 
     public CompactionTier withMaxFileSize(long value) {
-        return copy(enabled, value, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, value, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withTargetFileSize(long value) {
-        return copy(enabled, maxFileSize, value, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, value, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, connectionSettings);
     }
 
     public CompactionTier withConnectionSettings(List<String> value) {
-        return copy(enabled, maxFileSize, targetFileSize, cpuShare, memoryShare, minThreads, passTimeLimit, idleSleep,
+        return copy(enabled, maxFileSize, targetFileSize, memoryShare, threadsPerCpu, passTimeLimit, idleSleep,
                 maxFilesPerCall, minFiles, maxWait, callTimeLimit, value);
     }
 
     /**
-     * DuckDB threads for one of this tier's instances: {@link #THREADS_PER_CPU} times its CPUs, and
-     * at least {@code minThreads}. Every database runs its own instance of every tier, so the CPUs a
-     * tier's share gives it are divided among the databases: the shares budget the whole process.
+     * DuckDB threads for one of this tier's instances: {@code threadsPerCpu} times the available
+     * CPUs, divided among the databases, since every database runs its own instance of every tier
+     * and their threads (and open connections) add up. At least 1.
      */
     public int threads(int availableProcessors, int databases) {
-        int fromCpus = (int) Math.round(THREADS_PER_CPU * cpuShare * availableProcessors / Math.max(1, databases));
-        return Math.max(Math.max(1, minThreads), fromCpus);
+        return Math.max(1, (int) Math.round((double) threadsPerCpu * availableProcessors / Math.max(1, databases)));
     }
 }

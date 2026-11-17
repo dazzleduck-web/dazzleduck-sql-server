@@ -60,7 +60,7 @@ public class DuckDbTierCompactor implements TierCompactor {
     }
 
     /**
-     * @param availableProcessors the CPUs the tiers' {@code cpu_share} values divide
+     * @param availableProcessors the CPUs a tier's {@code threads_per_cpu} multiplies
      * @param databases           the configured databases, which divide them again: each database runs
      *                            its own instance of every tier, so the shares are a process budget
      * @param totalMemoryBytes    the process's memory, or -1 when unknown (no default memory_limit)
@@ -146,7 +146,7 @@ public class DuckDbTierCompactor implements TierCompactor {
             return new Readiness(e.getMessage(), 0, threads);
         }
         long timeoutMs = idleTxnTimeoutMs(connection, database, tier);
-        String refusal = CallSizing.startupRefusal(tier, timeoutMs, memoryLimitBytes);
+        String refusal = CallSizing.startupRefusal(tier, timeoutMs, memoryLimitBytes, threads);
         if (refusal != null) {
             return new Readiness(refusal, timeoutMs, threads, memoryLimitBytes);
         }

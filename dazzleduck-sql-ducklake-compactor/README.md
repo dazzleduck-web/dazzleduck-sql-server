@@ -84,7 +84,6 @@ compaction_tiers {
     max_compacted_files = 12
     min_files = 4
     max_wait = 5 minutes
-    cpu_share = 0.5
     memory_share = 0.4
     connection_settings = ["SET enable_external_file_cache = false"]
   }
@@ -94,7 +93,6 @@ compaction_tiers {
     max_file_size = 64MB
     target_file_size = 64MB
     max_compacted_files = 16
-    cpu_share = 0.25
     memory_share = 0.3
     connection_settings = ["SET enable_external_file_cache = false"]
   }
@@ -104,7 +102,6 @@ compaction_tiers {
     max_file_size = 256MB
     target_file_size = 256MB
     max_compacted_files = 5
-    cpu_share = 0.25
     memory_share = 0.3
     connection_settings = ["SET enable_external_file_cache = false"]
   }
@@ -151,9 +148,8 @@ Per-tier fields:
 | `max_wait` | none | ... or once a group's second-oldest file has waited this long |
 | `pass_time_limit` | `2 minutes` | After this, a pass starts no new call; the rest go first next pass |
 | `idle_sleep_max` | `10 seconds` | Sleep after a pass that found no work |
-| `cpu_share` | an equal part of what the other tiers leave | Share of the process's CPUs (`Runtime.availableProcessors()`, which reads the container limit) for this tier. Every database runs its own instance of every tier, so a tier's share is divided among the databases: each instance gets 2 x its CPUs as threads, and at least `min_threads`. Shares add up to at most 1 |
-| `memory_share` | an equal part of what the other tiers leave | Share of the tiers' memory for this tier: unless `connection_settings` sets one, each instance gets a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share, divided among the databases. Separate from `cpu_share` because minor merges many tiny files and needs threads, while major and mega merge few large files and need memory. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1 |
-| `min_threads` | `4` | The fewest DuckDB threads an instance gets, whatever its CPUs. Merging small files from an object store waits on round trips, not CPU: with 2 threads on a 1.5-CPU container and about 25 ms per request, a load test used 8% to 77% of its CPUs |
+| `threads_per_cpu` | `4` | DuckDB threads per available CPU (`Runtime.availableProcessors()`, which reads the container limit) for each of this tier's instances, divided among the databases, at least 1. Every tier gets them; there is no CPU share. Merging small files from an object store costs two GETs per file, so its time is about the latency x 2 x files / threads: in a load test at about 25 ms per request, 1,000 files of 8 KB took 13.9 s on 4 threads, 6.9 s on 8 and 3.5 s on 16, and no DuckDB setting changed the request count. More threads also mean more connections; see "Many small files and ephemeral ports" below. `cpu_share`, used before, is ignored with a warning |
+| `memory_share` | an equal part of what the other tiers leave | Share of the tiers' memory for this tier: unless `connection_settings` sets one, each instance gets a `memory_limit` of 50% of the process's memory (the container's limit, else the machine's) x its share, divided among the databases. Separate from `cpu_share` because minor merges many tiny files and needs threads, while major and mega merge few large files and need memory. Housekeeping, retention and the file-count gauges get 8%, 8% and 2%, also divided among the databases. Shares add up to at most 1. Each thread holds its own read buffers, so a merge group is sized to 80% of the `memory_limit` less 8 MiB per thread |
 | `connection_settings` | none | Raw SQL run on this tier's own connection right after opening it. A `SET threads`, `SET memory_limit` or `SET temp_directory` here overrides the computed one. Optional because it is the tier's only list-valued field, and a key/value override table can carry only scalars — so a whole tier can be declared from such a table |
 
 `frequency`, the timer of earlier releases, is no longer used; a config that still sets it starts.
@@ -347,7 +343,8 @@ Merging tiny files from an object store opens many short HTTP connections, each 
 local port in `TIME_WAIT` for a while after it closes. In a load test, 4 DuckDB threads exhausted
 the ephemeral port range of a container, and httpfs failed with `Could not connect to server`. If
 that happens, widen `net.ipv4.ip_local_port_range` and enable `net.ipv4.tcp_tw_reuse` for the
-container (on Kubernetes, as pod `sysctls`), or lower the tier's threads.
+container (on Kubernetes, as pod `sysctls`), or lower the tier's `threads_per_cpu`. With the default
+of 4 threads per CPU this matters more than it did with fewer threads.
 
 ### Connections
 

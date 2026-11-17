@@ -149,8 +149,9 @@ public class CompactionService implements Closeable {
                 config.databases().size(), config.tiers().size(),
                 config.tiers().stream()
                         .map(t -> t.enabled()
-                                ? "%s [%d, %d) target %d, cap %d, cpu_share %.2f".formatted(t.name(), t.minFileSize(),
-                                        t.maxFileSize(), t.targetFileSize(), t.maxCompactedFiles(), t.cpuShare())
+                                ? "%s [%d, %d) target %d, cap %d, %d threads per CPU, memory_share %.2f".formatted(t.name(),
+                                        t.minFileSize(), t.maxFileSize(), t.targetFileSize(), t.maxCompactedFiles(),
+                                        t.threadsPerCpu(), t.memoryShare())
                                 : t.name() + " (disabled)")
                         .reduce((a, b) -> a + "; " + b).orElse(""),
                 housekeepingSeconds,

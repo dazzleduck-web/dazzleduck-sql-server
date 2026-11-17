@@ -31,6 +31,7 @@ public record CompactionConfig(
         long spillMaxSize
 ) {
     private static final String CONFIG_PATH = "dazzleduck_sql_compaction";
+    private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(CompactionConfig.class);
 
     /**
      * Delete-file cleanup off, for callers (mostly tests) that only care about compaction tiers.
@@ -200,10 +201,15 @@ public record CompactionConfig(
      * <p>{@code target_file_size} is read as optional here and required of an enabled tier by
      * {@link #validateTiers}, so a disabled tier can leave it out. {@code frequency}, the timer of
      * releases before per-table scheduling, is no longer read: a config that still sets it starts.
-     * An unset {@code cpu_share} or {@code memory_share} is {@code NaN} until {@link #resolveShares}
-     * fills it in.
+     * An unset {@code memory_share} is {@code NaN} until {@link #resolveShares} fills it in.
+     * {@code cpu_share}, which split the CPUs before {@code threads_per_cpu}, is ignored with a
+     * warning, so a config that still sets it starts.
      */
     private static CompactionTier toTier(String name, Config t) {
+        if (t.hasPath("cpu_share")) {
+            logger.warn("Compaction tier '{}': cpu_share is no longer used and is ignored; a tier's threads are"
+                    + " threads_per_cpu x the available CPUs, and its memory follows memory_share", name);
+        }
         return new CompactionTier(
                 name,
                 t.getBoolean("enabled"),
@@ -211,9 +217,8 @@ public record CompactionConfig(
                 t.getBytes("max_file_size"),
                 t.hasPath("target_file_size") ? t.getBytes("target_file_size") : 0,
                 t.getLong("max_compacted_files"),
-                t.hasPath("cpu_share") ? t.getDouble("cpu_share") : Double.NaN,
                 t.hasPath("memory_share") ? t.getDouble("memory_share") : Double.NaN,
-                t.hasPath("min_threads") ? t.getInt("min_threads") : CompactionTier.DEFAULT_MIN_THREADS,
+                t.hasPath("threads_per_cpu") ? t.getInt("threads_per_cpu") : CompactionTier.DEFAULT_THREADS_PER_CPU,
                 t.hasPath("pass_time_limit") ? t.getDuration("pass_time_limit") : CompactionTier.DEFAULT_PASS_TIME_LIMIT,
                 t.hasPath("idle_sleep_max") ? t.getDuration("idle_sleep_max") : CompactionTier.DEFAULT_IDLE_SLEEP,
                 t.hasPath("max_files_per_call") ? t.getLong("max_files_per_call") : CompactionTier.DEFAULT_MAX_FILES_PER_CALL,
@@ -223,10 +228,9 @@ public record CompactionConfig(
                 t.hasPath("connection_settings") ? t.getStringList("connection_settings") : List.of());
     }
 
-    /** {@link #resolveShare} for {@code cpu_share}, then for {@code memory_share}. */
+    /** {@link #resolveShare} for {@code memory_share}. */
     static List<CompactionTier> resolveShares(List<CompactionTier> tiers) {
-        List<CompactionTier> cpu = resolveShare(tiers, "cpu_share", CompactionTier::cpuShare, CompactionTier::withCpuShare);
-        return resolveShare(cpu, "memory_share", CompactionTier::memoryShare, CompactionTier::withMemoryShare);
+        return resolveShare(tiers, "memory_share", CompactionTier::memoryShare, CompactionTier::withMemoryShare);
     }
 
     /**
@@ -300,17 +304,13 @@ public record CompactionConfig(
             throw new IllegalArgumentException(("Compaction tier '%s': min_files must be at least 2, since a"
                     + " merge needs two files, got %d").formatted(name, tier.minFiles()));
         }
-        if (!(tier.cpuShare() > 0 && tier.cpuShare() <= 1)) {
-            throw new IllegalArgumentException("Compaction tier '%s': cpu_share must be in (0, 1], got %s"
-                    .formatted(name, tier.cpuShare()));
-        }
         if (!(tier.memoryShare() > 0 && tier.memoryShare() <= 1)) {
             throw new IllegalArgumentException("Compaction tier '%s': memory_share must be in (0, 1], got %s"
                     .formatted(name, tier.memoryShare()));
         }
-        if (tier.minThreads() < 1) {
-            throw new IllegalArgumentException("Compaction tier '%s': min_threads must be at least 1, got %d"
-                    .formatted(name, tier.minThreads()));
+        if (tier.threadsPerCpu() < 1) {
+            throw new IllegalArgumentException("Compaction tier '%s': threads_per_cpu must be at least 1, got %d"
+                    .formatted(name, tier.threadsPerCpu()));
         }
         requirePositive(name, "pass_time_limit", tier.passTimeLimit());
         requirePositive(name, "idle_sleep_max", tier.idleSleep());
@@ -356,8 +356,7 @@ public record CompactionConfig(
                 validateEnabledTier(tier);
             }
         }
-        // Each tier has its own DuckDB instance, so their threads and memory add up.
-        requireSharesAtMostOne(tiers, "cpu_share", CompactionTier::cpuShare);
+        // Each tier has its own DuckDB instance, so their memory adds up.
         requireSharesAtMostOne(tiers, "memory_share", CompactionTier::memoryShare);
 
         List<CompactionTier> enabledSorted = tiers.stream()

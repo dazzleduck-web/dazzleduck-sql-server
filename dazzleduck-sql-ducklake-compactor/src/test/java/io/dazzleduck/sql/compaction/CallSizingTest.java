@@ -145,6 +145,25 @@ class CallSizingTest {
     }
 
     @Test
+    void eachThreadsReadBuffersComeOffAGroupsMemory() {
+        // Review on #542: more threads, each with its own read buffers, leave less for the group
+        long limit = 256L << 20;
+        assertEquals((long) (0.8 * limit) - 6 * CallSizing.PER_THREAD_BYTES, CallSizing.groupMemoryBytes(limit, 6));
+        assertEquals(0, CallSizing.groupMemoryBytes(limit, 1_000), "never below zero");
+        assertEquals(-1, CallSizing.groupMemoryBytes(-1, 6), "unknown without a limit");
+
+        CompactionTier major = CompactionTier.of("major", 8_000_000, 64_000_000, 64_000_000, 16);
+        TableWork tenMb = work(40, 10_000_000, 0, true);
+        assertEquals(5, CallSizing.plan(major, tenMb, 0, limit, 0, Long.MAX_VALUE).cap().filesPerGroup());
+        assertEquals(2, CallSizing.plan(major, tenMb, 0, limit, 16, Long.MAX_VALUE).cap().filesPerGroup(),
+                "16 threads take 128 MiB of the 205 MiB: 77 MiB holds two 40 MB files");
+        assertNull(CallSizing.plan(major, tenMb, 0, limit, 24, Long.MAX_VALUE), "24 threads leave room for no two");
+        String refused = CallSizing.startupRefusal(major, 0, limit, 24);
+        assertNotNull(refused);
+        assertTrue(refused.contains("threads_per_cpu"), refused);
+    }
+
+    @Test
     void theStartupCheckRefusesATierOnlyWhenNotEvenTwoFilesFit() {
         // Review on #542: a 120 s timeout refused minor though plan would lower its target
         assertEquals(144.0, CallSizing.fullGroupSeconds(MINOR), 1e-9);
