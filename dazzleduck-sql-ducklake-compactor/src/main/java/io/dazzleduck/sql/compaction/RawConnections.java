@@ -34,6 +34,17 @@ final class RawConnections {
     private RawConnections() {
     }
 
+    /**
+     * Run on every instance before its own settings, which can override them. DuckDB's bundled
+     * allocator keeps freed memory outside {@code memory_limit}; with its defaults (no background
+     * thread, a 128 MiB flush threshold) memory a merge freed can stay held across calls, and has been
+     * seen to grow by about 0.3 MiB per merged input file until the container was OOM-killed. A
+     * background thread and a lower threshold return it after each task.
+     */
+    static final List<String> ALLOCATOR_SETTINGS = List.of(
+            "SET allocator_background_threads = true",
+            "SET allocator_flush_threshold = '64MB'");
+
     static Connection open(String startupScript, List<String> connectionSettings) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
@@ -45,6 +56,9 @@ final class RawConnections {
         Connection connection = DriverManager.getConnection("jdbc:duckdb:", properties);
         try (Statement statement = connection.createStatement()) {
             for (String sql : splitStatements(startupScript)) {
+                statement.execute(sql);
+            }
+            for (String sql : ALLOCATOR_SETTINGS) {
                 statement.execute(sql);
             }
             for (String sql : connectionSettings) {

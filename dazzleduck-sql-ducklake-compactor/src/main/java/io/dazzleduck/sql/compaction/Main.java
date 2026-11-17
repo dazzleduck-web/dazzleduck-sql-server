@@ -49,17 +49,27 @@ public class Main {
 
             List<String> tierNames = config.tiers().stream().map(CompactionTier::name).toList();
             CompactionState state = new CompactionState(telemetry.registry(), config.databases(), tierNames);
-            TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state);
+            TierCompactor tierCompactor = new DuckDbTierCompactor(startupScript, state, config.databases().size());
+            // One job per table at a time, across the tier loops, retention and the delete-file rewrite
+            TableLeases leases = new TableLeases();
+            // Every DuckDB instance gets a slice of the process's memory (MemoryBudget)
+            long totalMemory = ResourceSampler.totalMemoryBytes();
+            int databases = config.databases().size();
             Housekeeper housekeeper = new DuckLakeHousekeeper(
-                    startupScript, config.snapshotRetention(), config.housekeepingConnectionSettings(),
-                    config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state);
+                    startupScript, config.snapshotRetention(),
+                    MemoryBudget.withDefaultLimit(config.housekeepingConnectionSettings(), MemoryBudget.HOUSEKEEPING,
+                            databases, totalMemory),
+                    config.rewriteDeletesEnabled(), config.rewriteDeleteThreshold(), state, leases);
             DataRetentionConfig retention = config.dataRetention();
             DataRetention dataRetention = retention.enabled()
                     ? new DuckLakeDataRetention(startupScript, config.databases(), retention.policyTable(),
-                            retention.connectionSettings(), retention.maxFilesPerCycle(), state)
+                            MemoryBudget.withDefaultLimit(retention.connectionSettings(), MemoryBudget.RETENTION,
+                                    databases, totalMemory),
+                            retention.maxFilesPerCycle(), state, leases)
                     : null;
             CompactionRunLog runLog = new CompactionRunLog(config.runHistorySize());
-            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state, runLog);
+            service = new CompactionService(config, startupScript, tierCompactor, housekeeper, dataRetention, state,
+                    runLog, leases, java.time.Clock.systemUTC());
             healthServer = new HealthServer(config.healthPort(), service::getStats, runLog);
 
             healthServer.start();

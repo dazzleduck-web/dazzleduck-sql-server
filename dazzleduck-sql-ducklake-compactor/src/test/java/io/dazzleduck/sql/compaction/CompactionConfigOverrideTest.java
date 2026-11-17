@@ -36,6 +36,7 @@ class CompactionConfigOverrideTest {
                 frequency = 1 minute
                 min_file_size = 0
                 max_file_size = 8MB
+                target_file_size = 16MB
                 max_compacted_files = 1000
                 connection_settings = ["SET threads=2"]
               }
@@ -44,6 +45,7 @@ class CompactionConfigOverrideTest {
                 frequency = 1 hour
                 min_file_size = 8MB
                 max_file_size = 64MB
+                target_file_size = 64MB
                 max_compacted_files = 1000
                 connection_settings = []
               }
@@ -162,9 +164,9 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "tier1", enabled = true,  frequency = 30 seconds, min_file_size = 0,    max_file_size = 1MB,  max_compacted_files = 100, connection_settings = ["SET threads=1"] }
-                  { name = "tier2", enabled = false, frequency = 5 minutes,  min_file_size = 1MB,   max_file_size = 16MB, max_compacted_files = 0,   connection_settings = [] }
-                  { name = "tier3", enabled = true,  frequency = 1 hour,     min_file_size = 16MB,  max_file_size = 1GB,  max_compacted_files = 50,  connection_settings = [] }
+                  { name = "tier1", enabled = true,  frequency = 30 seconds, min_file_size = 0,    max_file_size = 1MB,  target_file_size = 1MB,  max_compacted_files = 100, connection_settings = ["SET threads=1"] }
+                  { name = "tier2", enabled = false, frequency = 5 minutes,  min_file_size = 1MB,   max_file_size = 16MB, target_file_size = 16MB, max_compacted_files = 5,   connection_settings = [] }
+                  { name = "tier3", enabled = true,  frequency = 1 hour,     min_file_size = 16MB,  max_file_size = 1GB,  target_file_size = 1GB,  max_compacted_files = 50,  connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = ["SET memory_limit='4GB'"]
@@ -176,7 +178,7 @@ class CompactionConfigOverrideTest {
         assertEquals(3, config.tiers().size());
         CompactionTier tier1 = tier(config, "tier1");
         assertTrue(tier1.enabled());
-        assertEquals(Duration.ofSeconds(30), tier1.frequency());
+        assertEquals(1_000_000L, tier1.targetFileSize());
         assertEquals(0L, tier1.minFileSize());
         assertEquals(1_000_000L, tier1.maxFileSize());
         assertEquals(100L, tier1.maxCompactedFiles());
@@ -191,8 +193,8 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  max_compacted_files = 0, connection_settings = [] }
-                  { name = "minor", enabled = true, frequency = 1 hour,   min_file_size = 8MB,  max_file_size = 64MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  target_file_size = 8MB,  max_compacted_files = 5, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 hour,   min_file_size = 8MB,  max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -208,7 +210,7 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "broken", enabled = true, frequency = 1 minute, min_file_size = 8MB, max_file_size = 4MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "broken", enabled = true, frequency = 1 minute, min_file_size = 8MB, max_file_size = 4MB, target_file_size = 4MB, max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -226,8 +228,8 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  max_compacted_files = 0, connection_settings = [] }
-                  { name = "major", enabled = true, frequency = 1 hour,   min_file_size = 4MB,  max_file_size = 64MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  target_file_size = 8MB,  max_compacted_files = 5, connection_settings = [] }
+                  { name = "major", enabled = true, frequency = 1 hour,   min_file_size = 4MB,  max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -244,8 +246,8 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "minor", enabled = true,  frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  max_compacted_files = 0, connection_settings = [] }
-                  { name = "major", enabled = false, frequency = 1 hour,   min_file_size = 4MB,  max_file_size = 64MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "minor", enabled = true,  frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  target_file_size = 8MB,  max_compacted_files = 5, connection_settings = [] }
+                  { name = "major", enabled = false, frequency = 1 hour,   min_file_size = 4MB,  max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -276,25 +278,25 @@ class CompactionConfigOverrideTest {
         CompactionConfig config = resolve(ConfigFactory.parseString(FILE_CONFIG));
         assertEquals(List.of("minor", "major"),
                 config.tiers().stream().map(CompactionTier::name).toList());
-        assertEquals(Duration.ofMinutes(1), tier(config, "minor").frequency());
+        assertEquals(16_000_000L, tier(config, "minor").targetFileSize());
         assertEquals(64_000_000L, tier(config, "major").maxFileSize());
     }
 
     @Test
     void oneTierFieldCanBeRetunedFromTheTableWithoutRestatingTheTier() throws Exception {
         // The reason tiers are keyed rather than listed. HOCON merges objects field-by-field, so
-        // this row changes a cadence and nothing else — with a list it would have replaced every
+        // this row changes a cap and nothing else — with a list it would have replaced every
         // tier and startup would fail on the first field the row did not restate.
-        insert("compaction.compaction_tiers.minor.frequency", "10 seconds");
+        insert("compaction.compaction_tiers.minor.max_compacted_files", "7");
 
         CompactionConfig config = resolve(withProvider("compaction."));
         CompactionTier minor = tier(config, "minor");
-        assertEquals(Duration.ofSeconds(10), minor.frequency(), "the overridden field");
+        assertEquals(7L, minor.maxCompactedFiles(), "the overridden field");
         assertEquals(8_000_000L, minor.maxFileSize(), "its siblings survive the merge");
-        assertEquals(1000L, minor.maxCompactedFiles());
+        assertEquals(16_000_000L, minor.targetFileSize());
         assertEquals(List.of("SET threads=2"), minor.connectionSettings(),
                 "a list INSIDE the tier is untouched by overriding a scalar beside it");
-        assertEquals(Duration.ofHours(1), tier(config, "major").frequency(), "other tiers untouched");
+        assertEquals(1000L, tier(config, "major").maxCompactedFiles(), "other tiers untouched");
     }
 
     @Test
@@ -318,6 +320,7 @@ class CompactionConfigOverrideTest {
         insert("compaction.compaction_tiers.mega.min_file_size", "64MB");
         insert("compaction.compaction_tiers.mega.max_file_size", "256MB");
         insert("compaction.compaction_tiers.mega.max_compacted_files", "5");
+        insert("compaction.compaction_tiers.mega.target_file_size", "256MB");
         // deliberately no connection_settings row: it is list-valued, and a key/value table can
         // only carry scalars, so the field has to be optional for this to be possible at all
 
@@ -334,9 +337,9 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers {
-                  mega  { enabled = true, frequency = 1 hour,   min_file_size = 64MB, max_file_size = 256MB, max_compacted_files = 5, connection_settings = [] }
-                  minor { enabled = true, frequency = 1 minute, min_file_size = 0,    max_file_size = 8MB,   max_compacted_files = 0, connection_settings = [] }
-                  major { enabled = true, frequency = 5 minutes, min_file_size = 8MB, max_file_size = 64MB,  max_compacted_files = 0, connection_settings = [] }
+                  mega  { enabled = true, frequency = 1 hour,   min_file_size = 64MB, max_file_size = 256MB, target_file_size = 256MB, max_compacted_files = 5, connection_settings = [] }
+                  minor { enabled = true, frequency = 1 minute, min_file_size = 0,    max_file_size = 8MB,   target_file_size = 8MB,   max_compacted_files = 5, connection_settings = [] }
+                  major { enabled = true, frequency = 5 minutes, min_file_size = 8MB, max_file_size = 64MB,  target_file_size = 64MB,  max_compacted_files = 5, connection_settings = [] }
                 }
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -354,7 +357,7 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers {
-                  minor { name = "major", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, max_compacted_files = 0, connection_settings = [] }
+                  minor { name = "major", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, target_file_size = 8MB, max_compacted_files = 5, connection_settings = [] }
                 }
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -385,8 +388,8 @@ class CompactionConfigOverrideTest {
         Config raw = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "major", enabled = true, frequency = 1 hour,   min_file_size = 8MB, max_file_size = 64MB, max_compacted_files = 0, connection_settings = [] }
-                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  max_compacted_files = 0, connection_settings = [] }
+                  { name = "major", enabled = true, frequency = 1 hour,   min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 5, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0,   max_file_size = 8MB,  target_file_size = 8MB,  max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -423,7 +426,7 @@ class CompactionConfigOverrideTest {
         Config listShaped = ConfigFactory.parseString("""
                 databases = ["mylake"]
                 compaction_tiers = [
-                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, max_compacted_files = 0, connection_settings = [] }
+                  { name = "minor", enabled = true, frequency = 1 minute, min_file_size = 0, max_file_size = 8MB, target_file_size = 8MB, max_compacted_files = 5, connection_settings = [] }
                 ]
                 housekeeping_frequency = 5 minutes
                 housekeeping_connection_settings = []
@@ -468,10 +471,143 @@ class CompactionConfigOverrideTest {
     }
 
     @Test
-    void rewriteSqlPassesTheThresholdOnlyWhenSet() {
-        assertEquals("CALL ducklake_rewrite_data_files('mylake')",
-                DuckLakeHousekeeper.rewriteDataFilesSql("mylake", null));
-        assertEquals("CALL ducklake_rewrite_data_files('mylake', delete_threshold => 0.5)",
-                DuckLakeHousekeeper.rewriteDataFilesSql("mylake", 0.5));
+    void rewriteSqlIsPerTableAndPassesTheThresholdOnlyWhenSet() {
+        assertEquals("CALL ducklake_rewrite_data_files('mylake', 'events', schema := 'main')",
+                DuckLakeHousekeeper.rewriteDataFilesSql("mylake", "main", "events", null));
+        assertEquals("CALL ducklake_rewrite_data_files('mylake', 'o''brien', schema := 'main', delete_threshold => 0.5)",
+                DuckLakeHousekeeper.rewriteDataFilesSql("mylake", "main", "o'brien", 0.5));
+    }
+
+    // ── Dynamic compaction startup checks (DYNAMIC_COMPACTION_SPEC.md) ──────────────────────────
+
+    private static Config oneTier(String fields) {
+        return ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers { minor { enabled = true, min_file_size = 0, max_file_size = 8MB, %s } }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """.formatted(fields));
+    }
+
+    @Test
+    void anEnabledTierNeedsATarget() {
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(oneTier("max_compacted_files = 12")));
+        assertTrue(e.getMessage().contains("target_file_size"), e.getMessage());
+    }
+
+    @Test
+    void aDisabledTierNeedsNoTarget() throws Exception {
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers { minor { enabled = false, min_file_size = 0, max_file_size = 8MB, max_compacted_files = 0 } }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        assertFalse(tier(resolve(raw), "minor").enabled());
+    }
+
+    @Test
+    void aTargetBelowTheBandsMaximumIsRejected() {
+        // DuckLake skips a file at least as large as the target, so [4MB, 8MB) would never merge.
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> resolve(oneTier("target_file_size = 4MB, max_compacted_files = 12")));
+        assertTrue(e.getMessage().contains("at least"), e.getMessage());
+    }
+
+    @Test
+    void theStaticCapMustBePositive() {
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> resolve(oneTier("target_file_size = 16MB, max_compacted_files = 0")));
+        assertTrue(e.getMessage().contains("max_compacted_files"), e.getMessage());
+    }
+
+    @Test
+    void minFilesBelowTwoIsRejected() {
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12, min_files = 1")));
+        assertTrue(e.getMessage().contains("min_files"), e.getMessage());
+    }
+
+    @Test
+    void theSpecsTierSettingsParseAndTheRestDefault() throws Exception {
+        CompactionTier minor = tier(resolve(oneTier("""
+                target_file_size = 16MB, max_compacted_files = 12, min_files = 4, max_wait = 5 minutes,
+                cpu_share = 0.5, max_files_per_call = 3000, pass_time_limit = 1 minute, idle_sleep_max = 5 seconds,
+                call_time_limit = 8 minutes""")), "minor");
+        assertEquals(16_000_000L, minor.targetFileSize());
+        assertEquals(12L, minor.maxCompactedFiles());
+        assertEquals(4, minor.minFiles());
+        assertEquals(Duration.ofMinutes(5), minor.maxWait());
+        assertEquals(0.5, minor.cpuShare());
+        assertEquals(3000L, minor.maxFilesPerCall());
+        assertEquals(Duration.ofMinutes(1), minor.passTimeLimit());
+        assertEquals(Duration.ofSeconds(5), minor.idleSleep());
+        assertEquals(Duration.ofMinutes(8), minor.callTimeLimit());
+
+        CompactionTier defaults = tier(resolve(oneTier("target_file_size = 16MB, max_compacted_files = 12")), "minor");
+        assertEquals(CompactionTier.DEFAULT_MIN_FILES, defaults.minFiles());
+        assertEquals(Duration.ZERO, defaults.maxWait(), "no time trigger unless one is set");
+        assertEquals(CompactionTier.DEFAULT_MAX_FILES_PER_CALL, defaults.maxFilesPerCall());
+        assertEquals(CompactionTier.DEFAULT_PASS_TIME_LIMIT, defaults.passTimeLimit());
+        assertEquals(CompactionTier.DEFAULT_IDLE_SLEEP, defaults.idleSleep());
+        assertEquals(CompactionTier.DEFAULT_CALL_TIME_LIMIT, defaults.callTimeLimit());
+        assertEquals(1.0, defaults.cpuShare(), "the only enabled tier gets every CPU");
+    }
+
+    @Test
+    void cpuSharesAddingUpToMoreThanOneAreRejected() {
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers {
+                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.75 }
+                  major { enabled = true, min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 16, cpu_share = 0.5 }
+                }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        var e = assertThrows(IllegalArgumentException.class, () -> resolve(raw));
+        assertTrue(e.getMessage().contains("cpu_share"), e.getMessage());
+    }
+
+    @Test
+    void tiersWithoutACpuShareSplitWhatTheOthersLeave() throws Exception {
+        Config raw = ConfigFactory.parseString("""
+                databases = ["mylake"]
+                compaction_tiers {
+                  minor { enabled = true, min_file_size = 0, max_file_size = 8MB, target_file_size = 16MB, max_compacted_files = 12, cpu_share = 0.5 }
+                  major { enabled = true, min_file_size = 8MB, max_file_size = 64MB, target_file_size = 64MB, max_compacted_files = 16 }
+                  mega  { enabled = true, min_file_size = 64MB, max_file_size = 256MB, target_file_size = 256MB, max_compacted_files = 5 }
+                  off   { enabled = false, min_file_size = 256MB, max_file_size = 1GB, max_compacted_files = 5 }
+                }
+                housekeeping_frequency = 5 minutes
+                housekeeping_connection_settings = []
+                snapshot_retention = 60 minutes
+                health_port = 9090
+                """);
+        CompactionConfig config = resolve(raw);
+        assertEquals(0.25, tier(config, "major").cpuShare(), 1e-9);
+        assertEquals(0.25, tier(config, "mega").cpuShare(), 1e-9);
+        assertEquals(0.0, tier(config, "off").cpuShare(), "a disabled tier gets no CPUs");
+    }
+
+    @Test
+    void theBundledConfigShipsTheSpecsThreeTiers() throws Exception {
+        CompactionConfig config = resolve(ConfigFactory.load("application").getConfig("dazzleduck_sql_compaction"));
+        assertEquals(List.of("minor", "major", "mega"), config.tiers().stream().map(CompactionTier::name).toList());
+        CompactionTier minor = tier(config, "minor");
+        assertEquals(16_000_000L, minor.targetFileSize());
+        assertEquals(12L, minor.maxCompactedFiles());
+        assertEquals(4, minor.minFiles());
+        assertEquals(Duration.ofMinutes(5), minor.maxWait());
+        assertEquals(16L, tier(config, "major").maxCompactedFiles());
+        assertEquals(5L, tier(config, "mega").maxCompactedFiles());
+        assertEquals(256_000_000L, tier(config, "mega").targetFileSize());
+        assertEquals(1.0, config.tiers().stream().mapToDouble(CompactionTier::cpuShare).sum(), 1e-9);
     }
 }

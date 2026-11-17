@@ -41,8 +41,15 @@ class CompactionRunTest {
     }
 
     @Test
-    void bytesRetiredIsNullWhenEitherReadMissing() {
-        assertNull(TestRuns.run(1, 0, 1, 0, 10L, 5L, null, 200L, CompactionRun.Outcome.SUCCESS, NONE).bytesRetired());
-        assertEquals(800L, TestRuns.run(1, 0, 1, 0, 10L, 5L, 1000L, 200L, CompactionRun.Outcome.SUCCESS, NONE).bytesRetired());
+    void classifiesPlanningErrors() {
+        assertEquals(PLANNING, CompactionRun.classify(new RuntimeException("Binder Error: table x does not exist")));
+        assertEquals(PLANNING, CompactionRun.classify(new RuntimeException(
+                "IO Error: Failed to get compaction file list from DuckLake: no such file")));
+    }
+
+    @Test
+    void filesRetiredIsWhatTheMergeRetiredNetOfWhatItWrote() {
+        assertNull(TestRuns.run(1, 0, 1, 0, null, null, CompactionRun.Outcome.EMPTY, NONE).filesRetired());
+        assertEquals(9L, TestRuns.run(1, 0, 1, 0, 10L, 1L, CompactionRun.Outcome.SUCCESS, NONE).filesRetired());
     }
 }

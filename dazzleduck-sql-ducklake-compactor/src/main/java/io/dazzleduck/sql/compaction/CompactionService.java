@@ -7,20 +7,35 @@ import java.io.Closeable;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Runs the compactor: one {@link TierLoop} thread per enabled {@code (database, tier)}
+ * (DYNAMIC_COMPACTION_SPEC.md, Phase 1), plus housekeeping, data retention and the file-count gauges
+ * on their own timers. Merges, retention and the delete-file rewrite share one {@link TableLeases}, so
+ * a table runs at most one of them at a time.
+ */
 public class CompactionService implements Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(CompactionService.class);
+
+    /** A tier loop that has not completed a pass for this long raises an alert. */
+    static final Duration PASS_ALERT_AFTER = Duration.ofMinutes(15);
+    /** A band whose file count rose at every sample for this long raises an alert. */
+    static final Duration RISING_ALERT_AFTER = Duration.ofMinutes(30);
+    /** RSS above this share of the container's memory limit raises an alert. */
+    static final double RSS_ALERT_SHARE = 0.75;
 
     private final CompactionConfig config;
     private final String startupScript;
@@ -30,34 +45,22 @@ public class CompactionService implements Closeable {
     private final DataRetention dataRetention;
     private final CompactionState state;
     private final CompactionRunLog runLog;
+    private final TableLeases leases;
+    private final Clock clock;
 
-    // Shared schedulers
-    private final ScheduledExecutorService compactionScheduler;
+    // "db|tier" -> loop, for every enabled tier; started by start()
+    private final Map<String, TierLoop> loops = new ConcurrentHashMap<>();
     private final ScheduledExecutorService housekeepingScheduler;
+    private volatile boolean started;
 
-    // database -> tier name -> last-run instant. Stamped with the exact same Instant passed to
-    // CompactionState.recordRunCompleted(db, at) in the same call, so the two never disagree.
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> lastTierRun = new ConcurrentHashMap<>();
-
-    // Monotonic per-(database, tier) run id counter for CompactionRun.
-    private final ConcurrentHashMap<String, AtomicLong> runIds = new ConcurrentHashMap<>();
-
-    // One raw connection per (database, tier) for this service's own file-count queries —
-    // deliberately not io.dazzleduck.sql.commons.ConnectionPool (see RawConnections). Keyed by both,
-    // not database alone: different tiers for the same database run concurrently by design, and a
-    // plain JDBC Connection is not safe for concurrent use by more than one thread — the same reason
-    // DuckDbTierCompactor/DuckLakeHousekeeper key their own connections this way.
+    // One raw connection for the whole-catalog file-count gauges — deliberately not
+    // io.dazzleduck.sql.commons.ConnectionPool (see RawConnections).
     private final ConcurrentHashMap<String, Connection> countingConnections = new ConcurrentHashMap<>();
 
-    /** Synthetic "tier" key for the off-control-path whole-catalog file-count refresh connection. */
-    private static final String FILE_COUNT_REFRESH_KEY = "__filecount_refresh__";
-
     /**
-     * Cadence for the whole-catalog file-count gauge refresh, off the compaction control path. Fixed
-     * rather than configurable — it is an internal gauge-maintenance interval, not a control
-     * parameter. Set to 2 minutes: these gauges are a coarse backlog indicator, so a slow cadence
-     * keeps the COUNT(*) FILTER aggregate off the shared catalog's back. If a future need arises to
-     * tune it, reintroduce a config key here.
+     * Cadence for the whole-catalog file-count gauges, off the compaction path. These gauges are a
+     * coarse backlog indicator, so a slow cadence keeps the COUNT(*) FILTER aggregate off the shared
+     * catalog's back.
      */
     private static final long FILE_COUNT_REFRESH_SECONDS = 120;
 
@@ -66,13 +69,21 @@ public class CompactionService implements Closeable {
         this(config, startupScript, tierCompactor, housekeeper, null, state, runLog);
     }
 
-    /**
-     * @param dataRetention deletes expired rows on {@code config.dataRetention()}'s schedule, or
-     *                      {@code null} to run no retention
-     */
     public CompactionService(CompactionConfig config, String startupScript, TierCompactor tierCompactor,
                              Housekeeper housekeeper, DataRetention dataRetention, CompactionState state,
                              CompactionRunLog runLog) {
+        this(config, startupScript, tierCompactor, housekeeper, dataRetention, state, runLog, new TableLeases(),
+                Clock.systemUTC());
+    }
+
+    /**
+     * @param dataRetention deletes expired rows on {@code config.dataRetention()}'s schedule, or
+     *                      {@code null} to run no retention
+     * @param leases        shared with the housekeeper's delete-file rewrite and with data retention
+     */
+    public CompactionService(CompactionConfig config, String startupScript, TierCompactor tierCompactor,
+                             Housekeeper housekeeper, DataRetention dataRetention, CompactionState state,
+                             CompactionRunLog runLog, TableLeases leases, Clock clock) {
         if (dataRetention != null && !config.dataRetention().enabled()) {
             throw new IllegalArgumentException("a DataRetention was given but data_retention is not enabled");
         }
@@ -86,25 +97,28 @@ public class CompactionService implements Closeable {
         this.dataRetention = dataRetention;
         this.state = state;
         this.runLog = runLog;
-        long enabledTiers = config.tiers().stream().filter(CompactionTier::enabled).count();
-        int compactionThreads = Math.max(1, (int) (config.databases().size() * Math.max(enabledTiers, 1)));
-        int housekeepingThreads = Math.max(1, config.databases().size());
-        this.compactionScheduler = Executors.newScheduledThreadPool(compactionThreads, r -> {
-            Thread t = new Thread(r, "compaction");
-            t.setDaemon(false);
-            return t;
-        });
-        // Housekeeping, the whole-catalog file-count refresh and data retention share this pool. One
-        // thread per job per database, so a database's housekeeping and its (now separate) file-count
-        // refresh don't contend for a single thread — the file-count refresh is exactly the traffic
-        // we moved off the per-cycle control path, so it must not be starved by it — and a long
-        // retention delete does not hold up either.
+        this.leases = leases;
+        this.clock = clock;
+        for (String db : config.databases()) {
+            for (CompactionTier tier : config.tiers()) {
+                if (tier.enabled()) {
+                    loops.put(loopKey(db, tier.name()), newLoop(db, tier));
+                }
+            }
+        }
+        // Housekeeping, the file-count refresh and data retention share this pool: one thread per job
+        // per database, so a long retention delete or a rewrite waiting on a lease holds up neither.
         int jobsPerDatabase = dataRetention != null ? 3 : 2;
-        this.housekeepingScheduler = Executors.newScheduledThreadPool(Math.max(1, housekeepingThreads * jobsPerDatabase), r -> {
-            Thread t = new Thread(r, "housekeeping");
-            t.setDaemon(false);
-            return t;
-        });
+        this.housekeepingScheduler = Executors.newScheduledThreadPool(
+                Math.max(1, config.databases().size() * jobsPerDatabase), r -> {
+                    Thread t = new Thread(r, "housekeeping");
+                    t.setDaemon(false);
+                    return t;
+                });
+    }
+
+    private TierLoop newLoop(String db, CompactionTier tier) {
+        return new TierLoop(db, tier, tierCompactor, leases, state, runLog, clock);
     }
 
     public void start() {
@@ -112,23 +126,14 @@ public class CompactionService implements Closeable {
             logger.warn("No databases configured — compaction service idle");
             return;
         }
+        started = true;
+        loops.values().forEach(TierLoop::start);
         long housekeepingSeconds = config.housekeepingFrequency().toSeconds();
-        long fileCountSeconds = FILE_COUNT_REFRESH_SECONDS;
-
         for (String db : config.databases()) {
-            for (CompactionTier tier : config.tiers()) {
-                if (tier.enabled()) {
-                    compactionScheduler.scheduleAtFixedRate(
-                            () -> runTier(db, tier), 0, tier.frequency().toSeconds(), TimeUnit.SECONDS);
-                }
-            }
             housekeepingScheduler.scheduleWithFixedDelay(
                     () -> runHousekeeping(db), housekeepingSeconds, housekeepingSeconds, TimeUnit.SECONDS);
-            // Whole-catalog per-tier gauges refreshed on their own slow cadence, OFF the compaction
-            // control path (spec §"One change that is not capture"). Previously this ran every cycle,
-            // adding a full COUNT(*) FILTER aggregate per tier at cycle rate against a shared catalog.
             housekeepingScheduler.scheduleWithFixedDelay(
-                    () -> refreshFileCounts(db), 0, fileCountSeconds, TimeUnit.SECONDS);
+                    () -> refreshFileCounts(db), 0, FILE_COUNT_REFRESH_SECONDS, TimeUnit.SECONDS);
             if (dataRetention != null) {
                 // First run at startup, so a compactor that restarts more often than the frequency
                 // still enforces retention.
@@ -138,137 +143,91 @@ public class CompactionService implements Closeable {
         }
 
         logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping every {}s, "
-                        + "file-count refresh every {}s, data retention {}",
+                        + "data retention {}",
                 config.databases().size(), config.tiers().size(),
                 config.tiers().stream()
-                        .map(t -> t.name() + (t.enabled() ? "" : " (disabled)"))
-                        .reduce((a, b) -> a + ", " + b).orElse(""),
-                housekeepingSeconds, fileCountSeconds,
+                        .map(t -> t.enabled()
+                                ? "%s [%d, %d) target %d, cap %d, cpu_share %.2f".formatted(t.name(), t.minFileSize(),
+                                        t.maxFileSize(), t.targetFileSize(), t.maxCompactedFiles(), t.cpuShare())
+                                : t.name() + " (disabled)")
+                        .reduce((a, b) -> a + "; " + b).orElse(""),
+                housekeepingSeconds,
                 dataRetention != null
                         ? "every %ds from %s".formatted(config.dataRetention().frequency().toSeconds(),
                                 config.dataRetention().policyTable())
                         : "off");
     }
 
+    /**
+     * Runs one pass of a tier's loop on the calling thread, for tests and tools. Must not be used
+     * once {@link #start()} has started the loops: a loop's state belongs to one thread.
+     */
+    TierLoop.PassResult runPass(String database, CompactionTier tier) {
+        if (started) {
+            throw new IllegalStateException("the tier loops are running");
+        }
+        TierLoop loop = loops.compute(loopKey(database, tier.name()),
+                (k, existing) -> existing != null && existing.tier().equals(tier) ? existing : newLoop(database, tier));
+        return loop.runPass();
+    }
+
     public CompactionStats getStats() {
-        Map<String, CompactionStats.DatabaseStats> dbStats = new HashMap<>();
+        Instant now = clock.instant();
         CompactionStats base = state.getSnapshot(config.databases());
-        base.databases().forEach((db, ds) -> dbStats.put(db, ds.withNextExecutionTimeByTier(nextExecutionTimeByTier(db))));
-        return new CompactionStats(base.serviceStart(), dbStats);
-    }
-
-    private Map<String, Instant> nextExecutionTimeByTier(String database) {
-        Map<String, Instant> next = new HashMap<>();
-        Map<String, Instant> lastRuns = lastTierRun.getOrDefault(database, new ConcurrentHashMap<>());
-        for (CompactionTier tier : config.tiers()) {
-            if (!tier.enabled()) {
-                continue;
+        Map<String, CompactionStats.DatabaseStats> dbStats = new HashMap<>();
+        List<String> alerts = new ArrayList<>();
+        for (Map.Entry<String, CompactionStats.DatabaseStats> entry : base.databases().entrySet()) {
+            String db = entry.getKey();
+            Map<String, CompactionStats.TierStatus> tiers = new LinkedHashMap<>();
+            for (CompactionTier tier : config.tiers()) {
+                TierLoop loop = loops.get(loopKey(db, tier.name()));
+                if (loop == null) {
+                    continue;
+                }
+                CompactionStats.TierStatus status = loop.status();
+                tiers.put(tier.name(), status);
+                alerts.addAll(tierAlerts(db, tier, loop, status, now));
             }
-            Instant lastRun = lastRuns.get(tier.name());
-            if (lastRun != null) {
-                next.put(tier.name(), lastRun.plus(tier.frequency()));
+            if (state.snapshotsGrowing(db)) {
+                alerts.add("%s: unexpired snapshots grew across the last %d housekeeping runs"
+                        .formatted(db, CompactionState.SNAPSHOT_GROWTH_RUNS));
             }
+            dbStats.put(db, entry.getValue().withTiers(tiers));
         }
-        return next;
-    }
-
-    /** Before/after counts and total bytes for a tier's file-size range; null components on read failure. */
-    private record ActiveFiles(Long files, Long bytes) {
-        static final ActiveFiles UNKNOWN = new ActiveFiles(null, null);
-    }
-
-    void runTier(String database, CompactionTier tier) {
-        Instant scheduledAt = Instant.now();
-        Instant startedAt = scheduledAt; // the scheduled task IS runTier; queueing shows up as actualGap
-        Instant prevEnded = lastTierRun.getOrDefault(database, new ConcurrentHashMap<>()).get(tier.name());
-        long actualGapMs = prevEnded != null ? Duration.between(prevEnded, startedAt).toMillis() : -1;
-        long runId = runIds.computeIfAbsent(runKey(database, tier.name()), k -> new AtomicLong()).incrementAndGet();
-
-        ActiveFiles before = ActiveFiles.UNKNOWN;
-        ActiveFiles after = ActiveFiles.UNKNOWN;
-        TierCompactor.MergeOutcome merge = null;
-        CompactionRun.Outcome outcome = CompactionRun.Outcome.FAILED; // overwritten below; keeps `finally` definitely-assigned
-        CompactionRun.FailureClass failureClass = CompactionRun.FailureClass.NONE;
-        String errorMessage = null;
-
-        // Keeping the whole body inside the try is what prevents a stray throwable from escaping the
-        // scheduled task — a Runnable that throws would cancel this tier's schedule forever.
-        try {
-            before = queryActiveFiles(database, tier.name(), tier.minFileSize(), tier.maxFileSize());
-            merge = tierCompactor.compact(database, tier);
-            after = queryActiveFiles(database, tier.name(), tier.minFileSize(), tier.maxFileSize());
-            state.incrementTier(database, tier.name());
-
-            Long filesRetired = (before.files() != null && after.files() != null) ? before.files() - after.files() : null;
-            if (filesRetired != null && filesRetired > 0) {
-                state.addFilesCompacted(database, filesRetired);
-            }
-            Long bytesRetired = (before.bytes() != null && after.bytes() != null) ? before.bytes() - after.bytes() : null;
-            if (bytesRetired != null && bytesRetired > 0) {
-                state.addBytesCompacted(database, tier.name(), bytesRetired);
-            }
-            outcome = (filesRetired != null && filesRetired == 0) ? CompactionRun.Outcome.EMPTY : CompactionRun.Outcome.SUCCESS;
-            state.recordSuccess(database);
-            logger.info("Tier '{}' compaction completed for {} (files {} -> {})",
-                    tier.name(), database, before.files(), after.files());
-        } catch (Throwable t) {
-            outcome = CompactionRun.Outcome.FAILED;
-            failureClass = CompactionRun.classify(t);
-            errorMessage = CompactionRun.truncateError(t);
-            state.recordFailure(database, tier.name());
-            state.recordFailureClass(database, failureClass);
-            logger.error("Tier '{}' compaction cycle failed for {} [{}] — scheduler will continue",
-                    tier.name(), database, failureClass, t);
-        } finally {
-            Instant endedAt = Instant.now();
-            lastTierRun.computeIfAbsent(database, k -> new ConcurrentHashMap<>()).put(tier.name(), endedAt);
-            state.recordRunCompleted(database, endedAt);
-            recordRun(database, tier, runId, scheduledAt, startedAt, endedAt, actualGapMs,
-                    before, after, merge, outcome, failureClass, errorMessage);
+        long rss = ResourceSampler.rssBytes();
+        long limit = ResourceSampler.containerMemoryLimitBytes();
+        if (rss > 0 && limit > 0 && rss > RSS_ALERT_SHARE * limit) {
+            alerts.add("RSS %d bytes is above %.0f%% of the container's memory limit %d bytes"
+                    .formatted(rss, RSS_ALERT_SHARE * 100, limit));
         }
+        return new CompactionStats(base.serviceStart(), dbStats, List.copyOf(alerts));
     }
 
-    private void recordRun(String database, CompactionTier tier, long runId, Instant scheduledAt, Instant startedAt,
-                           Instant endedAt, long actualGapMs, ActiveFiles before, ActiveFiles after,
-                           TierCompactor.MergeOutcome merge, CompactionRun.Outcome outcome,
-                           CompactionRun.FailureClass failureClass, String errorMessage) {
-        try {
-            Long filesRetired = (before.files() != null && after.files() != null) ? before.files() - after.files() : null;
-            String tempDir = ResourceSampler.tempDirectory(tier.connectionSettings());
-            // The commit timeout the cycle races comes from the tier's connection settings; fall back
-            // to the Postgres server default when the tier does not set one (spec Q3).
-            long tierCommitTimeoutMs = ResourceSampler.idleInTransactionTimeoutMs(tier.connectionSettings());
-            if (tierCommitTimeoutMs <= 0) {
-                tierCommitTimeoutMs = CompactionRun.DEFAULT_COMMIT_TIMEOUT_MS;
-            }
-            CompactionRun run = new CompactionRun(
-                    runId, database, tier.name(), scheduledAt, startedAt, endedAt,
-                    tier.frequency().toMillis(), actualGapMs,
-                    before.files(), after.files(), filesRetired, before.bytes(), after.bytes(),
-                    tier.maxCompactedFiles(),
-                    merge != null ? merge.filesProcessed() : null,
-                    merge != null ? merge.filesCreated() : null,
-                    Duration.between(startedAt, endedAt).toMillis(),
-                    merge != null ? merge.durationMergeMs() : -1,
-                    outcome, failureClass, errorMessage,
-                    ResourceSampler.rssPeakBytes(),
-                    ResourceSampler.dirSizeBytes(tempDir),
-                    ResourceSampler.memoryLimitBytes(tier.connectionSettings()),
-                    tierCommitTimeoutMs);
-            runLog.record(run);
-
-            // Push this cycle's control inputs + derived quantities to the OTLP-exported gauges/counters.
-            // max_compacted_files and tier_frequency are emitted now so making them dynamic later is visible.
-            CompactionRunLog.DerivedAggregates agg =
-                    runLog.aggregates(new CompactionRunLog.Key(database, tier.name()));
-            state.recordOutcome(database, tier.name(), outcome);
-            state.updateTierGauges(database, tier.name(), tier.maxCompactedFiles(), tier.frequency().toMillis(),
-                    agg.drainFilesPerSec(), agg.arrivalFilesPerSec(), agg.saturated(), run.spillPeakBytes());
-            state.updateRssPeak(run.rssPeakBytes());
-        } catch (Exception e) {
-            // Telemetry assembly must never take down a compaction cycle.
-            logger.warn("Failed to record compaction telemetry for {} tier '{}'", database, tier.name(), e);
+    private List<String> tierAlerts(String db, CompactionTier tier, TierLoop loop, CompactionStats.TierStatus status,
+                                    Instant now) {
+        List<String> alerts = new ArrayList<>();
+        String prefix = "%s tier '%s'".formatted(db, tier.name());
+        if ("REFUSED".equals(status.state())) {
+            alerts.add(prefix + " did not start: " + status.refused());
+            return alerts;
         }
+        Instant lastPass = status.lastPass() != null ? status.lastPass() : loop.started();
+        if (lastPass != null && Duration.between(lastPass, now).compareTo(PASS_ALERT_AFTER) > 0) {
+            alerts.add(prefix + " has not completed a pass since " + lastPass);
+        }
+        status.backoffs().forEach(t -> alerts.add("%s backs off %s after %d consecutive failures"
+                .formatted(prefix, t, TierLoop.FAILURES_BEFORE_BACKOFF)));
+        status.starved().forEach(t -> alerts.add(prefix + " may starve partitions of " + t
+                + ": its busy partitions want more slots than its cap"));
+        status.oversized().forEach(t -> alerts.add(prefix + " skips " + t
+                + ": not even two of its files fit in one group within the catalog's idle-in-transaction timeout"
+                + " and the instance's memory_limit"));
+        status.stale().forEach(t -> alerts.add("%s: %s has had a file waiting over %d minutes"
+                .formatted(prefix, t, TierLoop.STALE_AFTER.toMinutes())));
+        if (state.fileCountRising(db, tier.name(), RISING_ALERT_AFTER, now)) {
+            alerts.add("%s: its band's file count rose for %d minutes".formatted(prefix, RISING_ALERT_AFTER.toMinutes()));
+        }
+        return alerts;
     }
 
     void runHousekeeping(String database) {
@@ -296,57 +255,34 @@ public class CompactionService implements Closeable {
         }
     }
 
-    /**
-     * Counts live files and sums their bytes in {@code [minSizeInclusive, maxSizeExclusive)} in one
-     * query — the COUNT the compactor already ran, now with a same-round-trip {@code SUM(file_size_bytes)}
-     * (spec: bytes, not file counts, are the real cost driver). Scoped to the tier's own range so
-     * concurrently-running tiers each measure only their own file-size range.
-     */
-    private ActiveFiles queryActiveFiles(String database, String tierName, long minSizeInclusive, long maxSizeExclusive) {
-        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
-        String sql = ("SELECT COUNT(*) AS total, COALESCE(SUM(file_size_bytes), 0) AS total_bytes "
-                + "FROM %s.ducklake_data_file WHERE end_snapshot IS NULL "
-                + "AND file_size_bytes >= %d AND file_size_bytes < %d")
-                .formatted(mdDatabase, minSizeInclusive, maxSizeExclusive);
-        try (var statement = countingConnectionFor(database, tierName).createStatement()) {
-            statement.execute(sql);
-            try (ResultSet rs = statement.getResultSet()) {
-                return rs.next() ? new ActiveFiles(rs.getLong("total"), rs.getLong("total_bytes")) : ActiveFiles.UNKNOWN;
-            }
-        } catch (Exception e) {
-            logger.warn("Could not read active files for {}", database, e);
-            return ActiveFiles.UNKNOWN;
-        }
-    }
-
-    private static String runKey(String database, String tierName) {
+    private static String loopKey(String database, String tierName) {
         return database.length() + ":" + database + "|" + tierName;
     }
 
-    private Connection countingConnectionFor(String database, String tierName) throws SQLException {
-        String key = runKey(database, tierName);
-        Connection existing = countingConnections.get(key);
+    private Connection countingConnectionFor(String database) throws SQLException {
+        Connection existing = countingConnections.get(database);
         if (existing != null) {
             return existing;
         }
         synchronized (this) {
-            existing = countingConnections.get(key);
+            existing = countingConnections.get(database);
             if (existing != null) {
                 return existing;
             }
-            Connection opened = RawConnections.open(startupScript, List.of());
-            countingConnections.put(key, opened);
+            Connection opened = RawConnections.open(startupScript, MemoryBudget.withDefaultLimit(List.of(),
+                    MemoryBudget.FILE_COUNTS, config.databases().size(), ResourceSampler.totalMemoryBytes()));
+            countingConnections.put(database, opened);
             return opened;
         }
     }
 
     /**
      * Refreshes every configured tier's current-file-count gauge plus the whole-catalog total, on its
-     * own slow schedule using a dedicated connection — never the per-tier counting connections, which
-     * a concurrently-running {@link #runTier} may be using (a JDBC Connection is not concurrency-safe).
+     * own slow schedule and connection, and samples the process's memory.
      */
-    private void refreshFileCounts(String database) {
-        String mdDatabase = "\"__ducklake_metadata_" + database + "\"";
+    void refreshFileCounts(String database) {
+        state.updateProcessMemory(ResourceSampler.rssBytes(), ResourceSampler.containerMemoryLimitBytes());
+        String mdDatabase = Sql.metadataCatalog(database);
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) AS total_files");
         for (CompactionTier tier : config.tiers()) {
             sql.append(", COUNT(*) FILTER (WHERE file_size_bytes >= %d AND file_size_bytes < %d) AS \"%s\""
@@ -354,12 +290,13 @@ public class CompactionService implements Closeable {
         }
         sql.append(" FROM %s.ducklake_data_file WHERE end_snapshot IS NULL".formatted(mdDatabase));
 
-        try (var statement = countingConnectionFor(database, FILE_COUNT_REFRESH_KEY).createStatement()) {
+        try (var statement = countingConnectionFor(database).createStatement()) {
             statement.execute(sql.toString());
             try (ResultSet rs = statement.getResultSet()) {
                 if (rs.next()) {
+                    Instant now = clock.instant();
                     for (CompactionTier tier : config.tiers()) {
-                        state.updateTierFileCount(database, tier.name(), rs.getLong(tier.name()));
+                        state.updateTierFileCount(database, tier.name(), rs.getLong(tier.name()), now);
                     }
                     state.updateTotalFiles(database, rs.getLong("total_files"));
                 }
@@ -371,15 +308,19 @@ public class CompactionService implements Closeable {
 
     @Override
     public void close() {
-        compactionScheduler.shutdown();
+        loops.values().forEach(TierLoop::stop);
         housekeepingScheduler.shutdown();
         try {
-            if (!compactionScheduler.awaitTermination(30, TimeUnit.SECONDS))
-                compactionScheduler.shutdownNow();
-            if (!housekeepingScheduler.awaitTermination(30, TimeUnit.SECONDS))
+            for (TierLoop loop : loops.values()) {
+                if (!loop.join(Duration.ofSeconds(30))) {
+                    logger.warn("Tier '{}' is still in a call after 30 s; closing its connection aborts it",
+                            loop.tier().name());
+                }
+            }
+            if (!housekeepingScheduler.awaitTermination(30, TimeUnit.SECONDS)) {
                 housekeepingScheduler.shutdownNow();
+            }
         } catch (InterruptedException e) {
-            compactionScheduler.shutdownNow();
             housekeepingScheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
