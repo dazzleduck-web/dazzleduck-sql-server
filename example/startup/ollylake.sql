@@ -5,6 +5,9 @@ INSTALL arrow FROM community;
 LOAD arrow;
 INSTALL ducklake;
 LOAD ducklake;
+-- Retry a commit that loses the race for the next snapshot id up to 20 times (default 10), for
+-- several writers and the compactor on one lake.
+SET ducklake_max_retry_count = 20;
 
 -- Attach ollylake catalog
 ATTACH 'ducklake:/workspace/warehouse/metadata/ollylake/metadata.ducklake' AS ollylake (DATA_PATH '/workspace/warehouse/data/ollylake');
