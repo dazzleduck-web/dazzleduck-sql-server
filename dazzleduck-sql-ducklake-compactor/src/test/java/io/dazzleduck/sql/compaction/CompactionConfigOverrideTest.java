@@ -259,6 +259,18 @@ class CompactionConfigOverrideTest {
     }
 
     @Test
+    void housekeepingIsOnByDefaultAndCanBeTurnedOff() throws Exception {
+        // One compactor per catalog runs housekeeping; the servers running the other tiers turn it off.
+        CompactionConfig defaults = resolve(ConfigFactory.parseString(FILE_CONFIG));
+        assertTrue(defaults.housekeepingEnabled(), "unset means on, as before the flag existed");
+
+        CompactionConfig off = resolve(ConfigFactory.parseString(FILE_CONFIG + """
+                housekeeping_enabled = false
+                """));
+        assertFalse(off.housekeepingEnabled());
+    }
+
+    @Test
     void listValuedKeysCannotBeOverriddenAndDatabasesShouldNotBe() throws Exception {
         // Every table value is a string, and HOCON will not widen a string to a LIST — so a
         // list-valued key cannot be set this way. That limit lands in the right place:
