@@ -60,6 +60,7 @@ All settings live under the `dazzleduck_sql_compaction` HOCON root in `applicati
 |-----|---------|-------------|
 | `databases` | `[]` | DuckLake catalog names to compact (must be attached via startup script) |
 | `compaction_tiers` | see below | Compaction tiers, keyed by tier name (see below) |
+| `housekeeping_enabled` | `true` | Runs housekeeping (the delete-file rewrite, snapshot expiry, orphaned-file cleanup) in this process. Exactly one compactor per catalog should: the table lease that keeps the rewrite off a table being merged is in-process, and expiry and cleanup are catalog-wide. With the tiers on separate servers, keep it on the minor server and set `false` on the others. Data retention and the file-count gauges are unaffected |
 | `housekeeping_frequency` | `5 minutes` | How often to expire snapshots and delete orphaned files |
 | `housekeeping_connection_settings` | `[]` | Raw SQL run on housekeeping's connection right after opening it — independent of any tier |
 | `snapshot_retention` | `15 minutes` | Expire snapshots older than this during housekeeping |

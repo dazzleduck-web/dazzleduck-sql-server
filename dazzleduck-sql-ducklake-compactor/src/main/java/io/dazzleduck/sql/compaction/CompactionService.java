@@ -134,8 +134,13 @@ public class CompactionService implements Closeable {
         loops.values().forEach(TierLoop::start);
         long housekeepingSeconds = config.housekeepingFrequency().toSeconds();
         for (String db : config.databases()) {
-            housekeepingScheduler.scheduleWithFixedDelay(
-                    () -> runHousekeeping(db), housekeepingSeconds, housekeepingSeconds, TimeUnit.SECONDS);
+            // One compactor per catalog runs housekeeping: the table lease is in-process, so a
+            // delete-file rewrite here cannot see a merge on another server, and expiry and cleanup
+            // are catalog-wide. Servers running the other tiers turn it off.
+            if (config.housekeepingEnabled()) {
+                housekeepingScheduler.scheduleWithFixedDelay(
+                        () -> runHousekeeping(db), housekeepingSeconds, housekeepingSeconds, TimeUnit.SECONDS);
+            }
             housekeepingScheduler.scheduleWithFixedDelay(
                     () -> refreshFileCounts(db), 0, FILE_COUNT_REFRESH_SECONDS, TimeUnit.SECONDS);
             if (dataRetention != null) {
@@ -150,7 +155,7 @@ public class CompactionService implements Closeable {
         if (overcommit != null) {
             logger.warn(overcommit);
         }
-        logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping every {}s, "
+        logger.info("Compaction service started for {} database(s), {} tier(s) ({}), housekeeping {}, "
                         + "data retention {}",
                 config.databases().size(), config.tiers().size(),
                 config.tiers().stream()
@@ -160,7 +165,7 @@ public class CompactionService implements Closeable {
                                         t.threadsPerCpu(), t.memoryShare())
                                 : t.name() + " (disabled)")
                         .reduce((a, b) -> a + "; " + b).orElse(""),
-                housekeepingSeconds,
+                config.housekeepingEnabled() ? "every " + housekeepingSeconds + "s" : "off",
                 dataRetention != null
                         ? "every %ds from %s".formatted(config.dataRetention().frequency().toSeconds(),
                                 config.dataRetention().policyTable())

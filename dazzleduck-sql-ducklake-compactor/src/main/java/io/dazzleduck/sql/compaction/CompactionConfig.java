@@ -19,6 +19,7 @@ import java.util.Set;
 public record CompactionConfig(
         List<String> databases,
         List<CompactionTier> tiers,
+        boolean housekeepingEnabled,
         Duration housekeepingFrequency,
         Duration snapshotRetention,
         List<String> housekeepingConnectionSettings,
@@ -57,7 +58,7 @@ public record CompactionConfig(
                             Duration snapshotRetention, List<String> housekeepingConnectionSettings,
                             int healthPort, int runHistorySize, boolean rewriteDeletesEnabled,
                             Double rewriteDeleteThreshold, DataRetentionConfig dataRetention) {
-        this(databases, tiers, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
+        this(databases, tiers, true, housekeepingFrequency, snapshotRetention, housekeepingConnectionSettings,
                 healthPort, runHistorySize, rewriteDeletesEnabled, rewriteDeleteThreshold, dataRetention, null, -1);
     }
     private static final String TIERS_KEY = "compaction_tiers";
@@ -82,6 +83,7 @@ public record CompactionConfig(
         return new CompactionConfig(
                 c.getStringList("databases"),
                 tiers,
+                !c.hasPath("housekeeping_enabled") || c.getBoolean("housekeeping_enabled"),
                 c.getDuration("housekeeping_frequency"),
                 c.getDuration("snapshot_retention"),
                 c.getStringList("housekeeping_connection_settings"),

@@ -121,7 +121,9 @@ final class MemoryBudget {
                 perDatabase += footprintBytes(limitOf(tier.connectionSettings(), TIERS * tier.memoryShare(), databases, pool));
             }
         }
-        perDatabase += footprintBytes(limitOf(config.housekeepingConnectionSettings(), HOUSEKEEPING, databases, pool));
+        if (config.housekeepingEnabled()) {
+            perDatabase += footprintBytes(limitOf(config.housekeepingConnectionSettings(), HOUSEKEEPING, databases, pool));
+        }
         if (config.dataRetention().enabled()) {
             perDatabase += footprintBytes(limitOf(config.dataRetention().connectionSettings(), RETENTION, databases, pool));
         }
